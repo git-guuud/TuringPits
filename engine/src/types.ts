@@ -1,35 +1,68 @@
-/** Shared types for the deterministic match engine. */
+/** Shared types for the deterministic Mafia moderator. */
 
-/** A single agent: a pure, deterministic chess move-selection policy. */
-export interface Agent {
-  /** Stable identifier, used in PGN headers and storage. */
-  readonly id: string;
-  /**
-   * Select a move given the current position and a deterministic PRNG.
-   * MUST be pure: no clock, no I/O, no global RNG. All randomness comes from `rng`.
-   *
-   * @param fen     Current position in Forsyth–Edwards Notation.
-   * @param legal   Legal moves in this position (SAN), provided by the engine.
-   * @param rng     Seeded PRNG; the only allowed source of randomness.
-   * @returns the chosen move in SAN, which MUST be one of `legal`.
-   */
-  selectMove(fen: string, legal: readonly string[], rng: () => number): string;
+/** Role assigned to a seat. TOWN, DOCTOR, DETECTIVE are all TOWN-aligned for win purposes. */
+export type Role = "MAFIA" | "DOCTOR" | "DETECTIVE" | "TOWN";
+
+/** The two factions a market can settle on. */
+export type Faction = "MAFIA" | "TOWN";
+
+export type Phase = "night" | "day";
+
+export type Action = "kill" | "save" | "investigate" | "vote";
+
+/**
+ * A structured decision — the constrained payload the TEE signs and the Solidity
+ * state machine consumes. Free-form speech lives elsewhere (not load-bearing).
+ */
+export interface Decision {
+  /** Per-match value binding the decision to one game (cross-game replay resistance). */
+  readonly nonce: string;
+  readonly phase: Phase;
+  /** 1-based round number. */
+  readonly round: number;
+  /** Acting seat index. */
+  readonly player: number;
+  readonly action: Action;
+  /** Target seat index. */
+  readonly target: number;
 }
 
-export type MatchResult = "1-0" | "0-1" | "1/2-1/2";
-
-export interface MatchOutput {
-  /** Canonical PGN of the full game (the battle log). */
-  pgn: string;
-  /** Final result. */
-  result: MatchResult;
-  /** Moves in SAN, in order. */
-  moves: readonly string[];
+/** Per-seat state. */
+export interface PlayerState {
+  readonly id: number;
+  readonly role: Role;
+  readonly alive: boolean;
 }
 
-export interface MatchInput {
-  /** 32-byte hex seed (the revealed secret). Drives the PRNG only. */
-  seed: string;
-  white: Agent;
-  black: Agent;
+/** A detective investigation result, recorded for the transcript/UI (no mechanical effect). */
+export interface Investigation {
+  readonly round: number;
+  readonly detective: number;
+  readonly target: number;
+  readonly faction: Faction;
+}
+
+/**
+ * A single pending action submitted during the currently-open phase, awaiting resolution.
+ */
+export interface PendingAction {
+  readonly player: number;
+  readonly action: Action;
+  readonly target: number;
+}
+
+/**
+ * Full moderator state. Immutable — `applyDecision` returns a new value.
+ */
+export interface GameState {
+  readonly nonce: string;
+  readonly players: readonly PlayerState[];
+  readonly phase: Phase;
+  readonly round: number;
+  /** Actions submitted in the current open phase, not yet resolved. */
+  readonly pending: readonly PendingAction[];
+  /** All detective investigation results so far. */
+  readonly investigations: readonly Investigation[];
+  /** Decided winner, or null while the game is ongoing. */
+  readonly winner: Faction | null;
 }

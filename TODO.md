@@ -31,13 +31,14 @@ will consume. This is the rule spine everything else verifies against.
 - [x] Repo layout exists: `engine/`, `contracts/`, `storage/`, `server/`, `frontend/`.
       (`oracle/` to be removed — settlement is on-chain.)
 - [x] **Game decided: LLM Mafia** (faction-win market for MVP).
-- [ ] Implement the moderator in `engine/`: role assignment from a seed, night/day phase
+- [x] Implement the moderator in `engine/`: role assignment from a seed, night/day phase
       sequencing, legal-move validation, vote tally, death resolution, win detection.
-      Pure function, no LLM, no I/O.
-- [ ] Define the **structured-decision format** (e.g. `{phase, player, action, target}`)
-      and its canonical encoding — this is what the TEE signs and the contract parses.
-- [ ] Remove the `oracle/` package; fold any reusable helpers into `contracts`/tests.
-- [ ] **File `myTasks.md`** now: 0G TEE attestation format, Compute access, Storage
+      Pure function, no LLM, no I/O. (`engine/src/moderator.ts`; 22 passing tests.)
+- [x] Define the **structured-decision format** (`{nonce, phase, round, player, action,
+      target}`) and its canonical encoding (`encodeDecision`, canonical JSON) — what the
+      TEE signs and the contract reconstructs/parses. (`engine/src/encoding.ts`.)
+- [x] Remove the `oracle/` package (stub had no reusable helpers; settlement is on-chain).
+- [x] **File `myTasks.md`** now: 0G TEE attestation format, Compute access, Storage
       credentials, Chain wallet + faucet + RPC. Prompt me to complete these.
 
 **Exit criteria:** Given a fixed seed and a fixed sequence of structured decisions, the

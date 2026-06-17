@@ -8,8 +8,16 @@ structured decisions (see `TODO.md`). Design: `docs/superpowers/specs/2026-06-17
 
 ## Done
 - [x] Monorepo scaffolded (npm workspaces): `engine`, `contracts`, `storage`,
-      `oracle`, `server`, `frontend` — each with package manifest, tsconfig,
-      stub source, and README.
+      `server`, `frontend` — each with package manifest, tsconfig, stub source, README.
+      (`oracle` removed — settlement is on-chain.)
+- [x] **Day 1 — Moderator engine + structured decisions.** `engine/` is the deterministic
+      Mafia moderator: `assignRoles` (seeded Fisher–Yates), `initState`, `applyDecision`
+      (validates + throws on illegal/out-of-order), `winner`, `runMatch`, and
+      `encodeDecision` (canonical-JSON signed bytes). Roles MAFIA/DOCTOR/DETECTIVE/TOWN,
+      night/day sequencing, doctor save, detective record, plurality tallies (tie → no-op),
+      parity/elimination win detection. Pure, zero non-deterministic inputs. 22 vitest
+      tests green (determinism, scripted MAFIA/TOWN matches, all illegal-move classes).
+      Design: `docs/superpowers/specs/2026-06-17-moderator-engine-design.md`.
 - [x] Root tooling: `package.json` workspaces, `tsconfig.base.json`, `.gitignore`,
       `README.md`.
 - [x] **Verified 0G capabilities** against the docs: Compute is AI-inference/fine-tuning
@@ -19,17 +27,15 @@ structured decisions (see `TODO.md`). Design: `docs/superpowers/specs/2026-06-17
 - [x] Design spec written and approved.
 
 ## In progress
-- [ ] Revise scaffold to the Mafia design: repurpose `engine/` as the deterministic
-      moderator, add `players/`, remove `oracle/` (settlement is on-chain).
-- [ ] Implement the moderator + structured-decision format (Day 1).
+- [ ] Day 2 — `players/` abstraction over 0G Compute TEE inference (next session).
 
 ## Pending
-- Days 2–7 per `TODO.md`.
+- Days 2–7 per `TODO.md`. `players/` package not yet created.
 
 ## Mocks / stubs in place
-- All package entrypoints are still the original stubs that **throw** (engine, storage,
-  oracle) or no-op (server, frontend) — none rewritten for Mafia yet.
-- No data is mocked. None of the 0G layers are wired.
+- `engine/` is real (no mocks). `storage` still throws-stub; `server`/`frontend` no-op
+  stubs; `contracts` not yet rewritten for Mafia. None of the 0G layers are wired.
+- No data is mocked. No silent mocks anywhere.
 
 ## Known scope risk
 - Day 5's **on-chain Mafia state machine + TEE-signature verification** is the heaviest
