@@ -1,11 +1,12 @@
 # Status
 
-_Updated: 2026-06-17_
+_Updated: 2026-06-20_
 
 ## Current task
-**AI Mafia** (multiple LLMs playing Mafia). Day 3 — role-assignment commit-reveal +
-live-confirmed TEE attestation format — **complete** (see `TODO.md`). Next: Day 4 (0G
-Storage evidence layer). Design: `docs/superpowers/specs/2026-06-17-ai-mafia-design.md`.
+**AI Mafia** (multiple LLMs playing Mafia). Day 4 — 0G Storage evidence layer —
+**complete** (see `TODO.md`). Next: Day 5 (betting contract + on-chain verifier; blocked on
+`myTasks.md §D` deployer wallet + faucet funds). Design:
+`docs/superpowers/specs/2026-06-17-ai-mafia-design.md`.
 
 ## Done
 - [x] Monorepo scaffolded (npm workspaces): `engine`, `contracts`, `storage`,
@@ -50,44 +51,78 @@ Storage evidence layer). Design: `docs/superpowers/specs/2026-06-17-ai-mafia-des
       never throws (gates settlement on a boolean, like `verifyAttestation`). 11 vitest tests:
       accepts the true reveal, rejects a tampered role / wrong salt / reordered assignment,
       returns false on malformed salt, and round-trips a seeded `assignRoles`. Engine now 33
-      tests green. TEE attestation format was already **confirmed live** (see §A findings) —
-      no engine change needed; the signed-bytes target is the response envelope, not
-      `encodeDecision`, which re-scopes the Day-5 verifier (recorded in `myTasks.md §A`).
+      tests green. TEE attestation format was already **confirmed live** (see "0G integration
+      — confirmed facts" below) — no engine change needed; the signed-bytes target is the
+      response envelope, not `encodeDecision`, which re-scopes the Day-5 verifier.
+
+- [x] **Day 4 — 0G Storage evidence layer.** `storage/` is now real
+      (`@0gfoundation/0g-storage-ts-sdk` v1.2.10). `serializePersonas` / `serializeMatch`
+      produce **canonical** bytes (recursively sorted keys, compact) so identical evidence
+      always yields the same root — content-addressed and auditable. `root(bytes)` derives the
+      0G merkle root locally (offline). `createZeroGStorage({indexerUrl, rpcUrl, privateKey})`
+      uploads via in-memory `MemData` (no temp files, `skipIfFinalized`) and downloads via
+      `downloadToBlob` with merkle-proof verification; the library reads no globals (caller
+      passes `.env`). **Live-confirmed on Galileo testnet** (`storage/src/live.test.ts`,
+      `RUN_LIVE_STORAGE=1`): persona + transcript uploaded, downloaded by root, announced root
+      == locally-derived root, `sha256(download) == sha256(upload)` for both (e.g. transcript
+      root `0xe1a632bab279fbf71d71ca83d2b1908310c4b0905190635097e1db885c02a1da`). Offline
+      suite (serialization + SDK root, 12 tests) stays green with no network/funds; live test
+      skipped by default. Uploads paid by the funded `COMPUTE_PRIVATE_KEY` wallet.
 
 ## In progress
-- [ ] Day 4 — integrate 0G Storage for player prompts + transcript (next session).
-      Gated on `myTasks.md §C` (Storage endpoint/indexer creds).
+- (none — between Day 4 and Day 5)
 
 ## Pending
-- Days 4–7 per `TODO.md`.
+- Day 5 — betting contract + on-chain verifier on 0G Chain. **Blocked** on `myTasks.md §D`
+  (deployer wallet `DEPLOYER_PRIVATE_KEY` still a placeholder + faucet funds).
+- Days 6–7 per `TODO.md`.
+
+## 0G integration — confirmed facts (live, 2026-06-17)
+Durable findings from real testnet calls (`players/scripts/live-turn.mjs`,
+`live-direct.mjs`). Credentials live in `.env`; remaining human setup in `myTasks.md` (§C, §D).
+
+- **Network — 0G Galileo Testnet:** chainId **16602**, EVM RPC `https://evmrpc-testnet.0g.ai`,
+  faucet `https://faucet.0g.ai`. All free testnet 0G, no real funds.
+- **TEE attestation is `ecrecover`-viable.** EIP-191/ECDSA. The signature recovers to the
+  provider's **`teeSignerAddress` `0x83df…08cF`** (from `checkProviderSignerStatus`) — distinct
+  from the **provider account `0xa48f…7836`** (used to address the service in SDK calls). The
+  contract registers/checks the **signer**, not the provider.
+- **Signed bytes are an envelope, NOT our decision text:**
+  `sha256(req):sha256(res):provider_type:provider_identity:tls_fingerprint`, colon-joined,
+  EIP-191-signed. `part[1] = sha256(raw response body)` (confirmed); `part[0] = sha256(request)`
+  is opaque (provider's own serialization). ⇒ Day-5 `settle()` takes the full response body +
+  envelope fields + signature as calldata, recomputes `sha256(body)` (precompile 0x2), rebuilds
+  the envelope, EIP-191-hashes, `ecrecover`s vs the registered signer, then parses the decision
+  out of the body. **`encodeDecision` is therefore not the signed-bytes target.**
+- **Compute access — both paths provisioned & working:** Router (OpenAI-compatible, `sk-` key,
+  returns a `tee_verified` boolean only) and **Direct SDK** (`@0gfoundation/0g-compute-ts-sdk`
+  v0.8.4, funded wallet, returns the raw `{text, signature}` the verifier needs). Direct ledger
+  needs a **3 0G** minimum; per-inference fee negligible (~1.6e13 wei).
+- **Player model `qwen2.5-omni`** — the only TEE chat model on testnet; live-confirmed
+  `tee_verified:true` and emits byte-exact canonical decision strings `parseDecision` accepts.
+- **⚠️ Trust caveat (state honestly in the demo):** the testnet provider's signed metadata is
+  `provider_type:"centralized", provider_identity:"aliyun"` + TLS-cert fingerprint (RA-TLS),
+  not visibly hardware Intel-TDX. The attestation *mechanism* (provider-signed,
+  on-chain-`ecrecover`able) is fully real; the execution guarantee is weaker than "hardware TEE."
 
 ## Mocks / stubs in place
-- `engine/` and the `players/` abstraction are real (no mocks). `storage` still throws-stub;
-  `server`/`frontend` no-op stubs; `contracts` not yet rewritten for Mafia.
-- **`players/` inference — MOCKED, flagged (`# MOCK:` in `provider.ts`).** Live 0G Compute
-  access is unavailable (`myTasks.md §B` not provisioned: no API key, no model chosen), so
-  the e2e match runs on `MockLocalProvider`: a **local** ECDSA/EIP-191 signer. Signatures are
-  **real** (the verification path is genuinely exercised) but the signer is a **local test
-  key, NOT a 0G TEE provider** — `source` is always `"MOCK-local"`, never mistaken for a real
-  attestation. No attestation is faked silently.
-- **`ZeroGComputeProvider` (real Router path) — partially live-confirmed (2026-06-17).**
-  Real calls (`players/scripts/live-turn.mjs`) confirm: inference works, `qwen2.5-omni` is
-  genuinely TEE-attested (`tee_verified:true`, provider `0xa48f…7836`), chatID = `zg-res-key`
-  header, and the live model emits canonical decision strings `parseDecision` accepts.
-  The router gives `tee_verified` but NOT the raw signature; the **Direct SDK** does.
-- **Raw TEE signature path — CONFIRMED live (2026-06-17, `players/scripts/live-direct.mjs`).**
-  Via `@0gfoundation/0g-compute-ts-sdk`: signature `ecrecover`s (EIP-191/ECDSA) to the
-  on-chain `teeSignerAddress` `0x83df…08cF` ⇒ **on-chain verification is viable.** Signed bytes
-  are an envelope `sha256(request):sha256(response):provider_type:provider_identity:tls_fingerprint`
-  (resHash = `sha256(response body)` confirmed) — NOT the raw text, so the Day-5 verifier
-  reconstructs the envelope (SHA-256 precompile + ecrecover); see `myTasks.md §A` "LIVE
-  DIRECT-SDK SIGNATURE". ⚠️ Trust caveat: provider metadata is `centralized:aliyun` (RA-TLS),
-  not visibly hardware-TEE — mechanism real, execution-guarantee weaker than "hardware TEE."
-  The match e2e test still runs on `MockLocalProvider`; wiring the Direct provider into
-  `playMatch` is Day-3/5 work.
+- `engine/`, the `players/` abstraction, and `storage/` are real (no mocks). `storage`
+  upload/download/round-trip is live-confirmed on testnet (see Day 4 above); the sample
+  evidence in its live test carries a `source:"MOCK-local"` attestation only because wiring
+  the live TEE provider into a full match is Day-5 work. `server`/`frontend` no-op stubs;
+  `contracts` not yet rewritten for Mafia.
+- **`players/` match e2e runs on `MockLocalProvider`, flagged (`# MOCK:` in `provider.ts`).**
+  0G Compute access *is* now provisioned and the raw-signature path is live-confirmed (see
+  findings above) — but the end-to-end match still uses a **local** ECDSA/EIP-191 signer.
+  Signatures are **real** (the verification path is genuinely exercised); the signer is a
+  **local test key, not a 0G TEE provider** (`source` = `"MOCK-local"`, never mistaken for a
+  real attestation). No attestation is faked silently. **Wiring the Direct provider into
+  `playMatch` is Day-5 work.**
 
 ## Known scope risk
-- Day 5's **on-chain Mafia state machine + TEE-signature verification** is the heaviest
-  piece. Labeled fallback (verify sigs + commit-reveal on-chain, trust the tally) is queued
-  in `TODO.md` if it can't fully land by Jun 23.
-- Gated on confirming the **0G TEE attestation format** (`myTasks.md` §A).
+- Day 5's **on-chain Mafia state machine + TEE-signature verification** is the heaviest piece.
+  The attestation format is now confirmed (above), and the verifier is **heavier than first
+  scoped** — it reconstructs the response envelope (full body in calldata + SHA-256 precompile
+  + `ecrecover`) rather than hashing the compact decision string. Labeled fallback (verify sigs
+  + commit-reveal on-chain, trust the tally) is queued in `TODO.md` if it can't fully land by
+  Jun 23.

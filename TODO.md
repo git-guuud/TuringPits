@@ -86,7 +86,7 @@ Lock roles against front-running and finalize the inference path. Requires Day-1
       `teeSignerAddress`; signed bytes = envelope
       `sha256(req):sha256(res):provider_type:provider_identity:tls_fingerprint`. The decision
       encoding is **not** the signed-bytes target — the verifier reconstructs the envelope on
-      `responseBody` (SHA-256 precompile + `ecrecover`); Day-5 re-scope recorded in §A.
+      `responseBody` (SHA-256 precompile + `ecrecover`); Day-5 re-scope recorded in `STATUS.md`.
 
 **Exit criteria:** A test proves commit-reveal accepts the true role assignment and rejects
 a tampered one. The signed-bytes format is confirmed compatible with on-chain `ecrecover`
@@ -97,11 +97,18 @@ a tampered one. The signed-bytes format is confirmed compatible with on-chain `e
 ## Day 4 — Jun 20 (Fri): 0G Storage — the Evidence Layer
 Put player prompts and the transcript on real 0G Storage. Requires Day-1 credentials.
 
-- [ ] Integrate 0G Storage SDK. Upload each player's persona/role prompt before a match;
-      get back content identifiers / root hashes.
-- [ ] After a match, upload the full transcript (speech + structured decisions + TEE
-      signatures); retrieve it back by identifier.
-- [ ] Verify round-trip: downloaded bytes hash-equal the uploaded bytes.
+- [x] Integrate 0G Storage SDK (`@0gfoundation/0g-storage-ts-sdk`). Upload each seat's
+      public persona before a match; get back the content root. (`storage/src/zerog-storage.ts`
+      `createZeroGStorage().upload`; in-memory `MemData`, no temp files. `serializePersonas`
+      produces canonical bytes; `root(bytes)` derives the merkle root offline.)
+- [x] After a match, upload the full attested transcript (speech + structured decisions + TEE
+      signatures); retrieve it back by root. (`serializeMatch` + `download` via
+      `downloadToBlob` with merkle-proof verification.)
+- [x] Verify round-trip: downloaded bytes hash-equal the uploaded bytes. Live-confirmed on
+      0G Storage Galileo testnet (`storage/src/live.test.ts`, guarded by `RUN_LIVE_STORAGE=1`):
+      announced root == locally-derived root, and `sha256` of the downloaded bytes equals the
+      uploaded bytes for both artifacts. Offline suite (serialization + SDK root) stays green
+      with no network/funds.
 
 **Exit criteria:** Player prompts and a transcript are uploaded to 0G Storage and retrieved
 by identifier in a test, with a hash check confirming immutability. If credentials aren't
