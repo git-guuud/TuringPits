@@ -74,11 +74,19 @@ the inference call `# MOCK:` and flag it — do not fake attestations silently.
 ## Day 3 — Jun 19 (Thu): commit-reveal + 0G Compute hardening
 Lock roles against front-running and finalize the inference path. Requires Day-1 creds.
 
-- [ ] Implement commit-reveal for the **role assignment**: assign roles from a secret seed
+- [x] Implement commit-reveal for the **role assignment**: assign roles from a secret seed
       → `hash(roles + salt)` commit; reveal + verify path confirming `hash(reveal) == commit`.
-- [ ] Confirm the live TEE attestation format matches `myTasks.md` §A (scheme = ECDSA,
-      exact signed bytes, provider key publication). Adjust the decision encoding if needed
-      so the signed bytes are reconstructible on-chain.
+      (`engine/src/commit.ts`: `commitRoles`/`verifyRoleReveal`/`generateSalt`/
+      `roleCommitPreimage`. Commit = `sha256(abi.encodePacked(uint8[] roles, bytes32 salt))`
+      — role enums packed in seat order + 32-byte salt, reconstructed on-chain via the
+      SHA-256 precompile; 11 tests green. The secret seed is never revealed — only roles+salt.)
+- [x] Confirm the live TEE attestation format matches `myTasks.md` §A (scheme = ECDSA,
+      exact signed bytes, provider key publication). **CONFIRMED LIVE** (Direct SDK,
+      `players/scripts/live-direct.mjs`): EIP-191/ECDSA sig `ecrecover`s to the on-chain
+      `teeSignerAddress`; signed bytes = envelope
+      `sha256(req):sha256(res):provider_type:provider_identity:tls_fingerprint`. The decision
+      encoding is **not** the signed-bytes target — the verifier reconstructs the envelope on
+      `responseBody` (SHA-256 precompile + `ecrecover`); Day-5 re-scope recorded in §A.
 
 **Exit criteria:** A test proves commit-reveal accepts the true role assignment and rejects
 a tampered one. The signed-bytes format is confirmed compatible with on-chain `ecrecover`

@@ -3,9 +3,9 @@
 _Updated: 2026-06-17_
 
 ## Current task
-**AI Mafia** (multiple LLMs playing Mafia). Day 2 — `players/` abstraction over 0G Compute
-TEE inference — **complete** (see `TODO.md`). Next: Day 3 (commit-reveal + confirm the live
-TEE attestation format). Design: `docs/superpowers/specs/2026-06-17-ai-mafia-design.md`.
+**AI Mafia** (multiple LLMs playing Mafia). Day 3 — role-assignment commit-reveal +
+live-confirmed TEE attestation format — **complete** (see `TODO.md`). Next: Day 4 (0G
+Storage evidence layer). Design: `docs/superpowers/specs/2026-06-17-ai-mafia-design.md`.
 
 ## Done
 - [x] Monorepo scaffolded (npm workspaces): `engine`, `contracts`, `storage`,
@@ -40,12 +40,26 @@ TEE attestation format). Design: `docs/superpowers/specs/2026-06-17-ai-mafia-des
       output. Real `ZeroGComputeProvider` (Router + `verify_tee`) is written but **unexercised
       pending §B creds** — see Mocks below.
 
+- [x] **Day 3 — role-assignment commit-reveal + confirmed TEE attestation format.**
+      `engine/src/commit.ts`: `commitRoles`/`verifyRoleReveal`/`generateSalt`/
+      `roleCommitPreimage`. Commit = `sha256(abi.encodePacked(uint8[] roles, bytes32 salt))`
+      (role enums MAFIA=0/DOCTOR=1/DETECTIVE=2/TOWN=3, packed in seat order, then the 32-byte
+      salt) — reconstructed on-chain by the SHA-256 precompile the §A verifier already uses,
+      so no new on-chain primitive. The server commits before betting and reveals only
+      `(roles, salt)` at settlement; the secret seed is never disclosed. `verifyRoleReveal`
+      never throws (gates settlement on a boolean, like `verifyAttestation`). 11 vitest tests:
+      accepts the true reveal, rejects a tampered role / wrong salt / reordered assignment,
+      returns false on malformed salt, and round-trips a seeded `assignRoles`. Engine now 33
+      tests green. TEE attestation format was already **confirmed live** (see §A findings) —
+      no engine change needed; the signed-bytes target is the response envelope, not
+      `encodeDecision`, which re-scopes the Day-5 verifier (recorded in `myTasks.md §A`).
+
 ## In progress
-- [ ] Day 3 — commit-reveal for role assignment + confirm the live TEE attestation format
-      against `myTasks.md §A` (next session).
+- [ ] Day 4 — integrate 0G Storage for player prompts + transcript (next session).
+      Gated on `myTasks.md §C` (Storage endpoint/indexer creds).
 
 ## Pending
-- Days 3–7 per `TODO.md`.
+- Days 4–7 per `TODO.md`.
 
 ## Mocks / stubs in place
 - `engine/` and the `players/` abstraction are real (no mocks). `storage` still throws-stub;
