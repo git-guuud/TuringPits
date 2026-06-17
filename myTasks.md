@@ -13,14 +13,11 @@ changes the Day-3 / Day-5 plan; details under Findings §A.
 - [x] **TEE attestation signature scheme** — **EIP-191 `personal_sign`** (Ethereum
       secp256k1/ECDSA). Solidity `ecrecover` works **as long as we re-apply the EIP-191
       prefix** (`\x19Ethereum Signed Message:\n<len>` + text) before hashing. ✅
-- [x] **Exactly what bytes the TEE signs** — the **model response *text*** (the output
-      string), **not** our `{nonce,phase,round,player,action,target}` payload. Fetched via
-      `GET {providerUrl}/v1/proxy/signature/{chatID}?model={model}` → `{text, signature}`.
-      ⚠️ **Design impact:** the contract must reconstruct the exact signed *text* bytes to
-      verify. To keep on-chain reconstruction small/cheap, the **decision** should be its
-      own constrained inference whose *entire* output IS the canonical decision string
-      (separate from the free-form speech call). Otherwise take the §6 fallback (verify the
-      sig over the text on-chain, parse the decision off-chain, label `// MOCK:`).
+- [x] **Exactly what bytes the TEE signs** — ⚠️ **SUPERSEDED by the live run below.** The
+      docs implied "the model response text"; the *actual* signed payload is a colon-joined
+      **envelope** `sha256(request):sha256(response):provider_type:provider_identity:tls_fingerprint`,
+      NOT the raw text and NOT our decision payload. See "LIVE DIRECT-SDK SIGNATURE" below for
+      the confirmed format and its on-chain-verifier impact.
 - [x] **How the provider key/address is published** — the provider's **`teeSignerAddress`**
       is read from the **on-chain service record** for that provider; the inference call
       also returns the provider address in `x_0g_trace.provider` (e.g.
@@ -49,6 +46,46 @@ Verified by `players/scripts/live-turn.mjs` against `qwen2.5-omni` (provider `0x
   **Day-3 task:** stand up the Direct broker, fetch a real `{text, signature}`, and confirm it
   `ecrecover`s to the registered signer. If the Direct sig can't land, Day 5 takes the §6
   fallback (trust the router's `tee_verified`, labeled `// MOCK:`/downgraded).
+
+### ✅ LIVE DIRECT-SDK SIGNATURE (2026-06-17) — `players/scripts/live-direct.mjs`
+Direct SDK end-to-end against provider `0xa48f…7836` / model `qwen/qwen2.5-omni-7b`. **Raw
+signature obtained and on-chain-style verification CONFIRMED.** This de-risks the Day-5 verifier.
+
+- ✅ **`ecrecover` works.** Signature (`signing_algo: ecdsa`, EIP-191) recovers to
+  **`0x83df4B8EbA7c0B3B740019b8c9a77ffF77D508cF`** = the on-chain `teeSignerAddress` from
+  `broker.inference.checkProviderSignerStatus(provider)`. ⇒ Solidity `ecrecover` is viable.
+- ⚠️ **TWO addresses — don't confuse them.** The **provider account** `0xa48f…7836` addresses
+  the service in SDK calls; the **TEE signer** `0x83df…08cF` is what the signature recovers to
+  and what the **contract must register / `ecrecover` against**. (Earlier we wrongly assumed
+  `TEE_PROVIDER_ADDRESS` = the ecrecover target; it's the *provider*, not the *signer*.)
+- ✅ **Confirmed signed-bytes format.** `text` =
+  `<reqHash>:<resHash>:<provider_type>:<provider_identity>:<tls_cert_fingerprint>`, all colon-joined,
+  EIP-191-signed. Verified live: **`resHash` (part[1]) = `sha256(raw response body)`** (matched,
+  and tracked the response across runs). `reqHash` (part[0]) = `sha256(request)` in the
+  provider's own serialization (constant across identical requests; not reproducible from a
+  naive body re-serialization — treat as opaque). Example:
+  `f4c1aa68…:d05130b9…:centralized:aliyun:9e621feb…`.
+- 🔧 **On-chain verifier (Day 5) design — UPDATED from this:** the sig binds the **response
+  hash**, not the literal decision text. So `settle()` per decision:
+  1. take the full **response body** + `reqHash` + `provider_type` + `provider_identity` +
+     `tls_cert_fingerprint` + `signature` as calldata;
+  2. recompute `sha256(responseBody)` on-chain (SHA-256 precompile) ⇒ must equal part[1];
+  3. rebuild the envelope string, EIP-191-hash, `ecrecover` ⇒ must equal registered signer;
+  4. parse the canonical decision out of `responseBody` and check it against moderator rules.
+  Heavier than "hash the decision string" (full response in calldata + sha256/decision), but
+  tractable for ~20–40 decisions. The §3 "decision-only inference" still helps by keeping the
+  response body tiny. (`encodeDecision` is no longer the signed-bytes target — re-scope Day-5.)
+- ⚠️ **TRUST CAVEAT — flagged honestly.** The signed metadata says **`provider_type:
+  "centralized", provider_identity: "aliyun"`** with a TLS cert fingerprint — i.e. this testnet
+  provider attests via a **centralized signer + RA-TLS**, not (visibly) hardware Intel-TDX,
+  even though the router reports `tee_verified:true` (dstack). The *mechanism* we build on
+  (provider-signed, on-chain-`ecrecover`able attestation) is fully real; the **strength** of
+  the underlying execution guarantee on this testnet provider is weaker than "hardware TEE."
+  Note this in the demo's trust story rather than overclaiming "hardware TEE."
+- 💰 **Cost:** ledger created with **3 0G** (SDK minimum), **1 0G** auto-locked to the provider
+  sub-account; per-inference fee ~1.6e13 wei (negligible). A full ~40-decision match fits easily.
+- 🔧 **Register for Day-5 / `.env`:** `TEE_SIGNER_ADDRESS=0x83df4B8EbA7c0B3B740019b8c9a77ffF77D508cF`
+  (ecrecover target), distinct from `TEE_PROVIDER_ADDRESS=0xa48f…7836` (SDK provider id).
 
 ## §B. Blocks Day 2–3 (0G Compute TEE players)
 
@@ -81,6 +118,20 @@ What's left is account setup + funds (human-only).
 > faucet-funded deposit) and gives `processResponse()` verification. The **Router**
 > (`pc.0g.ai`) deposit-with-faucet-tokens path is **not definitively documented** — if it
 > balks, pivot to Direct (our `InferenceProvider` interface already supports both).
+
+### 🚧 LIVE DIRECT-SDK RUN (2026-06-17) — `players/scripts/live-direct.mjs`
+Broker wires up correctly: `createZGComputeNetworkBroker(wallet)` detects testnet (chain
+16602), reaches ledger creation. **Blocked on funds, not code:**
+- [ ] **HUMAN: fund `COMPUTE_PRIVATE_KEY` wallet with ≥ ~3.1 0G.** The SDK enforces a hard
+      **3 0G minimum** to create the Direct ledger (`broker.ledger.addLedger(3)`), + gas.
+      Wallet `0xCDa8102a5eD9cbF154295D2ef62ea4AFFF47F134` currently holds **0.6 0G** — short.
+      ⚠️ The web faucet drip is small; reaching 3 0G likely needs the **0G Discord faucet** or
+      repeated/larger claims. Once funded, re-run the script — steps 3–8 fetch the raw
+      `{text, signature}` via `getChatSignatureDownloadLink` and `ecrecover` it (the on-chain
+      path). This is the LAST gate before the Day-5 verifier is provably viable.
+- [ ] **FIX `.env`:** `ZEROG_RPC_URL` is set to `https://pc.testnet.0g.ai` (the **portal**) —
+      the broker needs the **EVM RPC `https://evmrpc-testnet.0g.ai`**. The script hardcodes the
+      correct RPC for now; update `.env` so the real provider class uses it.
 
 > **Direct SDK package (confirmed against npm 2026-06-17):**
 > **`@0gfoundation/0g-compute-ts-sdk`** (latest `0.8.4`, exports

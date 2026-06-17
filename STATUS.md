@@ -60,12 +60,17 @@ TEE attestation format). Design: `docs/superpowers/specs/2026-06-17-ai-mafia-des
   Real calls (`players/scripts/live-turn.mjs`) confirm: inference works, `qwen2.5-omni` is
   genuinely TEE-attested (`tee_verified:true`, provider `0xa48f…7836`), chatID = `zg-res-key`
   header, and the live model emits canonical decision strings `parseDecision` accepts.
-  **Open blocker:** the configured testnet router exposes no `/v1/proxy/signature` endpoint
-  (all shapes 404), so it yields a `tee_verified` boolean but NOT the raw `{text, signature}`
-  our on-chain `ecrecover` needs. Raw signatures require the Direct SDK
-  (`broker.inference.processResponse`, funded wallet) — Day-3 task; see `myTasks.md §A`
-  "LIVE CONFIRMATION". The match e2e test still runs on `MockLocalProvider` until the Direct
-  signature path lands.
+  The router gives `tee_verified` but NOT the raw signature; the **Direct SDK** does.
+- **Raw TEE signature path — CONFIRMED live (2026-06-17, `players/scripts/live-direct.mjs`).**
+  Via `@0gfoundation/0g-compute-ts-sdk`: signature `ecrecover`s (EIP-191/ECDSA) to the
+  on-chain `teeSignerAddress` `0x83df…08cF` ⇒ **on-chain verification is viable.** Signed bytes
+  are an envelope `sha256(request):sha256(response):provider_type:provider_identity:tls_fingerprint`
+  (resHash = `sha256(response body)` confirmed) — NOT the raw text, so the Day-5 verifier
+  reconstructs the envelope (SHA-256 precompile + ecrecover); see `myTasks.md §A` "LIVE
+  DIRECT-SDK SIGNATURE". ⚠️ Trust caveat: provider metadata is `centralized:aliyun` (RA-TLS),
+  not visibly hardware-TEE — mechanism real, execution-guarantee weaker than "hardware TEE."
+  The match e2e test still runs on `MockLocalProvider`; wiring the Direct provider into
+  `playMatch` is Day-3/5 work.
 
 ## Known scope risk
 - Day 5's **on-chain Mafia state machine + TEE-signature verification** is the heaviest
