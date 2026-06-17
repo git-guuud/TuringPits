@@ -1,0 +1,22 @@
+{
+  "name": "turingpits",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Turing Pits — gamified AI vs. AI prediction market on the 0G network",
+  "workspaces": [
+    "engine",
+    "contracts",
+    "storage",
+    "oracle",
+    "server",
+    "frontend"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

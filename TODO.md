@@ -26,13 +26,13 @@ Stand up the repo structure and the 100%-deterministic match engine. This is the
 spine everything else verifies against, so determinism is the only thing that matters
 today.
 
-- [ ] Initialize repo layout: `engine/`, `contracts/`, `storage/`, `oracle/`,
+- [x] Initialize repo layout: `engine/`, `contracts/`, `storage/`, `oracle/`,
       `frontend/`, `server/`. Add `git init`, README stubs, package manifests.
-- [ ] Pick the game format (recommend: a simple, fully-deterministic format with a
-      small move set — e.g. a constrained chess variant or a deterministic grid
-      duel — so 0G Compute can re-run it instantly with no external calls).
+- [x] **Game format: full chess** (decided). PGN battle log falls out naturally; 0G
+      Compute can re-run a chess game instantly with no external calls.
 - [ ] Implement the engine: `seed + agentA + agentB -> sequence of moves -> winner`.
       No wall-clock, no RNG except the seeded PRNG, no I/O. Pure function.
+      Output is canonical PGN. (Seed feeds tie-breaking / agent randomness only.)
 - [ ] Define two simple baseline agent scripts (deterministic policies).
 - [ ] **File `myTasks.md`** now: 0G testnet wallet + faucet funds, RPC endpoint,
       0G Storage credentials, 0G Compute access. Prompt me to complete these.

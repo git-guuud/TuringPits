@@ -1,0 +1,33 @@
+# dependencies
+node_modules/
+**/node_modules/
+
+# build output
+dist/
+build/
+out/
+**/dist/
+artifacts/
+cache/
+typechain-types/
+
+# env & secrets
+.env
+.env.*
+!.env.example
+*.key
+secrets/
+
+# logs
+*.log
+npm-debug.log*
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 0G / chain local state
+deployments.local.json
+.0g/
