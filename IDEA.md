@@ -1,124 +1,123 @@
-# Turing Pits: Gamified AI vs. AI Prediction Market
+# Turing Pits: Gamified AI Mafia Prediction Market
 
 ## Overview
 
-Turing Pits is a decentralized, highly visual prediction market where users place live bets on the outcomes of autonomous AI agents battling in 100% deterministic environments. Instead of betting on dry real-world events, the platform provides a gamified, live-streaming spectacle driven by a "Bring Your Own Agent" (BYOA) model. The protocol operates as an "Optimistic Game Engine," combining the buttery-smooth user experience of a centralized Web2 live stream with the trustless, verifiable cryptographic security of the 0G network.
+Turing Pits is a decentralized, highly visual prediction market where users place live
+bets on the outcome of **multiple LLMs playing Mafia** (social deduction). Instead of
+betting on dry real-world events, the platform provides a gamified, live-streaming
+spectacle: a hidden Mafia minority of AI agents schemes against an uninformed Town
+majority, debating and voting each other out round by round, while spectators bet on who
+prevails. The protocol operates as an "Optimistic Game Engine," combining the
+buttery-smooth experience of a Web2 live stream with the trustless, verifiable
+cryptographic security of the 0G network.
+
+The trust anchor is **TEE-attested inference**: every AI player's decision is generated
+inside 0G Compute's Trusted Execution Environment, which signs the result. Because the
+inference *is* the game, 0G Compute does exactly what it is built for — and the signature
+on each move is what makes the live stream impossible to rig.
 
 ## Strategic Alignment: The Zero Cup Meta
 
-This project is engineered specifically to win the 0G Zero Cup by targeting both phases of the tournament:
+This project targets both phases of the 0G Zero Cup:
 
-* 
-**The Judge Phase (Early Rounds):** Evaluators look for complex, native integration of decentralized infrastructure. This architecture uses massive verifiable computation to prove 0G is doing real work, preventing the app from being disqualified as a centralized "bolt-on".
+* **The Judge Phase (Early Rounds):** Evaluators look for complex, native integration of
+  decentralized infrastructure. Every 0G layer here does real work for a real reason —
+  Compute runs the AI players under TEE attestation, Chain verifies those attestations and
+  settles trustlessly, Storage immutably holds the evidence — so the app cannot be
+  dismissed as a centralized "bolt-on."
 
-
-* 
-**The Community Phase (Late Rounds):** From the Quarter-Finals onward, outcomes are decided entirely by public voting. By wrapping the heavy decentralized compute in a fast-paced, gamified visual spectacle, the protocol ships something the public actually wants to watch and vote for.
-
-
+* **The Community Phase (Late Rounds):** From the Quarter-Finals onward, outcomes are
+  decided by public voting. LLMs lying, accusing, and voting each other out is inherently
+  watchable; wrapping the verifiable compute in that drama ships something the public
+  actually wants to watch and vote for.
 
 ---
 
 ## Core System Architecture
 
-### 1. The Live Arena (Off-Chain Execution & UI)
+### 1. The Live Arena (Off-Chain Orchestration & UI)
 
-* The platform utilizes a traditional Web2 server functioning as the Sequencer to run the deterministic game logic locally.
+* A Web2 server acts as the **Sequencer**: it drives the deterministic moderator loop and,
+  on each turn, calls 0G Compute to get the active player's decision.
 
+* The moderator (pure rule engine) sequences night/day phases, validates moves, tallies
+  votes, resolves deaths, and detects the win condition. It is **not** an LLM — only the
+  *player decisions* are AI.
 
-* The Sequencer pulls the two competing, public AI agent scripts and the mathematically locked game seed to simulate the match.
-
-
-* To create a suspenseful viewing experience, the server uses WebSockets to stream the calculated moves directly to the frontend UI at a locked pace of 1 move per second.
-
-
+* The server streams each turn to the frontend over WebSockets at a locked, suspenseful
+  pace (~1 turn/second): player speech, accusations, night kills, and vote results.
 
 ### 2. The Market Ledger (0G Chain)
 
-* An Automated Market Maker (AMM) is deployed on 0G Chain to serve as the decentralized ledger.
+* A betting contract on 0G Chain serves as the decentralized ledger.
 
+* **MVP market: faction win** — a binary YES/NO market on whether Mafia wins. The contract
+  is structured so additional markets (e.g. a specific agent surviving to the end) can be
+  attached to the same match later.
 
-* Bettors can buy and sell YES/NO prediction shares continuously while the live match is streaming.
-
-
-* A Slashing Contract holds a locked crypto bond provided by the tournament host to secure the integrity of the off-chain execution.
-
-
+* Bettors buy YES/NO shares while betting is open; betting then locks before the match runs.
 
 ### 3. The Evidence Layer (0G Storage)
 
-* Before any match begins, the Python or JavaScript code for the competing AI agents is uploaded and locked immutably on 0G Storage.
+* Before any match begins, each player's persona/role prompt is uploaded and locked
+  immutably on 0G Storage, so the inputs that produced the game are fixed and auditable.
 
+* After the stream ends, the server commits the full transcript — free-form speech, the
+  structured decisions, and every TEE signature — to 0G Storage for public audit.
 
-* Because the agents are locked before betting opens, no secret malicious logic can be injected mid-game.
+### 4. The Settlement Verifier (0G Compute + 0G Chain)
 
+0G Compute and 0G Chain split the work that a single "oracle" cannot do alone:
 
-* Immediately after the live stream ends, the server commits the final, complete text-based battle log (e.g., a PGN file for chess) to 0G Storage.
+* **0G Compute** produces the trust: every player decision is generated inside a TEE, which
+  returns the output plus a provider-signed attestation binding `model + prompt → output`.
+  The server cannot fabricate or alter a move.
 
+* **0G Chain** consumes the trust: settlement is **fully on-chain**. To settle, the server
+  submits the ordered structured decisions, their TEE signatures, and the revealed role
+  assignment. The contract verifies each signature (`ecrecover`) against the registered
+  provider key, checks the role reveal against the pre-betting commit, runs Mafia's rules
+  in Solidity to compute the winning faction, and pays the winners.
 
+* A forged, missing, or out-of-order decision fails verification and **settlement reverts** —
+  nobody is paid on a rigged game.
 
-### 4. The Settlement Oracle (0G Compute)
-
-* 0G Compute acts as the automated oracle to cryptographically verify the off-chain game's outcome.
-
-
-* It pulls the static PGN log file, the Agent Scripts, and the Revealed Seed directly from 0G Storage.
-
-
-* The compute node spins up a pure-logic, 100% deterministic script to re-run the match in an isolated environment without any external API calls.
-
-
-* If the independently generated move hashes perfectly match the submitted battle log hashes, 0G Compute generates a valid cryptographic signature.
-
-
-* This signature is pushed to 0G Chain, proving the off-chain stream was honest and unlocking the smart contract escrow to pay the winning bettors.
-
-
+> Note: the original design routed settlement through 0G Compute re-running an arbitrary
+> deterministic script. Verification against the 0G docs showed Compute is strictly for AI
+> inference / fine-tuning / training, not general code execution — so that path is not
+> possible. On-chain verification of TEE-attested moves replaces it.
 
 ---
 
 ## Security & Anti-Manipulation Mechanics
 
-### The Seed Fix: Commit-Reveal Scheme
+### The Hidden-Role Fix: Commit-Reveal
 
-If players know the outcome of a deterministic game beforehand, the betting market breaks.
+If bettors knew who the Mafia are, faction-win betting would be heavily skewed; and a
+server that assigned roles after seeing the betting flow could manipulate outcomes.
 
-* 
-**The Commit:** The server generates a true random Secret Seed, hashes it cryptographically, and submits only the hash to the 0G Chain smart contract before betting opens.
+* **The Commit:** the moderator assigns roles from a secret seed; the server submits
+  `hash(role assignment + salt)` to the contract before betting opens.
 
+* **The Bets:** the community bets while roles remain hidden.
 
-* 
-**The Bets:** The community places bets while it remains mathematically impossible to reverse-engineer the seed from the hash.
+* **The Reveal:** at settlement, the server reveals the role assignment and salt; the
+  contract verifies it matches the commit before using the roles. This binds the server to
+  a role assignment fixed *before* betting.
 
+### The Failsafe: TEE-Gated Settlement
 
-* 
-**The Reveal:** Once betting locks, the server reveals the actual Secret Seed to the contract for verification.
+If the Sequencer tries to rig the stream (force a player to make a move it never produced),
+that move will lack a valid TEE signature.
 
+* On-chain verification rejects any move whose signature fails to recover the registered
+  provider key.
 
-* 
-**The Lock:** This verified seed is locked in as the official variable to generate the game arena.
+* With a move missing or forged, the Mafia state machine cannot reach a verified outcome,
+  so `settle()` reverts and no payout occurs on a rigged game.
 
-
-
-### The Failsafe: Slippage Subsidization & Slashing
-
-If the Web2 Sequencer attempts to rig the live stream (e.g., forcing an agent to make a bad move), the submitted battle log will diverge from the deterministic output of the agents' code.
-
-* 0G Compute will detect the divergence, fail the cryptographic proof, and refuse to sign the transaction.
-
-
-* The escrow remains locked and the rigged bets are canceled.
-
-
-* The smart contract automatically confiscates the malicious host's locked crypto bond.
-
-
-* The smart contract unlocks the escrow to refund the base collateral to the current token holders.
-
-
-* The confiscated host bond is automatically distributed to token holders to subsidize any secondary market slippage, forcing the cheating host to pay for the market disruption.
-
-
+* (Future) A host bond can be slashed and redistributed to bettors when settlement fails
+  due to a rigging attempt.
 
 ---
 
@@ -126,19 +125,18 @@ If the Web2 Sequencer attempts to rig the live stream (e.g., forcing an agent to
 
 ### June 23 Milestone: "Proof of Battle" MVP
 
-The first code lock snapshot requires a working baseline to avoid disqualification.
+The first code-lock snapshot requires a working baseline:
 
-* 
-**Game Format:** A 100% deterministic script that 0G Compute can run instantly to declare a winner.
+* **Game:** LLM Mafia driven by a deterministic moderator, with each player decision a
+  TEE-attested 0G Compute inference.
 
+* **Escrow:** the binary faction-win betting contract deployed on 0G Chain, with
+  commit-reveal and on-chain TEE-signature verification.
 
-* 
-**Escrow:** Deploy the basic betting smart contract on 0G Chain.
+* **Evidence:** player prompts locked on 0G Storage before the match; full transcript and
+  signatures stored after.
 
+* **Demo:** a clean frontend where judges watch a Mafia match stream turn-by-turn, place a
+  bet, and see the contract verify the TEE-attested moves and pay out the winning side.
 
-* 
-**Evidence:** Host the competing Python/JS AI scripts and the battle log immutably on 0G Storage.
-
-
-* 
-**Demo:** Provide a clean frontend where judges can watch a basic simulation run and see the smart contract pay out the winner.
+> Detailed design: `docs/superpowers/specs/2026-06-17-ai-mafia-design.md`.
