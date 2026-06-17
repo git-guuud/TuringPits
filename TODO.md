@@ -51,14 +51,18 @@ Illegal/out-of-order decisions are rejected. Moderator has zero non-deterministi
 Make the LLM players real and attested. Each turn returns free-form speech plus a signed
 structured decision.
 
-- [ ] Implement the `players/` abstraction: build the prompt (role + persona + visible
+- [x] Implement the `players/` abstraction: build the prompt (role + persona + visible
       state), call **0G Compute TEE inference**, parse output into
       `{speech, structuredDecision, attestation}`. Same model for all seats now; one
       interface so each seat can become a distinct model/provider later (BYOM-ready).
-- [ ] Drive a full match from the Day-1 moderator using real player calls; capture the
-      transcript (speech + decisions + signatures).
-- [ ] Validate each attestation locally (signature recovers the provider key over the
+      (`players/`: `InferenceProvider`, `Player.takeTurn`, `ZeroGComputeProvider` (real,
+      untested pending §B), `MockLocalProvider` (`# MOCK:`).)
+- [x] Drive a full match from the Day-1 moderator using real player calls; capture the
+      transcript (speech + decisions + signatures). (`players/src/match.ts` `playMatch`.)
+- [x] Validate each attestation locally (signature recovers the provider key over the
       signed bytes) — the same check the contract will do on-chain.
+      (`verifyAttestation`, EIP-191 `ecrecover`; 25 tests green. **On mock signer** — live
+      TEE attestation gated on `myTasks.md §B`.)
 
 **Exit criteria:** A test runs a full Mafia match end-to-end with TEE-attested player
 decisions, every decision carries a valid attestation that verifies locally, and the

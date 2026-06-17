@@ -3,8 +3,9 @@
 _Updated: 2026-06-17_
 
 ## Current task
-Pivoted to **AI Mafia** (multiple LLMs playing Mafia). Day 1 — moderator engine +
-structured decisions (see `TODO.md`). Design: `docs/superpowers/specs/2026-06-17-ai-mafia-design.md`.
+**AI Mafia** (multiple LLMs playing Mafia). Day 2 — `players/` abstraction over 0G Compute
+TEE inference — **complete** (see `TODO.md`). Next: Day 3 (commit-reveal + confirm the live
+TEE attestation format). Design: `docs/superpowers/specs/2026-06-17-ai-mafia-design.md`.
 
 ## Done
 - [x] Monorepo scaffolded (npm workspaces): `engine`, `contracts`, `storage`,
@@ -26,16 +27,45 @@ structured decisions (see `TODO.md`). Design: `docs/superpowers/specs/2026-06-17
       fully on-chain (verify TEE sigs + Mafia rules in Solidity). Faction-win market for MVP.
 - [x] Design spec written and approved.
 
+- [x] **Day 2 — `players/` abstraction over 0G Compute TEE inference.** New `players/`
+      workspace. One `InferenceProvider` interface (BYOM-ready: each seat holds its own
+      provider). `Player.takeTurn` produces the two-layer turn — free-form `speech` + a
+      constrained decision inference whose *entire* output IS the canonical decision string
+      (`encodeDecision`), so the attestation binds the exact bytes the contract reconstructs
+      (`myTasks.md §A`). `verifyAttestation` is the real, reusable EIP-191 `ecrecover` check
+      the Day-5 contract mirrors. `playMatch` drives the Day-1 moderator with real player
+      calls and captures the attested transcript. 25 vitest tests green: a full match runs
+      end-to-end, every decision attestation verifies locally, the captured decisions replay
+      through the pure moderator to the same winner, and parse rejects illegal/non-canonical
+      output. Real `ZeroGComputeProvider` (Router + `verify_tee`) is written but **unexercised
+      pending §B creds** — see Mocks below.
+
 ## In progress
-- [ ] Day 2 — `players/` abstraction over 0G Compute TEE inference (next session).
+- [ ] Day 3 — commit-reveal for role assignment + confirm the live TEE attestation format
+      against `myTasks.md §A` (next session).
 
 ## Pending
-- Days 2–7 per `TODO.md`. `players/` package not yet created.
+- Days 3–7 per `TODO.md`.
 
 ## Mocks / stubs in place
-- `engine/` is real (no mocks). `storage` still throws-stub; `server`/`frontend` no-op
-  stubs; `contracts` not yet rewritten for Mafia. None of the 0G layers are wired.
-- No data is mocked. No silent mocks anywhere.
+- `engine/` and the `players/` abstraction are real (no mocks). `storage` still throws-stub;
+  `server`/`frontend` no-op stubs; `contracts` not yet rewritten for Mafia.
+- **`players/` inference — MOCKED, flagged (`# MOCK:` in `provider.ts`).** Live 0G Compute
+  access is unavailable (`myTasks.md §B` not provisioned: no API key, no model chosen), so
+  the e2e match runs on `MockLocalProvider`: a **local** ECDSA/EIP-191 signer. Signatures are
+  **real** (the verification path is genuinely exercised) but the signer is a **local test
+  key, NOT a 0G TEE provider** — `source` is always `"MOCK-local"`, never mistaken for a real
+  attestation. No attestation is faked silently.
+- **`ZeroGComputeProvider` (real Router path) — partially live-confirmed (2026-06-17).**
+  Real calls (`players/scripts/live-turn.mjs`) confirm: inference works, `qwen2.5-omni` is
+  genuinely TEE-attested (`tee_verified:true`, provider `0xa48f…7836`), chatID = `zg-res-key`
+  header, and the live model emits canonical decision strings `parseDecision` accepts.
+  **Open blocker:** the configured testnet router exposes no `/v1/proxy/signature` endpoint
+  (all shapes 404), so it yields a `tee_verified` boolean but NOT the raw `{text, signature}`
+  our on-chain `ecrecover` needs. Raw signatures require the Direct SDK
+  (`broker.inference.processResponse`, funded wallet) — Day-3 task; see `myTasks.md §A`
+  "LIVE CONFIRMATION". The match e2e test still runs on `MockLocalProvider` until the Direct
+  signature path lands.
 
 ## Known scope risk
 - Day 5's **on-chain Mafia state machine + TEE-signature verification** is the heaviest

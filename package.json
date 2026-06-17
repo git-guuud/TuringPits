@@ -5,6 +5,7 @@
   "description": "Turing Pits — gamified AI Mafia prediction market on the 0G network",
   "workspaces": [
     "engine",
+    "players",
     "contracts",
     "storage",
     "server",
