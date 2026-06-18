@@ -1,11 +1,15 @@
 # Status
 
-_Updated: 2026-06-20_
+_Updated: 2026-06-22_
 
 ## Current task
-**AI Mafia** (multiple LLMs playing Mafia). Day 4 — 0G Storage evidence layer —
-**complete** (see `TODO.md`). Next: Day 5 (betting contract + on-chain verifier; blocked on
-`myTasks.md §D` deployer wallet + faucet funds). Design:
+**AI Mafia** (multiple LLMs playing Mafia). Days 1–5 **complete** (engine, TEE players,
+commit-reveal, 0G Storage, deployed on-chain verifier/market — see `TODO.md`). **Live 0G-TEE
+provider now wired in and confirmed:** the `players/` `Attestation` evolved to the live
+envelope model (`sha256(req):sha256(res):type:identity:tls_fp`) that `TeeEnvelope.sol`
+verifies; `ZeroGDirectProvider` (Direct SDK) replaced the broken Router path and passed a live
+inference; and a cross-layer Hardhat test settles a real `playMatch` transcript on the deployed
+contract. **Next: Day 6 (frontend live arena + betting UI).** Design:
 `docs/superpowers/specs/2026-06-17-ai-mafia-design.md`.
 
 ## Done
@@ -38,8 +42,9 @@ _Updated: 2026-06-20_
       calls and captures the attested transcript. 25 vitest tests green: a full match runs
       end-to-end, every decision attestation verifies locally, the captured decisions replay
       through the pure moderator to the same winner, and parse rejects illegal/non-canonical
-      output. Real `ZeroGComputeProvider` (Router + `verify_tee`) is written but **unexercised
-      pending §B creds** — see Mocks below.
+      output. (Historical: a Router-based `ZeroGComputeProvider` was written here; it was later
+      removed when the testnet Router proved to expose no signature endpoint — the real path is
+      now the Direct-SDK `ZeroGDirectProvider`. See "Mocks / stubs in place".)
 
 - [x] **Day 3 — role-assignment commit-reveal + confirmed TEE attestation format.**
       `engine/src/commit.ts`: `commitRoles`/`verifyRoleReveal`/`generateSalt`/
@@ -95,7 +100,7 @@ _Updated: 2026-06-20_
       skipped by default. Uploads paid by the funded `COMPUTE_PRIVATE_KEY` wallet.
 
 ## In progress
-- (none — between Day 5 and Day 6)
+- (none — live-TEE provider wiring complete; next is Day 6.)
 
 ## Pending
 - Days 6–7 per `TODO.md`.
@@ -129,23 +134,33 @@ Durable findings from real testnet calls (`players/scripts/live-turn.mjs`,
   on-chain-`ecrecover`able) is fully real; the execution guarantee is weaker than "hardware TEE."
 
 ## Mocks / stubs in place
-- `engine/`, the `players/` abstraction, and `storage/` are real (no mocks). `storage`
-  upload/download/round-trip is live-confirmed on testnet (see Day 4 above); the sample
-  evidence in its live test carries a `source:"MOCK-local"` attestation only because wiring
-  the live TEE provider into a full match is Day-5 work. `server`/`frontend` no-op stubs;
-  `contracts` not yet rewritten for Mafia.
-- **`players/` match e2e runs on `MockLocalProvider`, flagged (`# MOCK:` in `provider.ts`).**
-  0G Compute access *is* now provisioned and the raw-signature path is live-confirmed (see
-  findings above) — but the end-to-end match still uses a **local** ECDSA/EIP-191 signer.
-  Signatures are **real** (the verification path is genuinely exercised); the signer is a
-  **local test key, not a 0G TEE provider** (`source` = `"MOCK-local"`, never mistaken for a
-  real attestation). No attestation is faked silently. **Wiring the Direct provider into
-  `playMatch` is Day-5 work.**
+- `engine/`, `players/`, `storage/`, and `contracts/` are real (no mocks). `storage`
+  upload/download/round-trip is live-confirmed on testnet (Day 4). `server`/`frontend` are
+  still no-op stubs (Day 6).
+- **The real `players/` ↔ `contracts` wiring is done and proven offline.** The `players/`
+  `Attestation` now carries the live-confirmed 0G-TEE **envelope**
+  (`reqHash:sha256(body):type:identity:tls`, see confirmed facts) that `TeeEnvelope.sol`
+  verifies; `verifyAttestation` mirrors the Solidity recover, and `toSettlementMove` maps an
+  attested turn straight to `MafiaMarket.settle()` calldata. A cross-layer Hardhat test
+  (`contracts/test/PlayersIntegration.test.ts`) runs a full `playMatch` and **settles its
+  transcript on the deployed contract to the engine-declared winner**.
+- **The real provider is `ZeroGDirectProvider` (`zerog.ts`, Direct SDK) — live-confirmed.**
+  It is the production path (NOT a mock); the broken Router-signature `ZeroGComputeProvider`
+  was removed. The flag-gated live test (`players/src/live.test.ts`, `RUN_LIVE_COMPUTE=1`)
+  **passed against real 0G Compute on Galileo (2026-06-22):** one TEE inference returned a
+  `"0g-tee"` envelope that `verifyAttestation` accepts and that recovers the registered
+  `teeSignerAddress` `0x83df4B8EbA7c0B3B740019b8c9a77ffF77D508cF`. Paid from the funded
+  `COMPUTE_PRIVATE_KEY`.
+- **`MockLocalProvider` (`# MOCK:` in `provider.ts`)** remains for offline/CI. It produces the
+  SAME envelope shape — real ECDSA/EIP-191 signatures, genuinely verified — differing only in
+  the signer: a **local test key, not a 0G TEE provider** (`source` = `"MOCK-local"`, never
+  mistaken for a real attestation). No attestation is faked silently.
 
 ## Known scope risk
-- Day 5's **on-chain Mafia state machine + TEE-signature verification** is the heaviest piece.
-  The attestation format is now confirmed (above), and the verifier is **heavier than first
-  scoped** — it reconstructs the response envelope (full body in calldata + SHA-256 precompile
-  + `ecrecover`) rather than hashing the compact decision string. Labeled fallback (verify sigs
-  + commit-reveal on-chain, trust the tally) is queued in `TODO.md` if it can't fully land by
-  Jun 23.
+- Day 5's **on-chain Mafia state machine + TEE-signature verification** (the heaviest piece)
+  **landed in full** — the labeled fallback (verify sigs + commit-reveal on-chain, trust the
+  tally) was NOT needed. The verifier reconstructs the response envelope (full body in calldata
+  + SHA-256 precompile + `ecrecover`); 16 Hardhat tests green and deployed to Galileo.
+- Remaining risk is now **Day 6 (frontend) breadth** and the **live-TEE end-to-end run**: the
+  player layer is being aligned to the contract's envelope model (in progress), after which a
+  real `qwen2.5-omni` match must be captured and settled on-chain at least once for the demo.

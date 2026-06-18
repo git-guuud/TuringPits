@@ -1,90 +1,137 @@
+import { Buffer } from "node:buffer";
+import { hexlify, JsonRpcProvider, verifyMessage, Wallet } from "ethers";
+import { createZGComputeNetworkBroker } from "@0gfoundation/0g-compute-ts-sdk";
+import { locateContent, resHashHex } from "./envelope.js";
 import type { Attestation, InferenceProvider } from "./types.js";
 
-export interface ZeroGComputeConfig {
-  /** Router base URL, e.g. `https://router-api.0g.ai/v1` (`myTasks.md §B`). */
-  readonly baseUrl: string;
-  /** `sk-...` inference key from pc.0g.ai. Server-side only — never ship to a browser. */
-  readonly apiKey: string;
-  /** Model id from the live catalog, e.g. `zai-org/GLM-5-FP8` (`myTasks.md §B`). */
-  readonly model: string;
-  /**
-   * The provider's `teeSignerAddress` read from the on-chain service record
-   * (`myTasks.md §A`). The attestation's recovered signer is checked against this — the
-   * same key the Day-5 contract registers. Required so a provider can't swap keys on us.
-   */
-  readonly teeSignerAddress: string;
+/** 0G Galileo testnet (`STATUS.md` → confirmed facts). */
+const GALILEO_CHAIN_ID = 16602;
+
+export interface ZeroGDirectConfig {
+  /** Funded wallet private key (`COMPUTE_PRIVATE_KEY`). Server-side only. */
+  readonly privateKey: string;
+  /** EVM RPC, e.g. `https://evmrpc-testnet.0g.ai`. */
+  readonly rpcUrl: string;
+  /** Provider account that addresses the service, e.g. `0xa48f…7836` (qwen2.5-omni). */
+  readonly providerAddress: string;
+  /** Minimum ledger balance (0G) to ensure on first use. SDK enforces a 3-0G floor. Default 3. */
+  readonly minLedger?: number;
+  readonly chainId?: number;
 }
 
 /**
- * REAL 0G Compute TEE inference via the OpenAI-compatible Router (`myTasks.md §B`).
- * This is the production path — NOT a mock. It is unexercised until the §B credentials
- * are provisioned (no API key / model chosen yet), and the exact wire details flagged
- * `// PENDING LIVE CONFIRMATION` are hardened on Day 3 against a live endpoint.
+ * REAL 0G Compute TEE inference via the **Direct SDK** — the live-confirmed raw-signature
+ * path our on-chain verifier needs (`players/scripts/live-direct.mjs`,
+ * `STATUS.md` → confirmed facts). NOT a mock.
  *
- * Flow (per docs review in `myTasks.md` Findings §A/§B):
- *  1. POST /chat/completions with `verify_tee: true` → response text + `x_0g_trace`.
- *  2. GET /proxy/signature/{chatID} → `{ text, signature }` (EIP-191 over the text).
- *  3. Return the text + an attestation whose signer must be the registered TEE key.
+ * The earlier Router (`/chat/completions` + `verify_tee`) path was confirmed-WRONG for the
+ * testnet router: it exposes no signature endpoint and returns only a `tee_verified` boolean.
+ * The Direct SDK returns the provider-signed envelope
+ * (`sha256(req):sha256(res):type:identity:tls`) that `MafiaMarket.settle()` reconstructs and
+ * `ecrecover`s. Each `complete()`:
+ *   1. `getRequestHeaders` (single-use billing headers) → POST `/chat/completions`.
+ *   2. Capture the EXACT raw response bytes (their sha256 == envelope part[1]).
+ *   3. `processResponse` (SDK-side TEE verification + fee settlement).
+ *   4. `getChatSignatureDownloadLink` → fetch `{ text: envelope, signature }`.
+ *   5. Verify the announced body hashes to the envelope, recover the signer == the
+ *      registered `teeSignerAddress`, locate the decision content, return the attestation.
+ *
+ * Build it with {@link createZeroGDirectProvider}, which sets up the broker (ledger,
+ * acknowledge signer) and resolves the service endpoint/model + TEE signer once.
  */
-export class ZeroGComputeProvider implements InferenceProvider {
-  constructor(private readonly config: ZeroGComputeConfig) {}
+export class ZeroGDirectProvider implements InferenceProvider {
+  constructor(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK broker type is internal
+    private readonly broker: any,
+    private readonly providerAddress: string,
+    private readonly endpoint: string,
+    private readonly model: string,
+    /** The provider's registered TEE signer (envelope must recover to this). */
+    readonly teeSignerAddress: string,
+  ) {}
 
   async complete(prompt: string): Promise<{ text: string; attestation: Attestation }> {
-    const { baseUrl, apiKey, model, teeSignerAddress } = this.config;
-
-    const res = await fetch(`${baseUrl}/chat/completions`, {
+    const headers = await this.broker.inference.getRequestHeaders(this.providerAddress, prompt);
+    const res = await fetch(`${this.endpoint}/chat/completions`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.7,
-        verify_tee: true,
-      }),
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({ model: this.model, messages: [{ role: "user", content: prompt }] }),
     });
-    if (!res.ok) {
-      throw new Error(`0G Compute inference failed: ${res.status} ${await res.text()}`);
-    }
-    const body = (await res.json()) as {
-      id?: string;
-      choices: { message: { content: string } }[];
-      x_0g_trace?: { tee_verified?: boolean; provider?: string };
+    // Capture the exact response bytes BEFORE parsing — sha256 of these is envelope part[1].
+    const rawBodyStr = await res.text();
+    if (!res.ok) throw new Error(`0G Compute inference failed: ${res.status} ${rawBodyStr}`);
+
+    const chatId = res.headers.get("zg-res-key");
+    if (!chatId) throw new Error("0G Compute response missing zg-res-key (needed for signature)");
+
+    const body = JSON.parse(rawBodyStr) as {
+      choices?: { message?: { content?: string } }[];
+      usage?: unknown;
     };
+    const text = body.choices?.[0]?.message?.content;
+    if (text == null) throw new Error("0G Compute response had no message content");
 
-    const text = body.choices[0]?.message.content ?? "";
-    // CONFIRMED LIVE (2026-06-17): chatID is the `zg-res-key` response header (a UUID),
-    // not `body.id` (`chatcmpl-…`). See myTasks.md §A "LIVE CONFIRMATION".
-    const chatId = res.headers.get("zg-res-key") ?? body.id;
-    if (!chatId) throw new Error("0G Compute response missing chat id (needed for signature)");
+    // SDK-side TEE verification + fee settlement (gates billing; must run per request).
+    await this.broker.inference.processResponse(this.providerAddress, chatId, JSON.stringify(body.usage ?? {}));
 
-    // ⚠️ CONFIRMED-WRONG for the integratenetwork testnet router: it exposes NO
-    // /v1/proxy/signature endpoint (all shapes 404) — it only returns `tee_verified`. The
-    // raw {text, signature} our on-chain verifier needs comes from the Direct SDK
-    // (broker.inference.processResponse, funded wallet). This Router signature fetch stays
-    // here for the official router-api.0g.ai path; Day-3 adds the Direct provider.
-    const sigRes = await fetch(
-      `${baseUrl}/proxy/signature/${chatId}?model=${encodeURIComponent(model)}`,
-      { headers: { Authorization: `Bearer ${apiKey}` } },
-    );
-    if (!sigRes.ok) {
-      throw new Error(`0G Compute signature fetch failed: ${sigRes.status} ${await sigRes.text()}`);
+    const link = await this.broker.inference.getChatSignatureDownloadLink(this.providerAddress, chatId);
+    const sigRes = await fetch(link, { headers });
+    if (!sigRes.ok) throw new Error(`0G Compute signature fetch failed: ${sigRes.status} ${await sigRes.text()}`);
+    const { text: envelope, signature } = (await sigRes.json()) as { text: string; signature: string };
+
+    // Envelope = reqHash:resHash:providerType:providerIdentity:tlsFingerprint.
+    const parts = envelope.split(":");
+    if (parts.length !== 5) throw new Error(`unexpected 0G-TEE envelope shape (${parts.length} parts)`);
+    const [reqHashHex, signedResHash, providerType, providerIdentity, tlsFingerprint] = parts as [string, string, string, string, string];
+
+    const rawResponseBody = hexlify(Buffer.from(rawBodyStr, "utf8"));
+    if (resHashHex(rawResponseBody) !== signedResHash) {
+      throw new Error("0G-TEE envelope res-hash does not match the captured response body");
     }
-    const { text: signedText, signature } = (await sigRes.json()) as {
-      text: string;
-      signature: string;
-    };
-
-    if (signedText !== text) {
-      // The provider must sign the exact text it returned, or settlement can't reconstruct it.
-      throw new Error("0G Compute attestation text does not match the response content");
+    const recovered = verifyMessage(envelope, signature);
+    if (recovered.toLowerCase() !== this.teeSignerAddress.toLowerCase()) {
+      throw new Error(`0G-TEE signature recovered ${recovered}, expected signer ${this.teeSignerAddress}`);
     }
 
-    return {
-      text,
-      attestation: { signedText, signature, signerAddress: teeSignerAddress, source: "0g-tee" },
+    const { contentOffset, contentLen } = locateContent(Buffer.from(rawBodyStr, "utf8"), text);
+    const attestation: Attestation = {
+      signature,
+      signerAddress: this.teeSignerAddress,
+      source: "0g-tee",
+      rawResponseBody,
+      contentOffset,
+      contentLen,
+      reqHashHex,
+      providerType,
+      providerIdentity,
+      tlsFingerprint,
     };
+    return { text, attestation };
   }
+}
+
+/**
+ * Set up the 0G Compute broker and resolve the service for one provider, returning a ready
+ * {@link ZeroGDirectProvider}. Ensures a funded ledger (creates one at `minLedger` 0G if
+ * absent) and acknowledges the provider's TEE signer (idempotent), mirroring
+ * `players/scripts/live-direct.mjs`. The caller passes `.env` values — this reads no globals.
+ */
+export async function createZeroGDirectProvider(config: ZeroGDirectConfig): Promise<ZeroGDirectProvider> {
+  const { privateKey, rpcUrl, providerAddress, minLedger = 3, chainId = GALILEO_CHAIN_ID } = config;
+  const wallet = new Wallet(privateKey, new JsonRpcProvider(rpcUrl, chainId));
+  const broker = await createZGComputeNetworkBroker(wallet);
+
+  try {
+    await broker.ledger.getLedger();
+  } catch {
+    await broker.ledger.addLedger(minLedger); // SDK enforces a 3-0G minimum
+  }
+
+  const status = await broker.inference.checkProviderSignerStatus(providerAddress);
+  if (!status.isAcknowledged) {
+    await broker.inference.acknowledgeProviderSigner(providerAddress);
+  }
+
+  const { endpoint, model } = await broker.inference.getServiceMetadata(providerAddress);
+  return new ZeroGDirectProvider(broker, providerAddress, endpoint, model, status.teeSignerAddress);
 }

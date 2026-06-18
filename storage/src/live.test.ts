@@ -11,6 +11,7 @@
  * bytes are hash-identical — confirming immutable, content-addressed storage end to end.
  */
 import { describe, expect, it } from "vitest";
+import { MOCK_PROVIDER_META, wrapResponseBody } from "@turingpits/players";
 import {
   createZeroGStorage,
   root,
@@ -40,6 +41,9 @@ const personas = [
   { seat: 2, name: "Cy", blurb: "quiet until it counts" },
 ];
 
+const decisionStr =
+  '{"nonce":"live-evidence-nonce","phase":"day","round":1,"player":1,"action":"vote","target":2}';
+
 const match = {
   winner: "TOWN" as const,
   turns: [
@@ -54,12 +58,15 @@ const match = {
         action: "vote" as const,
         target: 2,
       },
+      // Live-confirmed 0G-TEE envelope shape (signed body, not the bare decision string).
+      // Sample evidence only — source "MOCK-local", so never mistaken for a real attestation.
       attestation: {
-        signedText:
-          '{"nonce":"live-evidence-nonce","phase":"day","round":1,"player":1,"action":"vote","target":2}',
         signature: "0x" + "ab".repeat(65),
         signerAddress: "0x83df000000000000000000000000000000000008",
         source: "MOCK-local" as const,
+        reqHashHex: "ab".repeat(32),
+        ...wrapResponseBody(decisionStr),
+        ...MOCK_PROVIDER_META,
       },
     },
   ],

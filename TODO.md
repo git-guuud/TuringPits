@@ -55,8 +55,9 @@ structured decision.
       state), call **0G Compute TEE inference**, parse output into
       `{speech, structuredDecision, attestation}`. Same model for all seats now; one
       interface so each seat can become a distinct model/provider later (BYOM-ready).
-      (`players/`: `InferenceProvider`, `Player.takeTurn`, `ZeroGComputeProvider` (real,
-      untested pending §B), `MockLocalProvider` (`# MOCK:`).)
+      (`players/`: `InferenceProvider`, `Player.takeTurn`, the real Direct-SDK
+      `ZeroGDirectProvider` (`zerog.ts`; the earlier Router `ZeroGComputeProvider` was
+      removed), `MockLocalProvider` (`# MOCK:`).)
 - [x] Drive a full match from the Day-1 moderator using real player calls; capture the
       transcript (speech + decisions + signatures). (`players/src/match.ts` `playMatch`.)
 - [x] Validate each attestation locally (signature recovers the provider key over the
@@ -119,19 +120,21 @@ stub `# MOCK:` and flag it.
 
 ## Day 5 — Jun 21 (Sat): Betting contract + on-chain verifier on 0G Chain
 Deploy the on-chain ledger AND the trustless settlement. This is the heaviest single piece.
+**DONE** — full on-chain state machine landed; the scope fallback was NOT needed.
 
-- [ ] Contract storing: role commit hash, betting open/locked state, YES/NO pools, and a
-      settle path gated on on-chain verification.
-- [ ] Functions: `openMarket(roleCommit)`, `placeBet(side)`, `lockBetting()`,
-      `settle(decisions, signatures, revealedRoles, salt)`, `claim()`.
-- [ ] `settle()` verifies each decision's TEE signature (`ecrecover` vs registered provider
-      key), checks `hash(revealedRoles + salt) == roleCommit`, runs the **Mafia state
-      machine in Solidity** to compute the winning faction, and settles.
-- [ ] Unit tests (local chain) for the full lifecycle + the cheat path; deploy to 0G Chain
-      testnet and record the address.
-- [ ] **Scope fallback (label if used):** if the full on-chain state machine can't land,
-      verify signatures + commit-reveal on-chain but accept a server-submitted tally,
-      marked `// MOCK:` / downgraded, with full verification as the target.
+- [x] Contract storing: role commit hash, betting open/locked state, YES/NO pools, and a
+      settle path gated on on-chain verification. (`MafiaMarket.sol`.)
+- [x] Functions: `openMarket(roleCommit, teeSigner, providerMeta, nonce, playerCount)`,
+      `placeBet(side)`, `lockBetting()`, `settle(moves, revealedRoles, salt)`, `claim()`.
+- [x] `settle()` verifies each move's TEE **envelope** signature (`TeeEnvelope.recover` —
+      rebuilds `sha256(req):sha256(res):type:identity:tls_fp` and `ecrecover`s vs the
+      registered signer), binds the typed decision to the signed response body, checks
+      `sha256(revealedRoles + salt) == roleCommit`, runs the **Mafia state machine in
+      Solidity** (`MafiaRules`) to compute the winning faction, and settles.
+- [x] Unit tests (local chain) for the full lifecycle + the cheat path (16 Hardhat tests
+      green); deployed to 0G Galileo testnet at
+      `0xd4d1007585f9bAa44DaBbBCb224a09395F41ca5F` (chainId 16602; bytecode verified).
+- [ ] ~~Scope fallback~~ — not needed; the full on-chain state machine landed.
 
 **Exit criteria:** Contract deployed to 0G Chain testnet; a wallet places a bet, betting
 locks, an honest match settles with the on-chain-computed winner and the winning side

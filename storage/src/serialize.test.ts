@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MOCK_PROVIDER_META, wrapResponseBody } from "@turingpits/players";
 import {
   canonicalJson,
   decodeJson,
@@ -73,10 +74,12 @@ describe("serializeMatch", () => {
           target: 1,
         },
         attestation: {
-          signedText: '{"nonce":"n1","phase":"day","round":1,"player":2,"action":"vote","target":1}',
           signature: "0xdeadbeef",
           signerAddress: "0x83df000000000000000000000000000000000000",
           source: "MOCK-local" as const,
+          reqHashHex: "cd".repeat(32),
+          ...wrapResponseBody('{"nonce":"n1","phase":"day","round":1,"player":2,"action":"vote","target":1}'),
+          ...MOCK_PROVIDER_META,
         },
       },
     ],

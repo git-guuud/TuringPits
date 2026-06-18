@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { Wallet } from "ethers";
+import { sha256, toUtf8Bytes, Wallet } from "ethers";
 import type { BaseWallet } from "ethers";
 import { encodeDecision } from "@turingpits/engine";
 import type { Decision } from "@turingpits/engine";
+import { joinEnvelope, MOCK_PROVIDER_META, wrapResponseBody } from "./envelope.js";
 import type { Attestation, InferenceProvider } from "./types.js";
 
 /**
@@ -13,15 +14,21 @@ import type { Attestation, InferenceProvider } from "./types.js";
  */
 function mockRespond(prompt: string): string {
   const skeletonLine = prompt.split("\n").find((l) => l.trimStart().startsWith('{"nonce"'));
-  const legalMatch = prompt.match(/Legal target seats?: ([\d, ]+)/);
-
-  if (skeletonLine && legalMatch) {
+  if (skeletonLine) {
+    // Decision prompt → echo the already-pinned skeleton verbatim (canonical), the way a
+    // compliant model copies the exact line it was told to output.
     const skeleton = JSON.parse(skeletonLine.trim()) as Decision;
+    return encodeDecision(skeleton);
+  }
+
+  const legalMatch = prompt.match(/Legal target seats?: ([\d, ]+)/);
+  if (legalMatch) {
+    // Reason prompt → pick a legal target deterministically (hash the prompt) and emit the
+    // `{target, reason}` object `parseReason` expects.
     const legal = legalMatch[1]!.split(",").map((s) => Number(s.trim())).filter(Number.isInteger);
-    // Deterministic pick: hash the whole prompt to an index into the legal set.
     const h = createHash("sha256").update(prompt).digest();
     const target = legal[h.readUInt32BE(0) % legal.length]!;
-    return encodeDecision({ ...skeleton, target });
+    return JSON.stringify({ target, reason: `seat ${target} is the likeliest threat by my read` });
   }
 
   // Speech prompt → free-form prose (never valid JSON, so it can't be mistaken for a decision).
@@ -36,13 +43,16 @@ function mockRespond(prompt: string): string {
 }
 
 /**
- * # MOCK: local-key inference provider used ONLY when live 0G Compute access is
- * unavailable (`myTasks.md §B` not yet provisioned).
+ * # MOCK: local-key inference provider used when live 0G Compute access is unavailable or
+ * undesirable (e.g. offline/CI). The real path is `ZeroGDirectProvider` (`zerog.ts`).
  *
- * The signature is real ECDSA / EIP-191 — so the verification path is genuinely
- * exercised — but the signer is a LOCAL test key, NOT a 0G TEE provider. `source` is
- * always `"MOCK-local"`, so nothing here is ever mistaken for a real attestation. Swap in
- * `ZeroGComputeProvider` once credentials land; no other code changes.
+ * It produces the SAME envelope shape as a live attestation — wraps the model `content` in an
+ * OpenAI-style response body and signs the real 0G-TEE envelope
+ * (`reqHash:sha256(body):type:identity:tls`) with EIP-191 — so the verification path is
+ * genuinely exercised and a mock-produced move settles on the deployed contract unchanged.
+ * The ONLY difference from a real attestation is the signer: a LOCAL test key, never a 0G TEE
+ * provider. `source` is always `"MOCK-local"`, so nothing here is mistaken for a real
+ * attestation. Swap in `ZeroGDirectProvider` once a funded match runs; no other code changes.
  */
 export class MockLocalProvider implements InferenceProvider {
   private readonly wallet: BaseWallet;
@@ -59,12 +69,22 @@ export class MockLocalProvider implements InferenceProvider {
 
   async complete(prompt: string): Promise<{ text: string; attestation: Attestation }> {
     const text = this.respond(prompt);
-    const signature = await this.wallet.signMessage(text);
+    const { rawResponseBody, contentOffset, contentLen } = wrapResponseBody(text);
+    // part[0] = sha256(request) is opaque to the verifier; a deterministic local hash stands
+    // in for the provider's own request serialization.
+    const reqHashHex = sha256(toUtf8Bytes("request:" + text)).slice(2);
+    const envelope = joinEnvelope(reqHashHex, rawResponseBody, MOCK_PROVIDER_META);
+    const signature = await this.wallet.signMessage(envelope);
+
     const attestation: Attestation = {
-      signedText: text,
       signature,
       signerAddress: this.wallet.address,
       source: "MOCK-local",
+      rawResponseBody,
+      contentOffset,
+      contentLen,
+      reqHashHex,
+      ...MOCK_PROVIDER_META,
     };
     return { text, attestation };
   }

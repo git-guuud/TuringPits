@@ -1,61 +1,50 @@
 import { describe, it, expect } from "vitest";
-import { Wallet } from "ethers";
+import { hexlify, toUtf8Bytes } from "ethers";
 import { verifyAttestation } from "./attestation.js";
+import { MockLocalProvider } from "./provider.js";
 import type { Attestation } from "./types.js";
 
-describe("verifyAttestation", () => {
-  it("accepts an EIP-191 signature that recovers the claimed signer", async () => {
-    const wallet = Wallet.createRandom();
-    const text = '{"nonce":"abc","phase":"day","round":1,"player":2,"action":"vote","target":3}';
-    const signature = await wallet.signMessage(text);
+const FIXED_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
-    const att: Attestation = {
-      signedText: text,
-      signature,
-      signerAddress: wallet.address,
-      source: "MOCK-local",
-    };
-
-    expect(verifyAttestation(att)).toBe(true);
+describe("verifyAttestation (live 0G-TEE envelope model)", () => {
+  it("accepts an envelope signature that recovers the claimed signer", async () => {
+    const provider = new MockLocalProvider(FIXED_KEY);
+    const { attestation } = await provider.complete("the model output");
+    expect(verifyAttestation(attestation)).toBe(true);
   });
 
-  it("rejects a signature that recovers a different address (forged/tampered)", async () => {
-    const wallet = Wallet.createRandom();
-    const text = "the real output";
-    const signature = await wallet.signMessage(text);
-
-    const att: Attestation = {
-      signedText: text,
-      signature,
-      signerAddress: Wallet.createRandom().address, // claims a different signer
-      source: "MOCK-local",
+  it("rejects when the claimed signer is a different address (forged)", async () => {
+    const provider = new MockLocalProvider(FIXED_KEY);
+    const { attestation } = await provider.complete("the model output");
+    const forged: Attestation = {
+      ...attestation,
+      signerAddress: "0x000000000000000000000000000000000000dEaD",
     };
-
-    expect(verifyAttestation(att)).toBe(false);
+    expect(verifyAttestation(forged)).toBe(false);
   });
 
-  it("rejects when the signed text was altered after signing", async () => {
-    const wallet = Wallet.createRandom();
-    const signature = await wallet.signMessage("original output");
-
-    const att: Attestation = {
-      signedText: "tampered output",
-      signature,
-      signerAddress: wallet.address,
-      source: "MOCK-local",
+  it("rejects when the response body was swapped after signing", async () => {
+    const provider = new MockLocalProvider(FIXED_KEY);
+    const { attestation } = await provider.complete("the model output");
+    // Swap the body the envelope committed to — sha256 no longer matches what was signed.
+    const tampered: Attestation = {
+      ...attestation,
+      rawResponseBody: hexlify(toUtf8Bytes("a totally different response body")),
     };
-
-    expect(verifyAttestation(att)).toBe(false);
+    expect(verifyAttestation(tampered)).toBe(false);
   });
 
-  it("returns false on a malformed signature instead of throwing", () => {
-    const att: Attestation = {
-      signedText: "x",
-      signature: "0xnotasignature",
-      signerAddress: Wallet.createRandom().address,
-      source: "MOCK-local",
-    };
+  it("rejects when a provider-metadata field is altered after signing", async () => {
+    const provider = new MockLocalProvider(FIXED_KEY);
+    const { attestation } = await provider.complete("the model output");
+    const tampered: Attestation = { ...attestation, providerIdentity: "not-aliyun" };
+    expect(verifyAttestation(tampered)).toBe(false);
+  });
 
-    expect(verifyAttestation(att)).toBe(false);
+  it("returns false on a malformed signature instead of throwing", async () => {
+    const provider = new MockLocalProvider(FIXED_KEY);
+    const { attestation } = await provider.complete("the model output");
+    const broken: Attestation = { ...attestation, signature: "0xnotasignature" };
+    expect(verifyAttestation(broken)).toBe(false);
   });
 });
