@@ -55,6 +55,31 @@ _Updated: 2026-06-20_
       — confirmed facts" below) — no engine change needed; the signed-bytes target is the
       response envelope, not `encodeDecision`, which re-scopes the Day-5 verifier.
 
+- [x] **Day 5 — On-chain Mafia verifier + betting market deployed to 0G Galileo testnet.**
+      `contracts/` rewritten: `MafiaMarket.sol` (parimutuel YES/NO faction-win escrow +
+      `settle()` orchestration) + three pure libraries — `DecisionCodec` (reconstructs the
+      engine's canonical decision JSON on-chain, byte-for-byte, + JSON-escape), `TeeEnvelope`
+      (rebuilds the real 0G-TEE envelope `sha256(req):sha256(res):type:identity:tls_fp` and
+      `ecrecover`s the signer via the SHA-256 precompile + EIP-191), and `MafiaRules` (a faithful
+      Solidity port of the `engine/` moderator: night/day sequencing, doctor save, detective
+      check, plurality votes, parity/elimination win). `settle()` verifies each move's TEE
+      envelope, binds the typed decision to the signed response body by an offset/slice check,
+      checks the commit-reveal role assignment (SHA-256, one byte per role + salt — matches
+      `engine/src/commit.ts`), runs the state machine, and pays the winner. **16 Hardhat tests
+      green** (codec cross-checked vs the engine, envelope recover, state-machine winner == engine
+      winner via dynamic import, full market lifecycle, and the cheat path: forged/dropped/tampered
+      move + bad reveal + settle-before-lock + double-claim all revert). **Deployed:**
+      `0xd4d1007585f9bAa44DaBbBCb224a09395F41ca5F` on 0G Galileo (chainId 16602; bytecode verified
+      on-chain). The on-chain verification *mechanism* is real; the test signer is a labeled local
+      key. Wiring the live 0G-TEE provider into a real match for end-to-end settlement is Day 6/7
+      follow-up.
+  - **Known limitations (deferred past MVP, not soundness issues — a rigged game still cannot
+    settle):** (1) if the on-chain-computed winner's side received zero bets, the losing pool is
+    trapped (no refund/void path yet); (2) no settlement timeout — if the host never calls
+    `settle()`, bettor funds have no reclaim path. Both are bettor-protection/liveness features
+    for a production market; the demo host is trusted. Also deferred to Day 6: event emissions
+    (`MarketOpened`/`BetPlaced`/`BettingLocked`/`Settled`/`Claimed`) for the frontend to index.
+
 - [x] **Day 4 — 0G Storage evidence layer.** `storage/` is now real
       (`@0gfoundation/0g-storage-ts-sdk` v1.2.10). `serializePersonas` / `serializeMatch`
       produce **canonical** bytes (recursively sorted keys, compact) so identical evidence
@@ -70,11 +95,9 @@ _Updated: 2026-06-20_
       skipped by default. Uploads paid by the funded `COMPUTE_PRIVATE_KEY` wallet.
 
 ## In progress
-- (none — between Day 4 and Day 5)
+- (none — between Day 5 and Day 6)
 
 ## Pending
-- Day 5 — betting contract + on-chain verifier on 0G Chain. **Blocked** on `myTasks.md §D`
-  (deployer wallet `DEPLOYER_PRIVATE_KEY` still a placeholder + faucet funds).
 - Days 6–7 per `TODO.md`.
 
 ## 0G integration — confirmed facts (live, 2026-06-17)

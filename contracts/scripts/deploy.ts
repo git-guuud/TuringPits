@@ -1,18 +1,26 @@
 import { ethers, network } from "hardhat";
-import { writeFileSync } from "node:fs";
 
-// Deploys BettingMarket to the configured network (use --network zeroG for 0G testnet).
-// Records the address in deployments.local.json (gitignored).
+/**
+ * Deploys MafiaMarket to the configured network.
+ * Usage: npx hardhat run scripts/deploy.ts --network zeroG
+ */
 async function main() {
-  const Market = await ethers.getContractFactory("BettingMarket");
-  const market = await Market.deploy();
+  const [deployer] = await ethers.getSigners();
+  const balance = await ethers.provider.getBalance(deployer.address);
+
+  console.log("Deployer:", deployer.address);
+  console.log("Balance:", ethers.formatEther(balance), "0G");
+  console.log("Network:", network.name);
+
+  const MafiaMarket = await ethers.getContractFactory("MafiaMarket");
+  const market = await MafiaMarket.deploy();
   await market.waitForDeployment();
+
   const address = await market.getAddress();
-  console.log(`BettingMarket deployed to ${address} on ${network.name}`);
-  writeFileSync(
-    "deployments.local.json",
-    JSON.stringify({ [network.name]: { BettingMarket: address } }, null, 2),
-  );
+  console.log(`MafiaMarket deployed to: ${address}`);
+
+  const postBalance = await ethers.provider.getBalance(deployer.address);
+  console.log("Remaining balance:", ethers.formatEther(postBalance), "0G");
 }
 
 main().catch((err) => {
