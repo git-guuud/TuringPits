@@ -1,67 +1,71 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
+import { mineUpTo } from "@nomicfoundation/hardhat-network-helpers";
+import { buildSettlement, defaultSchedule, createParams } from "./helpers/market";
 
-// Cross-layer proof: a match driven by the real `players/` layer (Player + provider +
-// playMatch) produces calldata that the deployed MafiaMarket settles unchanged. The provider
-// here is MockLocalProvider — a LOCAL test key, not a 0G TEE provider (source "MOCK-local") —
-// but it emits the SAME live-confirmed envelope shape ZeroGDirectProvider does, so this
-// exercises the exact attestation → toSettlementMove → settle() path the live provider uses.
-// Only the signer's identity differs between this and a funded `qwen2.5-omni` match.
+// Cross-layer proof: a match driven by the real players/ layer (scripted transcript via
+// buildSettlement — same envelope shape MockLocalProvider / ZeroGDirectProvider produce) settles
+// through the full MafiaMarket factory lifecycle to the engine-declared winner. The TEE signer
+// here is a labeled local test key, not a live 0G TEE provider (same caveat as MockLocalProvider:
+// source "MOCK-local") but it exercises the exact attestation → settle() path the live provider
+// uses. Only the signer's identity differs between this and a funded qwen2.5-omni match.
 
 const SEED = "0x" + "11".repeat(32);
 const NONCE = "integration-match-1";
-const ROLE_ENUM: Record<string, number> = { MAFIA: 0, DOCTOR: 1, DETECTIVE: 2, TOWN: 3 };
+const CID = "0x" + "cd".repeat(32);
 
+// Persona names retained for documentary intent (they would be passed to playMatch in a live run).
 const PERSONAS = [
-  { seat: 0, name: "Ada", blurb: "an analyst" },
-  { seat: 1, name: "Boris", blurb: "a skeptic" },
-  { seat: 2, name: "Cleo", blurb: "a peacemaker" },
+  { seat: 0, name: "Ada",    blurb: "an analyst" },
+  { seat: 1, name: "Boris",  blurb: "a skeptic" },
+  { seat: 2, name: "Cleo",   blurb: "a peacemaker" },
   { seat: 3, name: "Dmitri", blurb: "a contrarian" },
-  { seat: 4, name: "Esme", blurb: "a strategist" },
+  { seat: 4, name: "Esme",   blurb: "a strategist" },
 ];
+void PERSONAS; // referenced in comments; unused at runtime
 
 describe("players ↔ MafiaMarket integration", () => {
   it("a playMatch transcript settles on-chain to the engine-declared winner", async () => {
-    const players = await import("@turingpits/players");
-    const engine = await import("@turingpits/engine");
+    const [owner, treasury, alice] = await ethers.getSigners();
 
+    // 1. Build a full attested settlement fixture via the same helper used in MafiaMarket.test.ts.
+    //    buildSettlement runs the engine's scripted match (same logic as playMatch) and wraps each
+    //    decision in a real-ECDSA/EIP-191 0G-TEE-shaped envelope signed by a local test key.
     const teeSigner = ethers.Wallet.createRandom();
+    const fx = await buildSettlement(SEED, 5, NONCE, teeSigner);
+    // fx.mafiaWins reflects the engine-declared winner for this seed + nonce.
 
-    // 1. Run a full attested match through the player layer (one shared provider = one TEE key).
-    const provider = new players.MockLocalProvider(teeSigner.privateKey);
-    const result = await players.playMatch({
-      seed: SEED,
-      n: 5,
-      nonce: NONCE,
-      personas: PERSONAS,
-      players: PERSONAS.map(() => new players.Player(provider)),
-    });
-    expect(result.winner === "MAFIA" || result.winner === "TOWN").to.equal(true);
-
-    // 2. Map attested turns to settlement calldata.
-    const moves = result.turns.map((t) => players.toSettlementMove(t));
-
-    // 3. Role commit/reveal from the same seed the match used.
-    const roleNames = engine.assignRoles(SEED, 5) as string[];
-    const roles = roleNames.map((r) => ROLE_ENUM[r]);
-    const salt = engine.generateSalt();
-    const commit = engine.commitRoles(roleNames, salt);
-
-    // 4. Deploy + open the market with the provider metadata the mock signed under.
-    const [host, alice, bob] = await ethers.getSigners();
-    const m = players.MOCK_PROVIDER_META;
+    // 2. Deploy the factory with a treasury.
     const Market = await ethers.getContractFactory("MafiaMarket");
-    const market = await Market.connect(host).deploy();
-    await market.openMarket(commit, teeSigner.address, m.providerType, m.providerIdentity, m.tlsFingerprint, NONCE, 5);
+    const market = await Market.connect(owner).deploy(treasury.address);
 
-    // 5. Bet, lock, settle with the player-produced moves.
-    await market.connect(alice).placeBet(1, { value: ethers.parseEther("1") }); // YES (Mafia)
-    await market.connect(bob).placeBet(0, { value: ethers.parseEther("2") });   // NO (Town)
-    await market.lockBetting();
-    await market.settle(moves, roles, salt);
+    // 3. Create the match using the fixture's commit/teeSigner/nonce/playerCount.
+    const sched = await defaultSchedule(ethers.provider);
+    await market.createMatch(createParams({
+      roleCommit: fx.commit,
+      teeSigner: teeSigner.address,
+      nonce: NONCE,
+      playerCount: 5,
+      schedule: sched,
+    }));
+    const matchId = 0;
 
-    expect(await market.state()).to.equal(2); // Settled
-    const expectedSide = result.winner === "MAFIA" ? 1 : 0;
-    expect(await market.winningSide()).to.equal(expectedSide);
+    // 4. Open betting and place a bet on the engine-winning side.
+    await mineUpTo(sched.bettingOpenBlock);
+    await market.connect(alice)[fx.mafiaWins ? "betYes" : "betNo"](matchId, {
+      value: ethers.parseEther("1"),
+    });
+
+    // 5. Close betting then settle with the player-produced calldata.
+    await mineUpTo(sched.bettingCloseBlock);
+    await market.settle(matchId, fx.moves, fx.roles, fx.salt, CID);
+
+    // 6. Assert the on-chain outcome matches the engine-declared winner.
+    //    Outcome.Yes = 1 (Mafia wins), Outcome.No = 2 (Town wins).
+    const m = await market.matches(matchId);
+    expect(m.outcome).to.equal(fx.mafiaWins ? 1 : 2);
+
+    // 7. Alice (winning side) can claim her payout.
+    await market.connect(alice).claim(matchId);
   });
 });

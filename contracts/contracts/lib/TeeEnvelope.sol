@@ -34,7 +34,8 @@ library TeeEnvelope {
         bytes32 r;
         bytes32 s;
         uint8 v;
-        assembly {
+        // memory-safe: reads only from `sig` (existing allocation); no new memory is written.
+        assembly ("memory-safe") {
             r := mload(add(sig, 0x20))
             s := mload(add(sig, 0x40))
             v := byte(0, mload(add(sig, 0x60)))

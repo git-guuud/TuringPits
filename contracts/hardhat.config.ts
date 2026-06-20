@@ -9,9 +9,14 @@ const DEPLOYER_KEY = process.env.DEPLOYER_PRIVATE_KEY ?? "";
 const config: HardhatUserConfig = {
   solidity: {
     version: "0.8.24",
-    settings: { optimizer: { enabled: true, runs: 200 } },
+    settings: { optimizer: { enabled: true, runs: 200 }, viaIR: true },
   },
   networks: {
+    hardhat: {
+      // Give test accounts 20000 ETH so the MAX_BET_PER_TX test can attempt to
+      // send 10001 ETH and have the contract (not the sender) revert it.
+      accounts: { count: 10, accountsBalance: "20000000000000000000000" },
+    },
     zeroG: {
       url: ZEROG_RPC_URL,
       chainId: 16602,

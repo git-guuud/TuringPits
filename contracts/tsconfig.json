@@ -10,5 +10,11 @@
     "resolveJsonModule": true,
     "outDir": "dist"
   },
+  "ts-node": {
+    "compilerOptions": {
+      "module": "node16",
+      "moduleResolution": "node16"
+    }
+  },
   "include": ["./scripts", "./test", "./hardhat.config.ts"]
 }

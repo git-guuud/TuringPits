@@ -78,12 +78,17 @@ contract. **Next: Day 6 (frontend live arena + betting UI).** Design:
       on-chain). The on-chain verification *mechanism* is real; the test signer is a labeled local
       key. Wiring the live 0G-TEE provider into a real match for end-to-end settlement is Day 6/7
       follow-up.
-  - **Known limitations (deferred past MVP, not soundness issues — a rigged game still cannot
-    settle):** (1) if the on-chain-computed winner's side received zero bets, the losing pool is
-    trapped (no refund/void path yet); (2) no settlement timeout — if the host never calls
-    `settle()`, bettor funds have no reclaim path. Both are bettor-protection/liveness features
-    for a production market; the demo host is trusted. Also deferred to Day 6: event emissions
-    (`MarketOpened`/`BetPlaced`/`BettingLocked`/`Settled`/`Claimed`) for the frontend to index.
+  - **Known limitations (now CLOSED by the Day-5 factory rewrite — see below):** (1) the
+    zero-bet-winner trapped pool is handled by the `Void` outcome (full refund to all bettors);
+    (2) the missing settlement timeout is handled by `enterRefundMode`/`refund` past
+    `settlementDeadlineBlock`. Both bettor-protection/liveness gaps are closed.
+    `MafiaMarket` is now a **multi-match factory** (matchId-keyed) with per-match fees,
+    block-based lifecycle, and full event emissions (`MatchCreated`/`BetPlaced`/`BettingLocked`/
+    `MatchSettled`/`Claimed`/`RefundModeEntered`/`Refunded`), per
+    `docs/superpowers/specs/2026-06-18-parimutuel-market-factory-design.md`. Full suite
+    (MafiaMarket factory + fuzz + PlayersIntegration + library tests) green. **Previously-deployed
+    address `0xd4d1007585f9bAa44DaBbBCb224a09395F41ca5F` is now STALE (old single-match ABI) —
+    a re-deploy with `constructor(address _treasury)` is required for Day 6.**
 
 - [x] **Day 4 — 0G Storage evidence layer.** `storage/` is now real
       (`@0gfoundation/0g-storage-ts-sdk` v1.2.10). `serializePersonas` / `serializeMatch`

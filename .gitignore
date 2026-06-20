@@ -31,3 +31,6 @@ npm-debug.log*
 # 0G / chain local state
 deployments.local.json
 .0g/
+
+
+handover.md
