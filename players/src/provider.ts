@@ -67,7 +67,10 @@ export class MockLocalProvider implements InferenceProvider {
     return this.wallet.address;
   }
 
-  async complete(prompt: string): Promise<{ text: string; attestation: Attestation }> {
+  async complete(
+    prompt: string,
+    _opts?: import("./types.js").SamplingOptions,
+  ): Promise<{ text: string; attestation: Attestation }> {
     const text = this.respond(prompt);
     const { rawResponseBody, contentOffset, contentLen } = wrapResponseBody(text);
     // part[0] = sha256(request) is opaque to the verifier; a deterministic local hash stands

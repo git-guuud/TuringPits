@@ -20,22 +20,34 @@ export interface ReasonResult {
  * back to a deterministic legal pick), so a poor reasoning turn can never stall the match.
  */
 export function parseReason(text: string, legalTargets: readonly number[]): ReasonResult {
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    if (parsed && typeof parsed === "object") {
-      const p = parsed as Record<string, unknown>;
-      if (typeof p.target === "number" && Number.isInteger(p.target) && legalTargets.includes(p.target)) {
-        const reason = typeof p.reason === "string" ? p.reason : "";
-        return { target: p.target, reason };
+  // Weak models often wrap the object in ```json fences or surround it with prose, so try the
+  // first {...} substring as well as the whole string. Either way, never let raw JSON/fences leak
+  // into `reason` — that text is shown verbatim as the player's private spectacle line.
+  const candidates = [text, ...(text.match(/\{[\s\S]*?\}/g) ?? [])];
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (parsed && typeof parsed === "object") {
+        const p = parsed as Record<string, unknown>;
+        if (typeof p.target === "number" && Number.isInteger(p.target) && legalTargets.includes(p.target)) {
+          const reason = typeof p.reason === "string" ? p.reason : "";
+          return { target: p.target, reason };
+        }
       }
+    } catch {
+      // Not valid JSON — try the next candidate, then fall through to lenient extraction.
     }
-  } catch {
-    // Not JSON — fall through to lenient integer extraction.
   }
 
+  // Lenient fallback: a `"reason": "..."` field may still be recoverable from malformed JSON; if
+  // not, strip JSON punctuation/fences so the surfaced reason is plain prose, never raw syntax.
+  const reasonField = text.match(/"reason"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const cleanReason = reasonField
+    ? reasonField[1]!.replace(/\\"/g, '"').trim()
+    : text.replace(/```[a-z]*|```|[{}"]/gi, "").replace(/\btarget\b\s*:?\s*\d+/gi, "").trim();
   for (const tok of text.match(/\d+/g) ?? []) {
     const n = Number(tok);
-    if (legalTargets.includes(n)) return { target: n, reason: text.trim() };
+    if (legalTargets.includes(n)) return { target: n, reason: cleanReason };
   }
 
   throw new Error(`reason output names no legal target (legal: ${legalTargets.join(", ")}): ${text}`);

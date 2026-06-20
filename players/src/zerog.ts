@@ -50,12 +50,20 @@ export class ZeroGDirectProvider implements InferenceProvider {
     readonly teeSignerAddress: string,
   ) {}
 
-  async complete(prompt: string): Promise<{ text: string; attestation: Attestation }> {
+  async complete(
+    prompt: string,
+    opts?: import("./types.js").SamplingOptions,
+  ): Promise<{ text: string; attestation: Attestation }> {
     const headers = await this.broker.inference.getRequestHeaders(this.providerAddress, prompt);
+    const reqBody: Record<string, unknown> = { model: this.model, messages: [{ role: "user", content: prompt }] };
+    // Sampling params on the request do NOT affect settlement: the TEE envelope signs the
+    // RESPONSE, and reqHashHex (envelope part[0]) is the provider's own request hash.
+    if (opts?.temperature !== undefined) reqBody.temperature = opts.temperature;
+    if (opts?.seed !== undefined) reqBody.seed = opts.seed;
     const res = await fetch(`${this.endpoint}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify({ model: this.model, messages: [{ role: "user", content: prompt }] }),
+      body: JSON.stringify(reqBody),
     });
     // Capture the exact response bytes BEFORE parsing — sha256 of these is envelope part[1].
     const rawBodyStr = await res.text();

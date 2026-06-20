@@ -11,10 +11,11 @@ export type {
 export { verifyAttestation, rebuildEnvelope } from "./attestation.js";
 export { joinEnvelope, locateContent, wrapResponseBody, resHashHex, MOCK_PROVIDER_META } from "./envelope.js";
 export type { ProviderMeta, WrappedBody } from "./envelope.js";
-export { buildReasonPrompt, buildSpeechPrompt, buildDecisionPrompt } from "./prompt.js";
+export { buildReasonPrompt, buildSpeechPrompt, buildDecisionPrompt, buildDiscussionPrompt } from "./prompt.js";
 export { parseDecision } from "./decision.js";
 export { parseReason } from "./reason.js";
 export type { ReasonResult } from "./reason.js";
+export { hasBadMarker, cleanDaySpeech, cleanNightReason, stripSpeakerLabels, isEcho, namifySeats, BAD_SPEECH } from "./sanitize.js";
 export { Player } from "./player.js";
 export type { PlayerOptions } from "./player.js";
 export { MockLocalProvider } from "./provider.js";

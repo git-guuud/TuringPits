@@ -11,13 +11,14 @@ import type {
 } from "./types.js";
 
 /**
- * Role composition per player count. MVP supports 5–7 seats.
+ * Role composition per player count. MVP supports 5–8 seats.
  * Mirrored by the Solidity state machine on Day 5.
  */
 const COMPOSITION: Record<number, Role[]> = {
   5: ["MAFIA", "DOCTOR", "DETECTIVE", "TOWN", "TOWN"],
   6: ["MAFIA", "DOCTOR", "DETECTIVE", "TOWN", "TOWN", "TOWN"],
   7: ["MAFIA", "MAFIA", "DOCTOR", "DETECTIVE", "TOWN", "TOWN", "TOWN"],
+  8: ["MAFIA", "MAFIA", "DOCTOR", "DETECTIVE", "TOWN", "TOWN", "TOWN", "TOWN"],
 };
 
 /**
@@ -43,7 +44,7 @@ function makeRng(seed: string): () => number {
 export function assignRoles(seed: string, n: number): Role[] {
   const base = COMPOSITION[n];
   if (!base) {
-    throw new Error(`unsupported player count ${n} (MVP supports 5–7)`);
+    throw new Error(`unsupported player count ${n} (MVP supports 5–8)`);
   }
   const roles = [...base];
   const rng = makeRng(seed);

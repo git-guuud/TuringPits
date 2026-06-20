@@ -3,7 +3,7 @@ import { getBytes } from "ethers";
 import { encodeDecision, initState, applyDecision, winner as winnerOf } from "@turingpits/engine";
 import type { Action, Faction, GameState, Role } from "@turingpits/engine";
 import type { Player } from "./player.js";
-import type { Persona, PlayerTurn, TurnContext } from "./types.js";
+import type { DeathEvent, Persona, PlayerTurn, TurnContext } from "./types.js";
 
 export interface MatchConfig {
   readonly seed: string;
@@ -20,11 +20,23 @@ export interface MatchConfig {
    * game state. Awaited, so a slow consumer paces the match.
    */
   readonly onTurn?: (turn: RecordedTurn, state: GameState) => void | Promise<void>;
+  /**
+   * Optional hook fired for each unsigned discussion contribution in the day's discussion pass
+   * (before any vote). Discussion is public speech but never signed and never settles. Awaited.
+   */
+  readonly onDiscussion?: (entry: DiscussionEntry, state: GameState) => void | Promise<void>;
 }
 
 /** A recorded turn: the seat, its speech, structured decision, and TEE attestation. */
 export interface RecordedTurn extends PlayerTurn {
   readonly seat: number;
+}
+
+/** One unsigned public discussion contribution during a day's discussion pass. */
+export interface DiscussionEntry {
+  readonly seat: number;
+  readonly round: number;
+  readonly speech: string;
 }
 
 export interface AttestedMatch {
@@ -137,19 +149,29 @@ const NIGHT_ACTION: Partial<Record<Role, Action>> = {
  * Orchestration logic (the Sequencer's job) — the moderator still validates every decision
  * and throws on anything illegal, so this never overrides the rules.
  */
-function phaseActors(state: GameState): { seat: number; action: Action; legalTargets: number[] }[] {
+export function phaseActors(state: GameState): { seat: number; action: Action; legalTargets: number[] }[] {
   const living = state.players.filter((p) => p.alive).map((p) => p.id);
+  const mafiaIds = new Set(state.players.filter((p) => p.role === "MAFIA").map((p) => p.id));
   const out: { seat: number; action: Action; legalTargets: number[] }[] = [];
 
   for (const p of state.players) {
     if (!p.alive) continue;
     if (state.phase === "day") {
-      out.push({ seat: p.id, action: "vote", legalTargets: living.filter((id) => id !== p.id) });
+      // A voter never targets itself; a Mafia also never targets a teammate. Day votes are legally
+      // free to hit anyone, but the weak model confuses its own team and self-eliminates, so we
+      // never OFFER a Mafia a teammate (incl. on the deterministic fallback). The vote stays a
+      // legal subset, so settlement is unaffected.
+      const targets = living.filter((id) => id !== p.id && !(p.role === "MAFIA" && mafiaIds.has(id)));
+      out.push({ seat: p.id, action: "vote", legalTargets: targets });
     } else {
       const action = NIGHT_ACTION[p.role];
       if (!action) continue;
-      // Doctor may protect anyone including itself; kill/investigate exclude self.
-      const targets = action === "save" ? living : living.filter((id) => id !== p.id);
+      // Doctor may protect anyone including itself; the detective investigates anyone but itself;
+      // the Mafia may never target a teammate (so even the deterministic fallback can't team-kill).
+      const targets =
+        action === "save" ? living
+        : action === "kill" ? living.filter((id) => !mafiaIds.has(id))
+        : living.filter((id) => id !== p.id);
       out.push({ seat: p.id, action, legalTargets: targets });
     }
   }
@@ -170,35 +192,77 @@ export async function playMatch(config: MatchConfig): Promise<AttestedMatch> {
   if (players.length !== n) throw new Error(`expected ${n} players, got ${players.length}`);
   if (personas.length !== n) throw new Error(`expected ${n} personas, got ${personas.length}`);
 
-  const { onTurn } = config;
+  const { onTurn, onDiscussion } = config;
   let state = initState(seed, n, nonce);
   const turns: RecordedTurn[] = [];
   const transcript: [number, string][] = [];
+  // Public death log: who died, when, and how. Derived by diffing the alive set as the
+  // moderator resolves each phase — it carries no hidden info (the table always sees deaths).
+  const deaths: DeathEvent[] = [];
+
+  const livingSeats = (s: GameState): number[] => s.players.filter((p) => p.alive).map((p) => p.id);
+
+  // Build the context a seat needs this turn (private knowledge derived from full state + turns).
+  const ctxFor = (
+    seat: number,
+    action: Action,
+    legalTargets: number[],
+    stage: "night" | "discussion" | "vote",
+  ): TurnContext => ({
+    persona: personas[seat]!,
+    role: state.players[seat]!.role,
+    alive: livingSeats(state),
+    roster: personas,
+    transcript: transcript.map(([s, t]) => [s, t] as const),
+    decisionStub: { nonce, phase: state.phase, round: state.round, player: seat, action },
+    legalTargets,
+    stage,
+    deaths: deaths.map((d) => ({ ...d })),
+    ...privateKnowledge(state, turns, seat, state.players[seat]!.role),
+  });
+
+  // Apply one signed turn (night action or day vote): record it, advance state, stream it.
+  const applySignedTurn = async (ctx: TurnContext): Promise<boolean> => {
+    const seat = ctx.decisionStub.player;
+    const aliveBefore = new Set(livingSeats(state));
+    const turn = await players[seat]!.takeTurn(ctx);
+    state = applyDecision(state, turn.structuredDecision);
+    // Any seat that flipped alive→dead when this turn resolved the phase is now a public death,
+    // attributed to the phase/round the action was taken in (night kill vs day vote).
+    const { phase, round } = turn.structuredDecision;
+    for (const p of state.players) {
+      if (!p.alive && aliveBefore.has(p.id)) deaths.push({ round, phase, seat: p.id });
+    }
+    const recorded: RecordedTurn = { seat, ...turn };
+    turns.push(recorded);
+    // Day vote justifications are public; night reasoning is never broadcast.
+    if (turn.structuredDecision.phase === "day") transcript.push([seat, turn.speech]);
+    if (onTurn) await onTurn(recorded, state);
+    return winnerOf(state) !== null;
+  };
 
   while (winnerOf(state) === null) {
     if (state.round > maxRounds) throw new Error(`match exceeded ${maxRounds} rounds without a winner`);
 
-    const actors = phaseActors(state);
-    for (const { seat, action, legalTargets } of actors) {
-      const role = state.players[seat]!.role;
-      const ctx: TurnContext = {
-        persona: personas[seat]!,
-        role,
-        alive: state.players.filter((p) => p.alive).map((p) => p.id),
-        transcript: transcript.map(([s, t]) => [s, t] as const),
-        decisionStub: { nonce, phase: state.phase, round: state.round, player: seat, action },
-        legalTargets,
-        ...privateKnowledge(state, turns, seat, role),
-      };
-
-      const turn = await players[seat]!.takeTurn(ctx);
-      state = applyDecision(state, turn.structuredDecision);
-      const recorded: RecordedTurn = { seat, ...turn };
-      turns.push(recorded);
-      transcript.push([seat, turn.speech]);
-      if (onTurn) await onTurn(recorded, state);
-
-      if (winnerOf(state) !== null) break; // game ended mid-phase resolution
+    if (state.phase === "night") {
+      for (const { seat, action, legalTargets } of phaseActors(state)) {
+        if (await applySignedTurn(ctxFor(seat, action, legalTargets, "night"))) break;
+      }
+    } else {
+      // DAY — discussion pass (unsigned, streamed), then vote pass (signed).
+      const living = livingSeats(state);
+      for (const seat of living) {
+        const targets = living.filter((id) => id !== seat);
+        // Discussion carries the upcoming vote's action so the reason call anticipates the
+        // vote target; there is no discussion-only action (no DECISION_RULE for one).
+        const { speech } = await players[seat]!.discuss(ctxFor(seat, "vote", targets, "discussion"));
+        transcript.push([seat, speech]);
+        if (onDiscussion) await onDiscussion({ seat, round: state.round, speech }, state);
+      }
+      for (const seat of living) {
+        const targets = living.filter((id) => id !== seat);
+        if (await applySignedTurn(ctxFor(seat, "vote", targets, "vote"))) break;
+      }
     }
   }
 

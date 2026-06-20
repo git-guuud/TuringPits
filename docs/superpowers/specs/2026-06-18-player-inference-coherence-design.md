@@ -40,11 +40,15 @@ Three inferences per turn, in order:
    extracts a legal target (lenient: JSON `target`, else first legal integer in the text).
    If none is found, resample up to the retry cap, then **fall back to a deterministic legal
    pick** (`legalTargets[0]`) so a weak model can never stall a live match.
-2. **Speak (public, streamed).** `buildSpeechPrompt(ctx, chosenTarget, reason)` is handed the
-   *actual* chosen target and the private reason, and writes 1–2 in-character sentences.
-   Role-appropriate stance; anchored to "you are seat X / {name}"; explicitly instructed
-   **not to repeat other players verbatim, not to accuse yourself, and not to leak private
-   info that hurts your faction.** Non-load-bearing — its attestation is discarded (as today).
+2. **Speak (public, streamed) — DAY ONLY.** `buildSpeechPrompt(ctx, chosenTarget, reason)` is
+   handed the *actual* chosen target and the private reason, and writes 1–2 in-character
+   sentences. Role-appropriate stance; anchored to "you are seat X / {name}"; explicitly
+   instructed **not to repeat other players verbatim, not to accuse yourself, and not to leak
+   private info that hurts your faction.** Non-load-bearing — its attestation is discarded.
+   **Night actions (kill/save/investigate) are secret: the speak stage is skipped entirely at
+   night.** The night turn carries the private reasoning (for the post-game record) in place of
+   a speech, and `playMatch` broadcasts **only day speeches** into the public transcript — so a
+   role acting later in the same night, and the next day's debate, never see night reasoning.
 3. **Decide (constrained, signed — integrity unchanged).** `buildDecisionPrompt(ctx,
    chosenTarget)` pins the canonical skeleton to `chosenTarget` and asks for that exact line.
    `parseDecision` validates byte-exact canonical/legal, **and** we additionally assert

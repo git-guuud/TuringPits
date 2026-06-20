@@ -49,7 +49,12 @@ export interface Attestation {
 
 /** The two artifacts a player turn produces (design spec §3, the two-layer turn). */
 export interface PlayerTurn {
-  /** Free-form natural-language reasoning/chatter. Streamed to UI; not load-bearing. */
+  /**
+   * Free-form natural-language text, not load-bearing. DAY: the player's public speech
+   * (broadcast to the table). NIGHT: the player's PRIVATE reasoning — recorded for the
+   * post-game audit but never broadcast, since night actions are secret. Which one it is
+   * follows from `structuredDecision.phase`.
+   */
   readonly speech: string;
   /** The constrained decision the moderator + Solidity state machine consume. */
   readonly structuredDecision: Decision;
@@ -81,6 +86,17 @@ export interface PastAction {
 }
 
 /**
+ * One public death so far this match. Visible to EVERY seat: the table always knows who has
+ * died and how. `phase` is the phase the death occurred in — `"night"` means killed by the
+ * Mafia (the killer stays secret), `"day"` means voted out by the town.
+ */
+export interface DeathEvent {
+  readonly round: number;
+  readonly phase: string;
+  readonly seat: number;
+}
+
+/**
  * What a player legitimately sees when deciding: its own seat/role, the living seats,
  * the public transcript so far, the constraints of the move it must make this turn, and the
  * private knowledge its role grants (Mafia teammates, detective findings, its own history).
@@ -90,12 +106,18 @@ export interface TurnContext {
   readonly role: string;
   /** Living seat indices. */
   readonly alive: readonly number[];
+  /** Every seat's persona (all players, alive or dead), so prompts can address others by name. */
+  readonly roster?: readonly Persona[];
   /** Public speech log so far: `[seat, text]` pairs. */
   readonly transcript: readonly (readonly [number, string])[];
+  /** Public death log: seats eliminated so far, when, and how. Visible to everyone. */
+  readonly deaths?: readonly DeathEvent[];
   /** The decision the moderator expects this turn, minus the target (the model picks it). */
   readonly decisionStub: Omit<Decision, "target">;
   /** Legal target seats for this decision. */
   readonly legalTargets: readonly number[];
+  /** Which turn stage this context is for. Defaults follow `decisionStub.phase` when omitted. */
+  readonly stage?: "night" | "discussion" | "vote";
   /** MAFIA only: the seats of this player's fellow Mafia. */
   readonly teammates?: readonly number[];
   /** DETECTIVE only: this player's own investigation results so far. */
@@ -104,10 +126,18 @@ export interface TurnContext {
   readonly ownHistory?: readonly PastAction[];
 }
 
+/** Optional sampling controls for the NON-signed calls only (reason/speech/discussion). */
+export interface SamplingOptions {
+  readonly temperature?: number;
+  readonly seed?: number;
+}
+
 /**
  * One TEE-attested inference. Implemented by the real 0G Compute provider and by the
  * labeled local mock. `complete` returns the model text plus the attestation over it.
+ * `opts` carries sampling controls for non-signed calls; the signed decision call omits it,
+ * keeping its request identical for settlement.
  */
 export interface InferenceProvider {
-  complete(prompt: string): Promise<{ text: string; attestation: Attestation }>;
+  complete(prompt: string, opts?: SamplingOptions): Promise<{ text: string; attestation: Attestation }>;
 }

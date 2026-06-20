@@ -58,7 +58,7 @@ contract MafiaMarket {
         uint8 _playerCount
     ) external onlyHost {
         require(roleCommit == bytes32(0), "already opened");
-        require(_playerCount >= 5 && _playerCount <= 7, "bad player count");
+        require(_playerCount >= 5 && _playerCount <= 8, "bad player count");
         require(_teeSigner != address(0), "zero signer");
         roleCommit = _roleCommit;
         teeSigner = _teeSigner;

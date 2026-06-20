@@ -4,7 +4,7 @@ import { MockLocalProvider } from "./provider.js";
 import { verifyAttestation } from "./attestation.js";
 import { toSettlementMove } from "./match.js";
 import { wrapResponseBody } from "./envelope.js";
-import type { Attestation, InferenceProvider, TurnContext } from "./types.js";
+import type { Attestation, InferenceProvider, SamplingOptions, TurnContext } from "./types.js";
 
 const FIXED_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
@@ -25,6 +25,29 @@ describe("Player.takeTurn", () => {
     expect(turn.speech.length).toBeGreaterThan(0);
     expect(turn.structuredDecision.player).toBe(2);
     expect(ctx.legalTargets).toContain(turn.structuredDecision.target);
+    expect(verifyAttestation(turn.attestation)).toBe(true);
+  });
+
+  it("at NIGHT makes no public speech — only private reasoning + the signed action", async () => {
+    const nightCtx: TurnContext = {
+      ...ctx,
+      role: "MAFIA",
+      decisionStub: { nonce: "deadbeef", phase: "night", round: 1, player: 2, action: "kill" },
+      legalTargets: [0, 1, 3, 4],
+    };
+    let speechCalls = 0;
+    const base = new MockLocalProvider(FIXED_KEY);
+    const recording: InferenceProvider = {
+      async complete(prompt: string) {
+        if (prompt.includes("make your in-character case aloud")) speechCalls++;
+        return base.complete(prompt);
+      },
+    };
+    const turn = await new Player(recording).takeTurn(nightCtx);
+
+    expect(speechCalls).toBe(0); // the public speak stage is skipped at night
+    expect(turn.structuredDecision.action).toBe("kill");
+    expect(turn.speech.length).toBeGreaterThan(0); // carries the private reasoning instead
     expect(verifyAttestation(turn.attestation)).toBe(true);
   });
 
@@ -128,5 +151,65 @@ describe("Player.takeTurn", () => {
       },
     };
     await expect(new Player(rogue).takeTurn(ctx)).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 2: Per-seat inference diversity
+// ---------------------------------------------------------------------------
+
+function capturing(): { provider: InferenceProvider; calls: { prompt: string; opts?: SamplingOptions }[] } {
+  const base = new MockLocalProvider("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
+  const calls: { prompt: string; opts?: SamplingOptions }[] = [];
+  return {
+    calls,
+    provider: { async complete(prompt, opts) { calls.push({ prompt, opts }); return base.complete(prompt, opts); } },
+  };
+}
+
+function voteCtx(seat: number): TurnContext {
+  return {
+    persona: { seat, name: `P${seat}`, blurb: "a player" },
+    role: "TOWN",
+    alive: [0, 1, 2],
+    transcript: [],
+    decisionStub: { nonce: "n", phase: "day", round: 1, player: seat, action: "vote" },
+    legalTargets: [0, 1, 2].filter((i) => i !== seat),
+  };
+}
+
+describe("Player inference diversity", () => {
+  it("passes temperature+seed to non-signed calls but none to the signed decision call", async () => {
+    const { provider, calls } = capturing();
+    await new Player(provider).takeTurn(voteCtx(0));
+    // 3 calls: reason, speech, decision (day vote).
+    expect(calls.length).toBe(3);
+    expect(calls[0]!.opts?.temperature).toBeGreaterThan(0); // reason
+    expect(calls[0]!.opts?.seed).toBeTypeOf("number"); // reason seed present
+    expect(calls[1]!.opts?.temperature).toBeGreaterThan(0); // speech
+    expect(calls[1]!.opts?.seed).toBeTypeOf("number");
+    expect(calls[2]!.opts).toBeUndefined();                  // signed decision: unchanged request
+  });
+
+  it("derives a different seed per seat for the same turn", async () => {
+    const a = capturing();
+    const b = capturing();
+    await new Player(a.provider).takeTurn(voteCtx(0));
+    await new Player(b.provider).takeTurn(voteCtx(1));
+    expect(a.calls[1]!.opts?.seed).not.toBe(b.calls[1]!.opts?.seed);
+  });
+});
+
+describe("Player.discuss", () => {
+  it("returns a speech with no structured decision and no attestation", async () => {
+    const { provider, calls } = capturing();
+    const ctx: TurnContext = { ...voteCtx(0), stage: "discussion" };
+    const result = await new Player(provider).discuss(ctx);
+    expect(typeof result.speech).toBe("string");
+    expect(result.speech.length).toBeGreaterThan(0);
+    expect((result as Record<string, unknown>).structuredDecision).toBeUndefined();
+    expect((result as Record<string, unknown>).attestation).toBeUndefined();
+    // 1 call: discussion speech only — no reason call (no pre-chosen leaning), never a decision.
+    expect(calls.length).toBe(1);
   });
 });

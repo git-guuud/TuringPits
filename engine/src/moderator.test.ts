@@ -29,10 +29,11 @@ function dec(over: Partial<Decision> & Pick<Decision, "phase" | "round" | "playe
 }
 
 describe("assignRoles", () => {
-  it("produces the right composition for n=5/6/7", () => {
+  it("produces the right composition for n=5/6/7/8", () => {
     expect(tally(assignRoles(SEED, 5))).toEqual({ MAFIA: 1, DOCTOR: 1, DETECTIVE: 1, TOWN: 2 });
     expect(tally(assignRoles(SEED, 6))).toEqual({ MAFIA: 1, DOCTOR: 1, DETECTIVE: 1, TOWN: 3 });
     expect(tally(assignRoles(SEED, 7))).toEqual({ MAFIA: 2, DOCTOR: 1, DETECTIVE: 1, TOWN: 3 });
+    expect(tally(assignRoles(SEED, 8))).toEqual({ MAFIA: 2, DOCTOR: 1, DETECTIVE: 1, TOWN: 4 });
   });
 
   it("is deterministic for a given (seed, n)", () => {
@@ -45,7 +46,7 @@ describe("assignRoles", () => {
 
   it("rejects unsupported player counts", () => {
     expect(() => assignRoles(SEED, 4)).toThrow();
-    expect(() => assignRoles(SEED, 8)).toThrow();
+    expect(() => assignRoles(SEED, 9)).toThrow();
   });
 });
 
