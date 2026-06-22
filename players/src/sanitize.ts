@@ -8,7 +8,7 @@ import type { InferenceProvider, SamplingOptions } from "./types.js";
  * settled — so the moderator may scrub it. The signed decision is never touched.
  */
 export const BAD_SPEECH =
-  /\btonight\b|\blast night\b|\bsilen(?:t|ce)\b|\bwithdrawn\b|defensive stance|\bevasive\b|night behavio|lack of (?:involvement|participation|engagement|interaction|communication|activity|contribution)|\b(?:hasn'?t|haven'?t|hadn'?t|isn'?t|aren'?t|not|never|barely|hardly)\s+(?:\w+\s+){0,2}?(?:spoken|speaking|said anything|interact|contribut|participat|engag)/i;
+  /\btonight\b|\blast night\b|\bsilen(?:t|ce)\b|\bwithdrawn\b|defensive stance|\bevasive\b|night behavio|night began|(?:since|during|throughout) the night|eye[-\s]?contact|body language|facial expression|\bfidget|\bsquirm|\bshifty\b|\bflinch|\btrembl|\bsweating\b|nervous (?:glance|tic|twitch|gesture)|avoiding (?:eye|eyes|my gaze|our gaze)|\bgaze\b|\bdemean(?:our|or)\b|usual\s+(?:self|behavio(?:u)?r|demean(?:our|or)|manner|temperament|tone)|out of character|(?:hasn'?t|haven'?t|isn'?t|aren'?t|wasn'?t|weren'?t)\s+been\s+(?:him|her|them|it)self|acting\s+(?:\w+ly\s+)?(?:secretive\w*|strange\w*|odd\w*|weird\w*|cagey|defensiv\w*|shady|sketchy|paranoid|guilty|fishy|suspicious\w*|nervous\w*|differe\w*)|\bnervousness\b|nervous around|(?:is|are|was|were|seems?|seemed|look(?:s|ed)?|appears?|appeared|been|gets?|getting|grew|so|very|really|quite|visibly|clearly)\s+(?:nervous|anxious|uneasy|jittery|flustered|rattled|on edge)|lack of (?:involvement|participation|engagement|interaction|communication|activity|contribution)|\b(?:hasn'?t|haven'?t|hadn'?t|isn'?t|aren'?t|not|never|barely|hardly)\s+(?:\w+\s+){0,2}?(?:spoken|speaking|said anything|interact|contribut|participat|engag)/i;
 
 /**
  * CJK / Japanese / Korean script. The Chinese-trained weak model code-switches mid-sentence
@@ -27,6 +27,31 @@ export function hasNonEnglish(text: string): boolean {
 /** True if the text contains any hallucination marker that should keep it out of the transcript. */
 export function hasBadMarker(text: string): boolean {
   return BAD_SPEECH.test(text) || NON_ENGLISH.test(text);
+}
+
+/**
+ * A first-person claim about one's OWN night action — a real Detective reveal or a Mafia's fake
+ * Detective bluff. Such a line may LEGITIMATELY reference the night ("I investigated Boris last
+ * night — he's Mafia"), unlike a fabricated observation of someone ELSE at night ("Boris was
+ * suspicious last night"), which the night guard rightly rejects. Used to exempt only the night WORD
+ * in such a claim — every other fabrication marker still counts.
+ */
+const OWN_NIGHT_CLAIM =
+  /\b(?:I\s+investigated\b|my\s+investigation\b|I(?:'?m| am)\s+the\s+(?:detective|doctor)\b|I\s+checked\b|I\s+looked\s+into\b)/i;
+
+/**
+ * Per-sentence bad-marker test used by the salvage and the day guard. Identical to {@link hasBadMarker}
+ * EXCEPT that a bare night reference ("last night"/"tonight") inside an {@link OWN_NIGHT_CLAIM} is not
+ * counted — so a Detective reveal / Mafia bluff that cites its own night investigation survives instead
+ * of being nuked for legitimately naming the night. CJK and all other fabrication markers still count.
+ */
+export function sentenceHasBadMarker(s: string): boolean {
+  if (NON_ENGLISH.test(s)) return true;
+  if (!BAD_SPEECH.test(s)) return false;
+  if (OWN_NIGHT_CLAIM.test(s) && !BAD_SPEECH.test(s.replace(/\btonight\b|\blast night\b|\bthat night\b/gi, " "))) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -97,14 +122,28 @@ const NIGHT_INVENTED =
  * replaced with an honest, role-appropriate line about the chosen player. Grounded reasoning that
  * references real prior-day talk has no markers and passes through unchanged.
  */
-export function cleanNightReason(raw: string, action: string, targetName: string): string {
+export function cleanNightReason(raw: string, action: string, targetName: string, selfName = ""): string {
   const text = raw.trim();
-  if (text && !BAD_SPEECH.test(text) && !NIGHT_INVENTED.test(text) && !NON_ENGLISH.test(text)) return text;
+  // Reject third-person self-narration too: the weak model echoes its own persona blurb in the third
+  // person on a self-save ("Felix is the prosecutor… making him a likely target" when the actor IS
+  // Felix), which reads as nonsense in the private audit log. The day guard already catches this for
+  // public speech; the night reason had no such check, so it leaked. Falls to the role line below.
+  const grounded =
+    !!text &&
+    !BAD_SPEECH.test(text) &&
+    !NIGHT_INVENTED.test(text) &&
+    !NON_ENGLISH.test(text) &&
+    !(selfName !== "" && refersToSelfInThirdPerson(text, selfName));
+  if (grounded) return text;
+  const isSelf = selfName !== "" && targetName === selfName;
   switch (action) {
     case "kill":
       return `${targetName} looks like a strong early threat, so we remove them.`;
     case "save":
-      return `Protecting ${targetName}, a plausible target for the Mafia.`;
+      // A Doctor guarding ITSELF should reason in the first person, not narrate its own name.
+      return isSelf
+        ? `Guarding myself this round — I am a plausible target for the Mafia.`
+        : `Protecting ${targetName}, a plausible target for the Mafia.`;
     case "investigate":
       return `Investigating ${targetName} to start gathering information.`;
     default:
@@ -154,13 +193,139 @@ export function isEcho(text: string, prior: readonly string[], whole = 0.7, sent
   return false;
 }
 
+/**
+ * Strip a LEADING verbatim echo of an earlier line off this speech. The greedy weak model loves to
+ * open its turn by copying the previous speaker's whole sentence(s) and only THEN add its own point
+ * (live probe: nearly every rejected round-1 line began with a copy of the opener). Dropping those
+ * leading near-duplicate sentences salvages the genuine point that follows, which would otherwise be
+ * thrown away whole by the echo check and replaced by a bland fallback. Only LEADING echoes are
+ * removed — an echo buried mid-reply is genuine parroting and still trips {@link isEcho}.
+ */
+export function stripLeadingEcho(text: string, prior: readonly string[]): string {
+  if (prior.length === 0) return text;
+  const priorSets = prior.flatMap(sentences).map((s) => new Set(tokens(s))).filter((s) => s.size >= 4);
+  if (priorSets.length === 0) return text;
+  const segs = sentences(text);
+  let i = 0;
+  while (i < segs.length) {
+    const sa = new Set(tokens(segs[i]!));
+    if (sa.size >= 4 && priorSets.some((sb) => jaccard(sa, sb) >= 0.8)) i++;
+    else break;
+  }
+  if (i === 0) return text; // no leading echo
+  const kept = segs.slice(i).join(" ").trim();
+  return kept.length === 0 ? text : kept; // all-echo → leave it for the echo guard to reject
+}
+
+/**
+ * Drop whole SENTENCES that carry a hallucination marker (night-confusion, physical tell, invented
+ * demeanour, CJK), keeping the clean ones. The weak model often produces a strong line plus ONE bad
+ * sentence — most damagingly a power-role CLAIM ("I'm the Detective, I investigated Dmitri — he's
+ * Mafia. Vote him out.") wrapped around a fabricated "he's been evasive tonight" justification that
+ * would otherwise nuke the WHOLE reveal/bluff to a bland fallback. Salvaging the clean sentences keeps
+ * the drama (mirrors {@link stripLeadingEcho}). Returns the original when nothing is dropped, or when
+ * the salvage would leave too little to be a real contribution (then reject→regenerate→fallback runs).
+ */
+export function stripMarkedSentences(text: string): string {
+  const segs = sentences(text);
+  if (segs.length <= 1) return text; // a single sentence is all-or-nothing — nothing to salvage
+  const kept = segs.filter((s) => !sentenceHasBadMarker(s));
+  if (kept.length === segs.length) return text; // nothing dropped
+  const out = kept.join(" ").trim();
+  return tokens(out).length >= 5 ? out : text; // too little left → leave it for the guard
+}
+
+/** Third-person verbs/copulas the model uses when it (wrongly) narrates ITSELF from outside. */
+const THIRD_PERSON_VERB =
+  "is|are|was|were|has|have|had|seems?|appears?|looks?|sounds?|keeps?|been|did|does|doesn'?t|isn'?t|hasn'?t|won'?t|tends?|acts?|stays?|remains?";
+
+/**
+ * True if the speech narrates the SPEAKER in the third person — "Cassius has been vocal", "Felix is
+ * handling himself", "Cassius' lack of substance" — when the speaker IS Cassius/Felix. The weak model
+ * confuses its own identity on a name-labelled transcript and ends up arguing about (even against)
+ * itself, which reads as nonsense and slips past the other guards because it has no marker. A bare
+ * self-introduction ("I'm Felix") is fine — only a third-person predicate/possessive on the own name
+ * trips it. Used by the day guard to force a first-person rewrite.
+ */
+export function refersToSelfInThirdPerson(text: string, selfName: string): boolean {
+  if (!selfName) return false;
+  const n = escapeRe(selfName);
+  // Possessive "Name's" or "Name'" (the elided s after a name ending in s, e.g. "Cassius'"), OR
+  // "Name <third-person verb>". A bare "I'm Name" self-intro has neither, so it is not flagged.
+  const possessive = new RegExp(`\\b${n}['’]`, "i");
+  const subject = new RegExp(`\\b${n}\\s+(?:${THIRD_PERSON_VERB})\\b`, "i");
+  // Self-ADDRESS: the model talks TO itself by name in the second person ("Oracle, share your
+  // thoughts", "Oracle, why haven't you spoken?"). Anchored to a clause start AND requiring a
+  // second-person cue (you/your/please) in the same sentence, so a mid-line self-intro
+  // ("I'm Felix, and…") or a plain opener ("Felix, here —") is NOT flagged.
+  const vocative = new RegExp(`(?:^|[.!?]\\s+)${n}\\s*,[^.!?]*\\b(?:you|your|please)\\b`, "i");
+  return possessive.test(text) || subject.test(text) || vocative.test(text);
+}
+
+/**
+ * The cleared-Town names a Detective's DAY speech ACCUSES — i.e. pushes today's vote onto, or
+ * predicates suspicion of. A Detective that has privately learned a seat is TOWN must never publicly
+ * turn the table against it: doing so inverts its own certain knowledge and railroads an innocent
+ * (seen live: investigated Esme=TOWN, then "today's vote should focus on Esme… she's hiding
+ * something… vote her out"). The prompt already steers a cleared Detective to VOUCH, but the weak
+ * model ignores that conditional instruction, so this is the reliable guard layer. It is sentence-
+ * scoped with a PROTECTIVE override, so a genuine vouch/defence ("Esme is innocent — look at Boris
+ * instead") is never flagged: the check is biased toward precision because a false reject collapses
+ * the line to a bland fallback (the documented root cause of dull matches), and a missed nuance is
+ * far cheaper than that. Returns the accused cleared names (empty = the speech is clean or vouches).
+ */
+export function accusesClearedTown(text: string, clearedNames: readonly string[]): string[] {
+  if (clearedNames.length === 0) return [];
+  // A cleared name as the OBJECT of a vote/removal/suspicion verb ("vote Esme out", "focus on Esme").
+  const VOTE_VERB =
+    "vote|voting|votes|voted|suspect|suspects|distrust|accuse|accuses|blame|blames|remove|removes|eliminat\\w*|oust|ousts|target|targets|focus(?:es|ing)?";
+  // A cleared name as the SUBJECT of a suspicion predicate ("Esme is suspicious", "Esme's hiding it").
+  // A linking verb, optionally with an intervening intensifier ("Esme really is suspicious").
+  const LINK_VERB =
+    "is|are|was|were|seems?|looks?|appears?|sounds?|has\\s+been|have\\s+been|might\\s+be|may\\s+be|could\\s+be|must\\s+be|keeps?|been|acts?|acting|behav\\w*|is\\s+being";
+  const ADVERB =
+    "really|clearly|definitely|certainly|obviously|honestly|probably|surely|totally|absolutely|actually|truly|genuinely|seriously|just|still|always|now|sure|kind\\s+of|sort\\s+of";
+  const SUSPICION =
+    "suspicious|guilty|mafia|hiding|hides|lying|liar|shady|evasive|secretive|sketchy|deceptive|deceiv\\w*|dangerous|untrustworthy|culprit|fishy|deflect\\w*|dodg\\w*|cover(?:ing|s)?\\s+(?:up|something)|the\\s+(?:threat|problem|killer|mafia)";
+  // Any of these in the SAME sentence means the line is defending/clearing the name, not accusing it —
+  // so we do NOT flag (vouching for a cleared seat is exactly what the Detective is supposed to do).
+  // Contractions (won't/can't/isn't…) require the apostrophe so plain "-nt" words (front, want) don't trip it.
+  const PROTECTIVE =
+    /\b(?:innocent|trust(?:s|ed|worthy)?|vouch\w*|clear(?:ed|s)?|clean|safe|defend\w*|protect\w*|spare|stand\s+(?:with|by)|side\s+with|believe\s+in|not|never|stop|wrong\w*|leave|off\s+the\s+hook)\b|\b\w+n['’]t\b/i;
+  const hits = new Set<string>();
+  for (const name of clearedNames) {
+    const n = escapeRe(name);
+    const nameRe = new RegExp(`\\b${n}\\b`, "i");
+    const obj = new RegExp(`\\b(?:${VOTE_VERB})\\b(?:\\s+\\w+){0,3}?\\s+(?:for|out|against|on)?\\s*\\b${n}\\b`, "i");
+    const subjPoss = new RegExp(`\\b${n}['’]s?\\b[^.!?]{0,40}?\\b(?:${SUSPICION})`, "i");
+    const subjVerb = new RegExp(
+      `\\b${n}\\b(?:\\s+(?:${ADVERB})){0,2}\\s+(?:${LINK_VERB})\\b[^.!?]{0,40}?\\b(?:${SUSPICION})`,
+      "i",
+    );
+    const subj = (s: string): boolean => subjPoss.test(s) || subjVerb.test(s);
+    const removal = new RegExp(
+      `\\b${n}\\b[^.!?]{0,30}?\\b(?:out\\s+today|should\\s+(?:be\\s+(?:removed|voted|eliminated|gone|out)|go|leave)|needs?\\s+to\\s+go|has\\s+to\\s+go|deserves?\\s+the\\s+vote)`,
+      "i",
+    );
+    for (const s of sentences(text)) {
+      if (!nameRe.test(s)) continue;
+      if ((obj.test(s) || subj(s) || removal.test(s)) && !PROTECTIVE.test(s)) {
+        hits.add(name);
+        break;
+      }
+    }
+  }
+  return [...hits];
+}
+
 /** Correction appended when regenerating a rejected speech for a hallucination marker. */
 const MARKER_NOTE =
-  "Your previous reply was REJECTED: it treated the unobservable night, or a player simply not " +
-  "having spoken yet, as if it were evidence. It is daytime, and players speak in turn — a player " +
-  "who has not spoken yet is just waiting their turn, which is normal and never suspicious. Rewrite " +
-  'WITHOUT the words "tonight", "silent", or "silence", and without any claim about who has or has ' +
-  "not spoken. Ground it only in words a player actually said above.";
+  "Your previous reply was REJECTED: it treated the unobservable night, a still-silent player, or " +
+  "made-up physical behaviour as if it were evidence. This is a TEXT game — there is no eye contact, " +
+  "body language, tone, or appearance to read, and no one can observe the night. It is daytime and " +
+  "players speak in turn, so a player who has not spoken yet is just waiting, never suspicious. " +
+  'Rewrite WITHOUT the words "tonight", "silent", or "silence", without inventing anyone\'s ' +
+  "manner or how they carry themselves, and ground it ONLY in words a player actually typed above.";
 
 /** Correction appended when a speech contained non-English (CJK) text. */
 const LANGUAGE_NOTE =
@@ -172,6 +337,11 @@ const ECHO_NOTE =
   "lightly reword anyone else's line — make a genuinely DIFFERENT point in your own words, or briefly " +
   "say you have nothing new to add yet.";
 
+/** Correction appended when the speech narrates the speaker itself in the third person. */
+const selfRefNote = (name: string): string =>
+  `Your previous reply was REJECTED because it talked about ${name} in the third person — but YOU are ${name}. ` +
+  `Speak as "I" / "me"; never describe ${name} from the outside or argue against your own words.`;
+
 /** Correction appended when a speech invented behaviour for a player who has not spoken yet. */
 const fabricationNote = (names: readonly string[]): string =>
   `Your previous reply was REJECTED: it referred to ${names.join(" and ")}, who ${
@@ -179,6 +349,18 @@ const fabricationNote = (names: readonly string[]): string =>
   } NOT spoken yet, so you cannot know anything about ${names.length > 1 ? "them" : "them"}. ` +
   "Players speak in turn. Rewrite WITHOUT mentioning anyone who has not spoken above — react only to " +
   "players whose own lines actually appear in the discussion, or make a general point that names no one.";
+
+/** Correction appended when a Detective's speech accuses a seat its own investigation has CLEARED. */
+const clearedTownNote = (names: readonly string[]): string => {
+  const list = names.join(" and ");
+  const plural = names.length > 1;
+  return (
+    `Your previous reply was REJECTED: your own secret investigation already proved ${list} ` +
+    `${plural ? "are" : "is"} innocent Town. Never push today's vote onto ${list} and never call ` +
+    `${plural ? "them" : list} a suspect — defend ${plural ? "them" : list} if the table turns that way, ` +
+    `and aim your suspicion only at a player you have NOT cleared.`
+  );
+};
 
 /**
  * Moderator guard for one unsigned DAY speech. Returns the speech trimmed/label-stripped if it is
@@ -197,30 +379,53 @@ export async function cleanDaySpeech(
   priorTexts: readonly string[] = [],
   opts?: SamplingOptions,
   allowedNames: readonly string[] = [],
+  selfName = "",
+  clearedNames: readonly string[] = [],
 ): Promise<string> {
-  const clean = (t: string): string => stripSpeakerLabels(t, names);
+  // Salvage BEFORE judging: strip a leading verbatim echo of an earlier line (so the genuine point
+  // after a copied preamble survives), then drop any single hallucinated sentence (so a strong reveal/
+  // bluff wrapped around one bad "evasive tonight" line survives instead of being nuked whole), then
+  // strip transcript-format labels. Only what's left is judged — the dominant round-1 reject modes.
+  const clean = (t: string): string =>
+    stripSpeakerLabels(stripMarkedSentences(stripLeadingEcho(t, priorTexts)), names);
   const note = (t: string): string => {
     const parts: string[] = [];
     if (hasNonEnglish(t)) parts.push(LANGUAGE_NOTE);
-    else if (hasBadMarker(t)) parts.push(MARKER_NOTE); // language note already covers a CJK reject
+    // Per-sentence + night-claim-aware: a Detective reveal / Mafia bluff may cite its own night
+    // investigation; only OTHER fabrication (or a non-claim night reference) trips MARKER_NOTE.
+    else if (sentences(t).some((s) => sentenceHasBadMarker(s))) parts.push(MARKER_NOTE);
     if (isEcho(t, priorTexts)) parts.push(ECHO_NOTE);
+    if (refersToSelfInThirdPerson(t, selfName)) parts.push(selfRefNote(selfName));
     // Only enforce the forbidden-name check when an allow-list is supplied; with none, every name
     // is permitted (back-compat for callers that don't track who has spoken).
     if (allowedNames.length > 0) {
       const bad = forbiddenNames(t, names, allowedNames);
       if (bad.length > 0) parts.push(fabricationNote(bad));
     }
+    // A Detective accusing a seat it has privately cleared as Town inverts its own certain knowledge
+    // and railroads an innocent — the prompt steers it to vouch, but the weak model ignores that, so
+    // reject the line here. Only the day-discussion caller supplies clearedNames (empty otherwise).
+    const accusedCleared = accusesClearedTown(t, clearedNames);
+    if (accusedCleared.length > 0) parts.push(clearedTownNote(accusedCleared));
     return parts.join(" ");
   };
   const first = clean(rawText);
   const firstNote = note(first);
   if (firstNote === "") return first;
+  // Opt-in diagnostics: GUARD_DEBUG surfaces WHY a speech was rejected (which is otherwise invisible —
+  // only the bland fallback reaches the transcript), so prompt tuning can target the real failure mode.
+  const dbg = (stage: string, t: string) => {
+    if (process.env.GUARD_DEBUG) console.error(`\n[GUARD ${stage}] reject: ${note(t)}\n  raw: ${t.replace(/\n/g, " ⏎ ")}`);
+  };
+  dbg("1st", first);
   try {
     const retry = await provider.complete(`${basePrompt}\n\n${firstNote}`, opts);
     const retried = clean(retry.text);
     if (note(retried) === "") return retried;
+    dbg("retry", retried);
   } catch {
     // fall through to the safe fallback
   }
+  if (process.env.GUARD_DEBUG) console.error(`[GUARD → FALLBACK] ${fallback}`);
   return fallback;
 }

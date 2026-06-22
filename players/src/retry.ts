@@ -14,6 +14,9 @@ export interface RetryOptions {
   maxDelayMs?: number;
   /** Decide whether an error is worth retrying (default {@link isTransientError}). */
   isRetryable?: (err: unknown) => boolean;
+  /** Override the backoff for a specific error (e.g. honour a 429's "wait N seconds" hint).
+   *  Return the delay in ms to use instead of the exponential schedule, or undefined to keep it. */
+  delayForError?: (err: unknown, attempt: number) => number | undefined;
   /** Observe each retry (logging). */
   onRetry?: (err: unknown, attempt: number, delayMs: number) => void;
   /** Injectable sleep (tests pass a synchronous virtual clock). */
@@ -53,6 +56,7 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOptions = {}
     baseDelayMs = 500,
     maxDelayMs = 8000,
     isRetryable = isTransientError,
+    delayForError,
     onRetry,
     delay = (ms) => new Promise<void>((r) => setTimeout(r, ms)),
   } = opts;
@@ -64,7 +68,11 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOptions = {}
     } catch (err) {
       lastErr = err;
       if (attempt === retries || !isRetryable(err)) throw err;
-      const d = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
+      // A provider that tells us exactly how long to wait (e.g. a 429 "wait N seconds") overrides
+      // the exponential schedule — the generic backoff is far too short to outlast a token-rate
+      // window, so honouring the hint is what turns a fatal 429 storm into a brief pause.
+      const hinted = delayForError?.(err, attempt);
+      const d = hinted ?? Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
       onRetry?.(err, attempt + 1, d);
       await delay(d);
     }

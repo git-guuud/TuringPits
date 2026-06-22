@@ -67,7 +67,7 @@ describe("Player.takeTurn", () => {
     // Fails the first two DECISION inferences (illegal JSON), then defers to the real mock.
     const flaky: InferenceProvider = {
       async complete(prompt: string) {
-        if (prompt.startsWith("You are seat")) {
+        if (prompt.startsWith("Transcription task")) {
           calls++;
           if (calls <= 2) {
             const { rawResponseBody, contentOffset, contentLen } = wrapResponseBody("not a decision");
@@ -100,7 +100,7 @@ describe("Player.takeTurn", () => {
   it("makes the structured decision target the seat chosen during reasoning (speech ⇆ action)", async () => {
     // respond: decision prompt → echo the pinned skeleton; reason prompt → choose seat 1; else prose.
     const respond = (prompt: string): string => {
-      if (prompt.startsWith("You are seat")) {
+      if (prompt.startsWith("Transcription task")) {
         return prompt.split("\n").find((l) => l.trimStart().startsWith('{"nonce"'))!.trim();
       }
       if (prompt.includes("Legal target seats")) {
@@ -117,7 +117,7 @@ describe("Player.takeTurn", () => {
 
   it("falls back to a legal target when the reasoning inference never names one", async () => {
     const respond = (prompt: string): string => {
-      if (prompt.startsWith("You are seat")) {
+      if (prompt.startsWith("Transcription task")) {
         return prompt.split("\n").find((l) => l.trimStart().startsWith('{"nonce"'))!.trim();
       }
       if (prompt.includes("Legal target seats")) return "I honestly cannot decide who to pick.";
@@ -133,7 +133,7 @@ describe("Player.takeTurn", () => {
   it("throws if the provider's decision output is illegal (never silently corrected)", async () => {
     const rogue: InferenceProvider = {
       async complete(prompt: string) {
-        const text = prompt.startsWith("You are seat") ? '{"nonce":"x"}' : "chatter";
+        const text = prompt.startsWith("Transcription task") ? '{"nonce":"x"}' : "chatter";
         const { rawResponseBody, contentOffset, contentLen } = wrapResponseBody(text);
         const att: Attestation = {
           signature: "0x00",
@@ -211,5 +211,102 @@ describe("Player.discuss", () => {
     expect((result as Record<string, unknown>).attestation).toBeUndefined();
     // 1 call: discussion speech only — no reason call (no pre-chosen leaning), never a decision.
     expect(calls.length).toBe(1);
+  });
+
+  it("keeps a committed read about a player the table is ALREADY debating (not yet spoken)", async () => {
+    // Vesper (seat 1) accused Cassius (seat 2); Cassius has NOT spoken. A Town reply that agrees and
+    // names Cassius is grounded in Vesper's real line, so the moderator guard must NOT scrub it to a
+    // bland fallback. Without the transcript-mention allow-list, Cassius would be a "forbidden name".
+    const roster = [
+      { seat: 0, name: "Atlas", blurb: "loud" },
+      { seat: 1, name: "Vesper", blurb: "dry" },
+      { seat: 2, name: "Cassius", blurb: "formal" },
+      { seat: 3, name: "Wren", blurb: "steady" },
+    ];
+    const committed = "I'm with Vesper here — Cassius keeps dodging the real questions, so he has my attention in today's vote.";
+    const provider = new MockLocalProvider(FIXED_KEY, () => committed);
+    const discCtx: TurnContext = {
+      persona: { seat: 3, name: "Wren", blurb: "steady" },
+      role: "TOWN",
+      alive: [0, 1, 2, 3],
+      roster,
+      transcript: [[1, "Cassius is all process and no substance — I want a straight answer from him."]],
+      decisionStub: { nonce: "n", phase: "day", round: 2, player: 3, action: "vote" },
+      legalTargets: [0, 1, 2],
+      stage: "discussion",
+    };
+    const result = await new Player(provider).discuss(discCtx);
+    expect(result.speech).toContain("Cassius"); // survived the guard — not collapsed to a fallback
+  });
+
+  // A Detective that has privately learned a seat is TOWN must never publicly railroad it. The prompt
+  // steers it to vouch, but the weak model ignores that, so the day guard is the reliable layer.
+  const detRoster = [
+    { seat: 0, name: "Ada", blurb: "cold" },
+    { seat: 1, name: "Boris", blurb: "loud" },
+    { seat: 2, name: "Cleo", blurb: "calm" },
+    { seat: 3, name: "Dmitri", blurb: "dry" },
+    { seat: 4, name: "Esme", blurb: "patient" },
+  ];
+  const detCtx: TurnContext = {
+    persona: { seat: 2, name: "Cleo", blurb: "calm" },
+    role: "DETECTIVE",
+    alive: [0, 1, 2, 3, 4],
+    roster: detRoster,
+    transcript: [[1, "We're wasting time — somebody commit to a real read already."]],
+    decisionStub: { nonce: "n", phase: "day", round: 2, player: 2, action: "vote" },
+    legalTargets: [0, 1, 3, 4],
+    stage: "discussion",
+    investigations: [{ round: 1, target: 4, faction: "TOWN" }], // Cleo privately cleared Esme
+  };
+
+  it("never lets a Detective accuse a seat its own investigation has CLEARED (falls back instead)", async () => {
+    // The model ignores the vouch task and railroads its cleared seat on every attempt → safe fallback.
+    const accuse = "Today's vote should focus on Esme; she's hiding something. Vote her out today.";
+    const provider = new MockLocalProvider(FIXED_KEY, () => accuse);
+    const result = await new Player(provider).discuss(detCtx);
+    expect(result.speech).not.toContain("Esme"); // the cleared seat is never pushed onto the table
+    expect(result.speech.length).toBeGreaterThan(0);
+  });
+
+  it("lets a Detective VOUCH for its cleared seat while redirecting suspicion (no false reject)", async () => {
+    const vouch = "Esme has earned my trust today, so I'm putting the heat on Dmitri instead.";
+    const provider = new MockLocalProvider(FIXED_KEY, () => vouch);
+    const result = await new Player(provider).discuss(detCtx);
+    expect(result.speech).toBe(vouch); // vouching is exactly what a cleared Detective should do
+  });
+
+  it("lets a power role RESTATE its own established claim across rounds (own lines aren't echo)", async () => {
+    // A Detective who revealed in round 1 must keep pushing the SAME caught-Mafia claim in round 2.
+    // The echo guard compares only against OTHER seats, so re-asserting its own line is not parroting
+    // and must survive — under the old all-speeches echo check this collapsed to a bland fallback,
+    // which is the dominant reason round-2+ speeches were getting filtered out.
+    const claim = "I am the Detective. I investigated Boris and Boris is Mafia — vote Boris out today.";
+    const revealCtx: TurnContext = {
+      persona: { seat: 2, name: "Cleo", blurb: "calm" },
+      role: "DETECTIVE",
+      alive: [0, 1, 2, 3, 4],
+      roster: detRoster,
+      // Cleo's OWN round-1 reveal is in the transcript, alongside another seat's line.
+      transcript: [
+        [2, claim],
+        [3, "I still don't have a firm read on anyone here."],
+      ],
+      decisionStub: { nonce: "n", phase: "day", round: 2, player: 2, action: "vote" },
+      legalTargets: [0, 1, 3, 4],
+      stage: "discussion",
+      investigations: [{ round: 1, target: 1, faction: "MAFIA" }], // caught Boris
+    };
+    const provider = new MockLocalProvider(FIXED_KEY, () => claim);
+    const result = await new Player(provider).discuss(revealCtx);
+    expect(result.speech).toContain("I am the Detective");
+    expect(result.speech).toContain("Boris"); // survived — not collapsed to a no-name fallback
+  });
+
+  it("converts a stray 'seat N' in a discussion line to the player's name", async () => {
+    const provider = new MockLocalProvider(FIXED_KEY, () => "I have my eye on seat 1 today.");
+    const result = await new Player(provider).discuss({ ...detCtx, role: "TOWN", investigations: undefined });
+    expect(result.speech).toContain("Boris");   // seat 1 → Boris
+    expect(result.speech).not.toContain("seat 1");
   });
 });

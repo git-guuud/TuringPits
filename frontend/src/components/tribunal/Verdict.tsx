@@ -148,8 +148,8 @@ export function Verdict({ api }: { api: MatchApi }) {
   };
 
   const balance = s.wallet.balance != null ? parseFloat(s.wallet.balance) : null;
-  // Leave a sliver for gas when staking "Max".
-  const maxStake = balance != null ? Math.max(0, balance - 0.001) : null;
+  // CHIP is the stake currency; gas is paid in native 0G, so "Max" can stake the whole CHIP balance.
+  const maxStake = balance != null ? Math.max(0, balance) : null;
   const chips: { label: string; value: string }[] = [
     { label: "0.01", value: "0.01" },
     { label: "0.1", value: "0.1" },
@@ -240,10 +240,10 @@ export function Verdict({ api }: { api: MatchApi }) {
               onChange={(e) => setAmount(e.target.value)}
               className="w-24 border border-line bg-ink-2 px-2 py-1.5 font-mono text-[14px] text-cream outline-none focus:border-gilt"
             />
-            <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-mute">0G</span>
+            <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-mute">CHIP</span>
             {connected && balance != null && (
               <span className="ml-auto font-mono text-[11px] tracking-[0.06em] text-mute">
-                bal {balance.toFixed(3)} 0G
+                bal {balance.toFixed(3)} CHIP
               </span>
             )}
             {!connected && (

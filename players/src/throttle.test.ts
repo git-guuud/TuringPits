@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createMinIntervalThrottle } from "./throttle.js";
+import { createMinIntervalThrottle, createTokenBudgetThrottle } from "./throttle.js";
 
 /** Virtual clock: `delay` advances time synchronously so spacing is deterministic. */
 function virtualClock() {
@@ -55,5 +55,34 @@ describe("createMinIntervalThrottle", () => {
     t = 20000; // simulate 20s of real work elapsing between calls
     await throttle(); // wait = 6000 - 20000 < 0 → no delay
     expect(t).toBe(20000);
+  });
+});
+
+describe("createTokenBudgetThrottle", () => {
+  it("admits calls immediately while the rolling window stays under budget", async () => {
+    const c = virtualClock();
+    const throttle = createTokenBudgetThrottle(2000, 60000, c.now, c.delay);
+    const starts: number[] = [];
+    await throttle(500); starts.push(c.at());
+    await throttle(500); starts.push(c.at());
+    await throttle(500); starts.push(c.at());
+    expect(starts).toEqual([0, 0, 0]); // 1500 ≤ 2000, no waiting
+  });
+
+  it("waits out the window when the next call would exceed the token budget", async () => {
+    const c = virtualClock();
+    const throttle = createTokenBudgetThrottle(1000, 60000, c.now, c.delay);
+    const starts: number[] = [];
+    await throttle(600); starts.push(c.at()); // 600 ≤ 1000 → now
+    await throttle(600); starts.push(c.at()); // 1200 > 1000 → wait one window
+    await throttle(600); starts.push(c.at()); // again over → wait another window
+    expect(starts).toEqual([0, 60001, 120002]);
+  });
+
+  it("admits a single call larger than the whole budget once the window is empty", async () => {
+    const c = virtualClock();
+    const throttle = createTokenBudgetThrottle(1000, 60000, c.now, c.delay);
+    await throttle(5000); // > budget, but nothing else in the window → must let it through
+    expect(c.at()).toBe(0);
   });
 });

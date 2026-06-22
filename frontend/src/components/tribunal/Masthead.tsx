@@ -1,4 +1,4 @@
-import type { ViewState } from "../../state/matchStore.js";
+import { CATCHUP_THRESHOLD, type ViewState } from "../../state/matchStore.js";
 
 type Live = { label: string; dot: string; pulse: boolean; cls: string };
 
@@ -19,6 +19,10 @@ function liveness(s: ViewState): Live {
       pulse: true,
       cls: "text-gilt",
     };
+  // The stage trails the latest beat (it paces playback) — say so plainly while catching up, so the
+  // "live" badge never claims the viewer is current when they're watching a replay of earlier beats.
+  if (!s.playbackComplete && s.pendingBeats >= CATCHUP_THRESHOLD)
+    return { label: "Replaying · behind live", dot: "bg-gilt", pulse: true, cls: "text-gilt" };
   return { label: "In session · live", dot: "bg-convict", pulse: true, cls: "text-gilt" };
 }
 

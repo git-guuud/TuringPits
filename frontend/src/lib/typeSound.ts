@@ -57,7 +57,7 @@ function audio(): { ctx: AudioContext; master: GainNode; noise: AudioBuffer } | 
   if (!ctx) {
     ctx = new Ctor();
     master = ctx.createGain();
-    master.gain.value = 1.0;
+    master.gain.value = 0.5; // 0.5× — softer typewriter clacks/bell
     master.connect(ctx.destination);
     // ~60ms of white noise, generated once and reused as the source for every clack.
     const len = Math.floor(ctx.sampleRate * 0.06);

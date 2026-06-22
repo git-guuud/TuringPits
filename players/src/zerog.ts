@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { hexlify, JsonRpcProvider, verifyMessage, Wallet } from "ethers";
 import { createZGComputeNetworkBroker } from "@0gfoundation/0g-compute-ts-sdk";
 import { locateContent, resHashHex, type ProviderMeta } from "./envelope.js";
-import { createMinIntervalThrottle, type Throttle } from "./throttle.js";
+import { createMinIntervalThrottle, createTokenBudgetThrottle, type Throttle, type TokenThrottle } from "./throttle.js";
 import { withRetry, isTransientError } from "./retry.js";
 import type { Attestation, InferenceProvider } from "./types.js";
 
@@ -14,6 +14,44 @@ const GALILEO_CHAIN_ID = 16602;
  * at 10 requests/min; 6.5s/request stays just under that with margin. Override via config.
  */
 const DEFAULT_MIN_REQUEST_INTERVAL_MS = 6500;
+
+/**
+ * Token-budget pacing is OPT-IN and OFF by default. We once assumed the testnet also enforced a
+ * 2000 tokens/min cap and paced under it — but a live rate probe (`players/scripts/rate-probe.mjs`)
+ * disproved that: it shipped ~2654 tokens/min with ZERO token complaints, and the ONLY limit the
+ * provider returns is a request-count one:
+ *   429 "Rate limit exceeded. Please slow down your request rate (limit: 10 requests/min)."
+ * A token throttle was therefore throttling a constraint that doesn't exist — at ~900-token match
+ * prompts a 1950/min budget admits only ~2 calls/min, ~4.5× slower than the 10 req/min the provider
+ * actually allows. So the request-interval throttle (≈9.2/min, safely under 10) is the sole default
+ * pacer; the token throttle remains available but only engages if `tokensPerMin` is explicitly set
+ * (a safety valve should a real token cap ever surface, which the 429 backoff would also absorb).
+ */
+
+/** Estimate tokens a call will consume (input + output) against the per-minute budget. ~4 chars per
+ *  token for the prompt (English runs slightly under that, so this is already a mild over-estimate),
+ *  plus a modest completion allowance — our speeches are <40 words and decisions are a short JSON
+ *  line. A rare under-estimate just trips one 429, which the wait-hint backoff now absorbs safely. */
+export function estimateCallTokens(prompt: string): number {
+  return Math.ceil(prompt.length / 4) + 100;
+}
+
+/**
+ * Parse a rate-limit (429) error into how long to back off. The live 0G testnet 429 is
+ *   "Rate limit exceeded. Please slow down your request rate (limit: 10 requests/min)."
+ * — it carries NO explicit "wait N seconds" hint, so in practice the ~12s default below is what
+ * runs (enough to age a slot out of the 60s request window). We still honour an explicit hint if a
+ * provider ever supplies one. This matters because the generic exponential backoff tops out around
+ * 8s — too short to clear the window — so without this a 429 burst could exhaust the retries and
+ * throw. Returns undefined for non-rate-limit errors so their normal backoff schedule is kept.
+ */
+export function rateLimitBackoffMs(err: unknown): number | undefined {
+  const msg = String((err as { message?: unknown })?.message ?? err ?? "");
+  if (!/\b429\b|rate limit/i.test(msg)) return undefined;
+  const m = msg.match(/wait\s+(\d+)\s*second/i);
+  const secs = m ? Number(m[1]) : 12; // no hint (the usual case) → wait ~one request-window slot
+  return Math.min(65_000, secs * 1000 + 1500);
+}
 
 /**
  * Coerce a sampling seed into the value the 0G/vLLM backend accepts: a non-negative signed
@@ -36,8 +74,12 @@ export interface ZeroGDirectConfig {
   /** Minimum ledger balance (0G) to ensure on first use. SDK enforces a 3-0G floor. Default 3. */
   readonly minLedger?: number;
   readonly chainId?: number;
-  /** Minimum ms between inference requests (provider rate limit). Default 6500 (≈9/min). */
+  /** Minimum ms between inference requests. The provider enforces 10 requests/min; default 6500
+   *  (≈9.2/min) stays just under it. This is the ONLY rate limit that actually binds. */
   readonly minRequestIntervalMs?: number;
+  /** OPT-IN token/min budget. Off by default — the provider enforces no token cap (rate-probe
+   *  confirmed). Set only if a real token limit ever surfaces; otherwise leave unset for full speed. */
+  readonly tokensPerMin?: number;
 }
 
 /**
@@ -69,8 +111,13 @@ export class ZeroGDirectProvider implements InferenceProvider {
     private readonly model: string,
     /** The provider's registered TEE signer (envelope must recover to this). */
     readonly teeSignerAddress: string,
-    /** Paces requests under the provider's rate limit (see {@link createMinIntervalThrottle}). */
+    /** Paces requests under the provider's REQUEST rate limit (10/min) — the ONLY enforced limit
+     *  (see {@link createMinIntervalThrottle} and the rate-probe finding above). The binding pacer. */
     private readonly throttle: Throttle = createMinIntervalThrottle(DEFAULT_MIN_REQUEST_INTERVAL_MS),
+    /** OPT-IN token pacer (off by default). Only set when a real token/min cap is configured; the
+     *  provider enforces no such cap today, so leaving this undefined removes the old ~2-calls/min
+     *  artificial ceiling and runs at the true request-rate limit. */
+    private readonly tokenThrottle?: TokenThrottle,
   ) {}
 
   /**
@@ -85,9 +132,13 @@ export class ZeroGDirectProvider implements InferenceProvider {
     opts?: import("./types.js").SamplingOptions,
   ): Promise<{ text: string; attestation: Attestation }> {
     // Retry transient network failures (testnet drops connections); each attempt re-throttles so
-    // retries also respect the rate limit. Reverts / 4xx (e.g. bad seed) are NOT retried.
+    // retries also respect the rate limit. A 429 backs off for the provider's full requested wait
+    // (rateLimitBackoffMs), so we give it more attempts than the default to outlast a token window.
+    // Reverts / 4xx (e.g. bad seed) are NOT retried.
     return withRetry(() => this.completeOnce(prompt, opts), {
+      retries: 6,
       isRetryable: isTransientError,
+      delayForError: rateLimitBackoffMs,
       onRetry: (e, attempt, d) =>
         console.warn(`[0g] transient inference failure (retry ${attempt} in ${d}ms): ${(e as Error).message ?? e}`),
     });
@@ -97,7 +148,10 @@ export class ZeroGDirectProvider implements InferenceProvider {
     prompt: string,
     opts?: import("./types.js").SamplingOptions,
   ): Promise<{ text: string; attestation: Attestation }> {
-    // Space requests out so a burst of turns stays under the provider's per-minute cap.
+    // Space requests out so a burst of turns stays under the provider's 10 requests/min limit (the
+    // only enforced cap). The optional token throttle engages ONLY if a token/min budget was
+    // explicitly configured; by default there is none, so the request-interval throttle alone paces.
+    if (this.tokenThrottle) await this.tokenThrottle(estimateCallTokens(prompt));
     await this.throttle();
     const headers = await this.broker.inference.getRequestHeaders(this.providerAddress, prompt);
     const reqBody: Record<string, unknown> = { model: this.model, messages: [{ role: "user", content: prompt }] };
@@ -177,6 +231,7 @@ export async function createZeroGDirectProvider(config: ZeroGDirectConfig): Prom
     minLedger = 3,
     chainId = GALILEO_CHAIN_ID,
     minRequestIntervalMs = DEFAULT_MIN_REQUEST_INTERVAL_MS,
+    tokensPerMin, // undefined → no token pacing (the default); set only for an opt-in token cap
   } = config;
   const wallet = new Wallet(privateKey, new JsonRpcProvider(rpcUrl, chainId));
   const broker = await createZGComputeNetworkBroker(wallet);
@@ -200,6 +255,8 @@ export async function createZeroGDirectProvider(config: ZeroGDirectConfig): Prom
     model,
     status.teeSignerAddress,
     createMinIntervalThrottle(minRequestIntervalMs),
+    // Token pacing only if an explicit budget was configured; otherwise undefined (no token cap).
+    tokensPerMin !== undefined ? createTokenBudgetThrottle(tokensPerMin) : undefined,
   );
 
   // Probe once to capture the provider's REAL signed envelope metadata (type/identity/tls).

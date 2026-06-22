@@ -213,15 +213,16 @@ describe("playMatch (Day 2 exit criteria)", () => {
     // Unique, identifiable text per inference so any leak is detectable: decision echoes the
     // pinned skeleton; the day-only speech → PUBLICSPEECH_k; the reason → PRIVATEREASON_k.
     const respond = (prompt: string): string => {
-      if (prompt.startsWith("You are seat")) {
+      if (prompt.startsWith("Transcription task")) {
         return prompt.split("\n").find((l) => l.trimStart().startsWith('{"nonce"'))!.trim();
       }
       if (prompt.includes("You have privately decided to")) return `PUBLICSPEECH_${n++}_`;
-      if (prompt.includes("fresh point to the debate") || prompt.includes("You are the first to speak")) return `DISCUSSION_${n++}_`;
-      // Reason prompt: extract the legal seat numbers from the "Legal target(s)…" line (the line
-      // names seats as "Ada (seat 0)" or bare "0, 1, 3, 4"), pick the first as the chosen target.
-      const legalLine = prompt.match(/Legal target[^:]*:\s*([^\n]+)/)![1];
-      const legal = (legalLine.match(/\d+/g) ?? []).map(Number);
+      // The reason prompt is the only remaining one carrying a "Legal target(s)…" line; anything
+      // else here is a free-form discussion prompt (matched as the default, so it stays robust to
+      // task rewording). The legal line names seats as "Ada (seat 0)" or bare "0, 1, 3, 4".
+      const legalLine = prompt.match(/Legal target[^:]*:\s*([^\n]+)/);
+      if (!legalLine) return `DISCUSSION_${n++}_`;
+      const legal = (legalLine[1]!.match(/\d+/g) ?? []).map(Number);
       return `{"target":${legal[0]},"reason":"PRIVATEREASON_${n++}_"}`;
     };
     const prompts: string[] = [];

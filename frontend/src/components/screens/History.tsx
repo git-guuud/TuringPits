@@ -1,0 +1,163 @@
+import type { MatchApi } from "../../state/matchStore.js";
+import { useHistory, type HistoryRow, type ReclaimKind } from "../../state/useHistory.js";
+import { navigate } from "../../lib/useRoute.js";
+import { explorerTx } from "../../lib/contract.js";
+import type { MatchSummary } from "../../lib/contract.js";
+
+/** The verdict as the record phrases it (mirrors the Verdict panel's ACQUITTED/CONVICTED framing). */
+function verdictOf(s: MatchSummary): { label: string; cls: string } {
+  if (s.state === "SETTLED") {
+    if (s.outcome === "YES") return { label: "Acquitted", cls: "text-convict" }; // Mafia walked
+    if (s.outcome === "NO") return { label: "Convicted", cls: "text-acquit" }; // Town prevailed
+    if (s.outcome === "DRAW") return { label: "Mistrial", cls: "text-mute" };
+    if (s.outcome === "VOID") return { label: "Void", cls: "text-mute" };
+  }
+  if (s.state === "REFUND") return { label: "Abandoned", cls: "text-gilt" };
+  if (s.state === "LOCKED") return { label: "In session", cls: "text-gilt" };
+  return { label: "Wagers open", cls: "text-gilt" };
+}
+
+const RECLAIM_CTA: Record<ReclaimKind, string> = {
+  win: "Claim",
+  return: "Reclaim",
+  refund: "Refund",
+  enable: "Enable refund",
+};
+
+export function History({ api }: { api: MatchApi }) {
+  const s = api.state;
+  const { rows, loading } = useHistory(s.wallet.account, s.tx.lastHash);
+  const connected = s.wallet.status === "connected";
+  const busy = s.tx.pending;
+
+  const onReclaim = (matchId: number, kind: ReclaimKind) => {
+    if (busy) return;
+    if (kind === "refund") void api.refund(matchId);
+    else if (kind === "enable") void api.enterRefund(matchId);
+    else void api.claim(matchId);
+  };
+
+  return (
+    <main className="mx-auto flex min-h-screen w-full max-w-[920px] flex-col px-6 py-8">
+      <div className="flex items-center gap-4">
+        <button
+          type="button"
+          onClick={() => navigate("menu")}
+          className="font-mono text-[11px] uppercase tracking-[0.18em] text-mute transition-colors hover:text-gilt"
+        >
+          ‹ Lobby
+        </button>
+        <button
+          type="button"
+          onClick={() => navigate("live")}
+          className="font-mono text-[11px] uppercase tracking-[0.18em] text-mute transition-colors hover:text-gilt"
+        >
+          Watch live
+        </button>
+      </div>
+
+      <header className="mt-6 border-b hairline pb-5">
+        <div className="eyebrow mb-2">The record</div>
+        <h1 className="font-display text-[40px] font-semibold uppercase leading-none tracking-[0.18em] text-cream">
+          Battle History
+        </h1>
+        <div className="mt-2 font-body text-[15px] italic text-gilt-soft">
+          Every battle, read straight from the chain · newest first
+        </div>
+        {!connected && (
+          <button
+            type="button"
+            onClick={() => void api.connect()}
+            disabled={s.wallet.status === "connecting"}
+            className="mt-4 rounded-sm border border-line-2 px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim transition-colors hover:border-gilt hover:text-gilt disabled:opacity-60"
+          >
+            {s.wallet.status === "connecting" ? "Connecting…" : "Connect wallet to see your positions"}
+          </button>
+        )}
+      </header>
+
+      {s.tx.error && <div className="mt-3 font-mono text-[11px] text-convict">{s.tx.error}</div>}
+      {s.tx.lastHash && !s.tx.pending && (
+        <a
+          href={explorerTx(s.tx.lastHash)}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-3 inline-flex items-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-acquit transition-colors hover:text-cream"
+        >
+          ✓ Confirmed on-chain · {s.tx.lastHash.slice(0, 6)}…{s.tx.lastHash.slice(-4)} <span aria-hidden>↗</span>
+        </a>
+      )}
+
+      <div className="mt-5 flex-1">
+        {loading && rows.length === 0 ? (
+          <div className="py-16 text-center font-mono text-[12px] uppercase tracking-[0.16em] text-mute">
+            Reading the record…
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="py-16 text-center font-body text-[16px] italic text-mute">
+            No battles on record yet. Be the first to <button type="button" onClick={() => navigate("live")} className="text-gilt underline-offset-2 hover:underline">watch one live</button>.
+          </div>
+        ) : (
+          <ul className="flex flex-col gap-px bg-line">
+            {rows.map((r) => (
+              <Row key={r.summary.matchId} row={r} busy={busy} onReclaim={onReclaim} />
+            ))}
+          </ul>
+        )}
+      </div>
+    </main>
+  );
+}
+
+function Row({
+  row,
+  busy,
+  onReclaim,
+}: {
+  row: HistoryRow;
+  busy: boolean;
+  onReclaim: (matchId: number, kind: ReclaimKind) => void;
+}) {
+  const { summary: s, mine } = row;
+  const v = verdictOf(s);
+  const pot = (parseFloat(s.yesPool) + parseFloat(s.noPool)).toFixed(2);
+
+  return (
+    <li className="panel flex items-center gap-4 px-5 py-4">
+      <div className="w-16 flex-none">
+        <div className="font-mono text-[12px] text-cream">#{s.matchId}</div>
+        <div className="font-mono text-[10px] tracking-[0.06em] text-mute">case {s.nonce.slice(-6)}</div>
+      </div>
+
+      <div className="flex-1">
+        <div className={["font-display text-[20px] tracking-[0.08em]", v.cls].join(" ")}>{v.label}</div>
+        <div className="mt-0.5 font-mono text-[11px] tracking-[0.06em] text-mute">
+          {s.playerCount} seats · pot ◈ {pot} ({parseFloat(s.yesPool).toFixed(2)} / {parseFloat(s.noPool).toFixed(2)})
+        </div>
+      </div>
+
+      {mine && (
+        <div className="flex-none text-right">
+          {mine.reclaim ? (
+            <button
+              type="button"
+              onClick={() => onReclaim(s.matchId, mine.reclaim!.kind)}
+              disabled={busy}
+              className="rounded-sm border border-gilt px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
+            >
+              {busy
+                ? "…"
+                : mine.reclaim.kind === "enable"
+                  ? RECLAIM_CTA.enable
+                  : `${RECLAIM_CTA[mine.reclaim.kind]} ◈ ${mine.reclaim.amount}`}
+            </button>
+          ) : (
+            <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">
+              {mine.claimed ? "Collected ✓" : "Wagered"}
+            </span>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}

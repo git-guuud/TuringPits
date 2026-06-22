@@ -67,4 +67,27 @@ describe("withRetry", () => {
     await withRetry(fn, { baseDelayMs: 1000, maxDelayMs: 3000, delay: (ms) => { delays.push(ms); return Promise.resolve(); } });
     expect(delays).toEqual([1000, 2000, 3000, 3000]); // capped
   });
+
+  it("honours delayForError over the exponential schedule (e.g. a 429 wait hint)", async () => {
+    let calls = 0;
+    const delays: number[] = [];
+    const fn = vi.fn(async () => { calls++; if (calls < 3) throw new Error("429 please wait 13 seconds"); return "ok"; });
+    const result = await withRetry(fn, {
+      delayForError: (e) => (/429/.test(String((e as Error).message)) ? 14500 : undefined),
+      delay: (ms) => { delays.push(ms); return Promise.resolve(); },
+    });
+    expect(result).toBe("ok");
+    expect(delays).toEqual([14500, 14500]); // wait-hint used, not 500/1000
+  });
+
+  it("falls back to exponential backoff when delayForError returns undefined", async () => {
+    let calls = 0;
+    const delays: number[] = [];
+    const fn = vi.fn(async () => { calls++; if (calls < 3) throw { code: "TIMEOUT" }; return 1; });
+    await withRetry(fn, {
+      delayForError: () => undefined,
+      delay: (ms) => { delays.push(ms); return Promise.resolve(); },
+    });
+    expect(delays).toEqual([500, 1000]);
+  });
 });

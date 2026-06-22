@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { mineUpTo } from "@nomicfoundation/hardhat-network-helpers";
-import { buildSettlement, defaultSchedule, createParams } from "./helpers/market";
+import { buildSettlement, defaultSchedule, createParams, deployMarket, fundBettors } from "./helpers/market";
 
 // Cross-layer proof: a match driven by the real players/ layer (scripted transcript via
 // buildSettlement — same envelope shape MockLocalProvider / ZeroGDirectProvider produce) settles
@@ -35,9 +35,9 @@ describe("players ↔ MafiaMarket integration", () => {
     const fx = await buildSettlement(SEED, 5, NONCE, teeSigner);
     // fx.mafiaWins reflects the engine-declared winner for this seed + nonce.
 
-    // 2. Deploy the factory with a treasury.
-    const Market = await ethers.getContractFactory("MafiaMarket");
-    const market = await Market.connect(owner).deploy(treasury.address);
+    // 2. Deploy the CHIP bet token + the factory bound to it; fund alice so she can wager.
+    const { market, token } = await deployMarket(owner, treasury);
+    await fundBettors(token, await market.getAddress(), [alice]);
 
     // 3. Create the match using the fixture's commit/teeSigner/nonce/playerCount.
     const sched = await defaultSchedule(ethers.provider);
@@ -52,9 +52,7 @@ describe("players ↔ MafiaMarket integration", () => {
 
     // 4. Open betting and place a bet on the engine-winning side.
     await mineUpTo(sched.bettingOpenBlock);
-    await market.connect(alice)[fx.mafiaWins ? "betYes" : "betNo"](matchId, {
-      value: ethers.parseEther("1"),
-    });
+    await market.connect(alice)[fx.mafiaWins ? "betYes" : "betNo"](matchId, ethers.parseEther("1"));
 
     // 5. Close betting then settle with the player-produced calldata.
     await mineUpTo(sched.bettingCloseBlock);

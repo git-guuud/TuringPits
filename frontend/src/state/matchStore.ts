@@ -21,8 +21,11 @@ import { createFeed } from "../lib/feed.js";
 import {
   claimPayout,
   connectWallet,
+  enterRefundMode,
   getBalance,
+  getTestTokens as getTestTokensTx,
   humanizeTxError,
+  MARKET_ADDRESS,
   placeBet as placeBetTx,
   readMarketState,
   readMyStakes,
@@ -53,7 +56,7 @@ export type Beat =
 export interface WalletState {
   account: string | null;
   status: "idle" | "connecting" | "connected" | "error";
-  /** Native 0G balance as a decimal string; undefined until first read. */
+  /** CHIP (bet token) balance as a decimal string; undefined until first read. */
   balance?: string;
   error?: string;
 }
@@ -95,6 +98,14 @@ export interface ViewState {
   cursor: number;
   /** True once the final beat has finished typing — gates the reveal/sentence scenes. */
   playbackComplete: boolean;
+  /**
+   * How many received beats are buffered AHEAD of the cursor (i.e. how far the stage trails the
+   * latest thing the server has sent). The stage holds each beat several seconds while the server
+   * emits them roughly once a second, so a viewer steadily falls behind "live" during a match and a
+   * late joiner starts at 0. When this is large the stage is effectively replaying; "Skip to
+   * present" jumps the cursor to the newest beat. See `CATCHUP_THRESHOLD`.
+   */
+  pendingBeats: number;
 
   // ── DERIVED from the cursor (what the panels render) ──
   seats: PublicSeat[];
@@ -112,6 +123,13 @@ export interface ViewState {
   // ── connection / liveness ──
   connection: ConnStatus;
 }
+
+/**
+ * How far the stage must trail the latest received beat before we treat it as a replay and surface
+ * the "Skip to present" affordance. A small lag is normal (the stage paces each beat), so we only
+ * call it out once a handful of beats have queued up behind the cursor.
+ */
+export const CATCHUP_THRESHOLD = 3;
 
 const initialMarket: MarketSnapshot = { state: "OPEN", bettingLive: false, yesPool: "0", noPool: "0" };
 
@@ -133,6 +151,7 @@ const baseState: ViewState = {
   rawReveal: null,
   cursor: -1,
   playbackComplete: false,
+  pendingBeats: 0,
   seats: [],
   phase: null,
   round: 0,
@@ -149,6 +168,8 @@ const baseState: ViewState = {
 type Action =
   | { kind: "ws"; msg: WsMessage }
   | { kind: "advance" }
+  | { kind: "skip" }
+  | { kind: "reset" }
   | { kind: "connection"; status: ConnStatus }
   | { kind: "wallet"; wallet: WalletState }
   | { kind: "stakes"; stakes: MyStakes }
@@ -216,6 +237,7 @@ function project(s: ViewState): ViewState {
     attestedCount: attested,
     reveal,
     votes,
+    pendingBeats: Math.max(0, s.beats.length - 1 - c),
   };
 }
 
@@ -225,10 +247,23 @@ function reduce(state: ViewState, action: Action): ViewState {
   if (action.kind === "tx") return { ...state, tx: action.tx };
   if (action.kind === "connection") return { ...state, connection: action.status };
 
+  // Leaving and re-entering the live screen tears down the feed; reset to a clean slate (keeping the
+  // wallet connection) so a returning viewer doesn't see the previous match until the next match_init.
+  if (action.kind === "reset") return project({ ...baseState, wallet: state.wallet });
+
   if (action.kind === "advance") {
     if (state.cursor < state.beats.length - 1) return project({ ...state, cursor: state.cursor + 1 });
     if (!state.playbackComplete && state.rawReveal) return project({ ...state, playbackComplete: true });
     return state;
+  }
+
+  // Jump straight to the newest beat the server has sent (skip the replay/catch-up). If the match
+  // has already ended (the reveal is in hand), also flip playbackComplete so the verdict shows at
+  // once instead of forcing one more step. No-op before the first beat lands.
+  if (action.kind === "skip") {
+    const last = state.beats.length - 1;
+    if (last < 0) return state;
+    return project({ ...state, cursor: last, playbackComplete: state.rawReveal != null ? true : state.playbackComplete });
   }
 
   const msg = action.msg;
@@ -299,20 +334,29 @@ export interface MatchApi {
   state: ViewState;
   connect: () => Promise<void>;
   placeBet: (side: Side, amount: string) => Promise<void>;
-  claim: () => Promise<void>;
-  /** Reclaim stake from a match in RefundMode (host never settled). */
-  refund: () => Promise<void>;
+  /** Mint free test CHIP to the connected wallet (the demo faucet), then refresh the balance. */
+  getTestTokens: () => Promise<void>;
+  /** Claim a payout/returned stake. Defaults to the live match; pass a matchId for a prior round. */
+  claim: (matchId?: number) => Promise<void>;
+  /** Reclaim stake from a match in RefundMode (host never settled). Defaults to the live match. */
+  refund: (matchId?: number) => Promise<void>;
+  /** Flip an abandoned, past-deadline match into RefundMode so its stake becomes refundable. */
+  enterRefund: (matchId: number) => Promise<void>;
   /** Advance the playback cursor to the next beat (called by the Court once a beat finishes). */
   advance: () => void;
+  /** Jump the playback cursor to the newest received beat — skips the replay/catch-up to "now". */
+  skipToPresent: () => void;
 }
 
-export function useMatch(): MatchApi {
+export function useMatch({ live }: { live: boolean }): MatchApi {
   const [state, dispatch] = useReducer(reduce, baseState);
 
   // Non-render refs the async wallet actions need without re-subscribing the feed.
   const walletRef = useRef<Wallet | null>(null);
   const addrRef = useRef<string | null>(null);
-  addrRef.current = state.marketAddress;
+  // Fall back to the known deployed market so wallet actions (e.g. reclaiming a past battle from the
+  // History screen) work even before the live screen has reported the address via match_init.
+  addrRef.current = state.marketAddress ?? MARKET_ADDRESS;
   const matchIdRef = useRef<number | null>(null);
   matchIdRef.current = state.matchId;
 
@@ -329,14 +373,20 @@ export function useMatch(): MatchApi {
   const refreshBalance = useCallback(async () => {
     if (!walletRef.current) return;
     try {
-      const balance = await getBalance(walletRef.current);
+      const balance = await getBalance(walletRef.current, addrRef.current ?? undefined);
       dispatch({ kind: "wallet", wallet: { account: walletRef.current.account, status: "connected", balance } });
     } catch {
       /* balance is display-only; ignore read failures */
     }
   }, []);
 
+  // The live WebSocket is connected ONLY while the live screen is mounted (`live` true). This is
+  // what makes a match launch only when someone is on the live screen: the server waits for the
+  // first client before starting a round. Leaving the screen closes the socket; returning opens a
+  // fresh one (the feed instance is single-use once closed) and replays the current match buffer.
   useEffect(() => {
+    if (!live) return;
+    dispatch({ kind: "reset" });
     const feed = createFeed();
     const unsub = feed.subscribe((msg) => {
       dispatch({ kind: "ws", msg });
@@ -349,7 +399,7 @@ export function useMatch(): MatchApi {
       unsub();
       unsubStatus?.();
     };
-  }, [refreshStakes]);
+  }, [live, refreshStakes]);
 
   // Liveness fallback: while the match is LOCKED the server normally pushes the settlement. If it
   // stops (crashed, or the match was moved into RefundMode on-chain after the deadline), poll the
@@ -418,11 +468,30 @@ export function useMatch(): MatchApi {
     [connect, refreshStakes, refreshBalance],
   );
 
-  const claim = useCallback(async () => {
-    if (!walletRef.current || !addrRef.current || matchIdRef.current == null) return;
+  const getTestTokens = useCallback(async () => {
+    if (!walletRef.current) {
+      await connect();
+      if (!walletRef.current) return;
+    }
     dispatch({ kind: "tx", tx: { pending: true } });
     try {
-      const hash = await claimPayout(addrRef.current, matchIdRef.current, walletRef.current);
+      const hash = await getTestTokensTx(walletRef.current, addrRef.current ?? undefined);
+      dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
+      await refreshBalance();
+    } catch (e) {
+      dispatch({ kind: "tx", tx: { pending: false, error: humanizeTxError(e) } });
+    }
+  }, [connect, refreshBalance]);
+
+  // claim/refund/enterRefund default to the live match but accept an explicit matchId, so the
+  // prior-positions panel can act on past rounds. refreshStakes only re-reads the live match (it
+  // uses matchIdRef), which is what the live Verdict needs; the panel re-scans itself.
+  const claim = useCallback(async (matchId?: number) => {
+    const id = matchId ?? matchIdRef.current;
+    if (!walletRef.current || !addrRef.current || id == null) return;
+    dispatch({ kind: "tx", tx: { pending: true } });
+    try {
+      const hash = await claimPayout(addrRef.current, id, walletRef.current);
       dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
       await Promise.all([refreshStakes(), refreshBalance()]);
     } catch (e) {
@@ -430,11 +499,24 @@ export function useMatch(): MatchApi {
     }
   }, [refreshStakes, refreshBalance]);
 
-  const refund = useCallback(async () => {
-    if (!walletRef.current || !addrRef.current || matchIdRef.current == null) return;
+  const refund = useCallback(async (matchId?: number) => {
+    const id = matchId ?? matchIdRef.current;
+    if (!walletRef.current || !addrRef.current || id == null) return;
     dispatch({ kind: "tx", tx: { pending: true } });
     try {
-      const hash = await refundStake(addrRef.current, matchIdRef.current, walletRef.current);
+      const hash = await refundStake(addrRef.current, id, walletRef.current);
+      dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
+      await Promise.all([refreshStakes(), refreshBalance()]);
+    } catch (e) {
+      dispatch({ kind: "tx", tx: { pending: false, error: humanizeTxError(e) } });
+    }
+  }, [refreshStakes, refreshBalance]);
+
+  const enterRefund = useCallback(async (matchId: number) => {
+    if (!walletRef.current || !addrRef.current) return;
+    dispatch({ kind: "tx", tx: { pending: true } });
+    try {
+      const hash = await enterRefundMode(addrRef.current, matchId, walletRef.current);
       dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
       await Promise.all([refreshStakes(), refreshBalance()]);
     } catch (e) {
@@ -443,6 +525,7 @@ export function useMatch(): MatchApi {
   }, [refreshStakes, refreshBalance]);
 
   const advance = useCallback(() => dispatch({ kind: "advance" }), []);
+  const skipToPresent = useCallback(() => dispatch({ kind: "skip" }), []);
 
-  return { state, connect, placeBet, claim, refund, advance };
+  return { state, connect, placeBet, getTestTokens, claim, refund, enterRefund, advance, skipToPresent };
 }

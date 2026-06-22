@@ -8,6 +8,7 @@
 // Import SDK-free pieces from built submodules so the default (mock) path never loads the
 // third-party 0G compute SDK at module-load. The live-TEE provider is dynamically imported
 // only when COMPUTE_PRIVATE_KEY is set (see buildProvider). Public match/player API unchanged.
+import { createHash } from "node:crypto";
 import { Player } from "@turingpits/players/dist/player.js";
 import { playMatch } from "@turingpits/players/dist/match.js";
 import type { AttestedMatch } from "@turingpits/players/dist/match.js";
@@ -17,19 +18,60 @@ import type { InferenceProvider } from "@turingpits/players/dist/types.js";
 import type { GameState } from "@turingpits/engine";
 import type { Persona } from "./wire.js";
 
-/** Tribunal roster (sliced to the configured seat count; seat count itself is dynamic). */
+/**
+ * Tribunal persona pool. A match draws a RANDOM subset of these (one per seat), so the cast — and
+ * the table's mix of voices — changes from match to match instead of always being the first N in
+ * order. Each `blurb` is a concrete SPEAKING STYLE (manner, tone, sentence shape), not a vague
+ * trait: the live model is effectively greedy and otherwise collapses every seat to the same
+ * wording, so a distinct voice per seat is what actually makes them diverge. The blurb doubles as
+ * the seat's flavor line in the UI. Kept free of "reads/tells/observes" language so it steers HOW a
+ * seat talks without inviting it to fabricate behaviour it never saw. Pool size comfortably exceeds
+ * the max seat count (8) so a match never has to repeat a persona.
+ */
 const ROSTER: Omit<Persona, "seat">[] = [
-  { name: "Oracle", blurb: "keeps her counsel" },
-  { name: "Vesper", blurb: "the patient watcher" },
-  { name: "Atlas", blurb: "loud, certain" },
-  { name: "Nova", blurb: "young, quick to trust" },
-  { name: "Kestrel", blurb: "sharp-eyed, restless" },
-  { name: "Mira", blurb: "measured, watchful" },
-  { name: "Juno", blurb: "calm under fire" },
+  { name: "Atlas", blurb: "loud and certain; blunt one-line verdicts, no hedging" },
+  { name: "Vesper", blurb: "dry and wry; speaks in understatement and pointed questions" },
+  { name: "Nova", blurb: "earnest and eager; warm, open, thinks out loud" },
+  { name: "Kestrel", blurb: "sharp and restless; quick, clipped sentences" },
+  { name: "Mira", blurb: "measured and even; weighs both sides aloud before landing" },
+  { name: "Juno", blurb: "calm and plainspoken; unhurried and hard to rattle" },
+  { name: "Oracle", blurb: "sparing and cryptic; short, weighty, riddling lines" },
+  { name: "Cassius", blurb: "formal and precise; makes one careful, lawyerly point" },
+  { name: "Pip", blurb: "chatty and breezy; light, a little joking, disarming" },
+  { name: "Rook", blurb: "terse and grim; few words, and heavy ones" },
+  { name: "Lark", blurb: "bright and quick; upbeat, hopeful phrasing" },
+  { name: "Sable", blurb: "cool and cynical; distrusts the easy answer" },
+  { name: "Bram", blurb: "gruff and direct; no patience for waffle" },
+  { name: "Odette", blurb: "poised and precise; deliberate, exact word choice" },
+  { name: "Flint", blurb: "fiery and pushy; presses hard to force a decision" },
+  { name: "Wren", blurb: "soft-spoken and steady; gentle, careful phrasing" },
 ];
 
-export function buildPersonas(n: number): Persona[] {
-  return Array.from({ length: n }, (_, seat) => ({ seat, ...(ROSTER[seat % ROSTER.length]!) }));
+/** Deterministic PRNG (mulberry32) seeded from a string — same match seed → same cast, so persona
+ *  casting is reproducible alongside roles, yet varies across matches as the seed does. */
+function seededRng(seedStr: string): () => number {
+  let a = createHash("sha256").update(seedStr).digest().readUInt32BE(0) || 1;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Cast `n` seats from a SHUFFLED copy of the pool, so each match gets a different, distinct set of
+ * personas. Seeded by the match seed when given (reproducible with roles); otherwise truly random.
+ */
+export function buildPersonas(n: number, seed?: string): Persona[] {
+  const pool = [...ROSTER];
+  const rng = seed ? seededRng(seed) : Math.random;
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [pool[i], pool[j]] = [pool[j]!, pool[i]!];
+  }
+  return Array.from({ length: n }, (_, seat) => ({ seat, ...pool[seat % pool.length]! }));
 }
 
 export interface ProviderBundle {
@@ -50,6 +92,10 @@ export async function buildProvider(): Promise<ProviderBundle> {
       privateKey: computeKey,
       rpcUrl: process.env.COMPUTE_RPC_URL ?? process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai",
       providerAddress,
+      // Token pacing is OPT-IN and off by default: the provider enforces only 10 requests/min (no
+      // token cap — rate-probe confirmed), so the request throttle alone paces. Set TOKENS_PER_MIN
+      // only if a real token limit ever surfaces.
+      ...(process.env.TOKENS_PER_MIN ? { tokensPerMin: Number(process.env.TOKENS_PER_MIN) } : {}),
     });
     // The live provider signs under a known registered signer.
     const teeSigner = process.env.TEE_SIGNER_ADDRESS ?? "0x83df4B8EbA7c0B3B740019b8c9a77ffF77D508cF";
@@ -76,8 +122,19 @@ export interface RunArgs {
   onDiscussion?: (entry: import("@turingpits/players/dist/match.js").DiscussionEntry, state: GameState) => Promise<void>;
 }
 
+/**
+ * How many extra times to resample a signed-decision (or reason) inference whose output isn't
+ * usable, before giving up. parseDecision requires byte-identical canonical JSON, which a live
+ * model occasionally misses; with 0 retries a SINGLE such miss anywhere in a multi-round match
+ * throws and the whole match is abandoned (left unsettled → swept into RefundMode). A match has
+ * many signed decisions, so even a modest per-attempt miss rate compounds into most matches
+ * abandoning. Each retry costs one throttled inference call ONLY on failure (the loop breaks on
+ * first success), so this trades a little worst-case time for a large drop in abandonment.
+ */
+const DECISION_RETRIES = Math.max(0, Number(process.env.DECISION_RETRIES ?? 3));
+
 export function runMatch(args: RunArgs): Promise<AttestedMatch> {
-  const players = Array.from({ length: args.n }, () => new Player(args.provider));
+  const players = Array.from({ length: args.n }, () => new Player(args.provider, { decisionRetries: DECISION_RETRIES }));
   return playMatch({
     seed: args.seed,
     n: args.n,

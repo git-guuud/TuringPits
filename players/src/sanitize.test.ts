@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { hasBadMarker, hasNonEnglish, cleanDaySpeech, cleanNightReason, stripSpeakerLabels, isEcho, namifySeats, forbiddenNames } from "./sanitize.js";
+import { hasBadMarker, hasNonEnglish, cleanDaySpeech, cleanNightReason, stripSpeakerLabels, isEcho, namifySeats, forbiddenNames, stripLeadingEcho, refersToSelfInThirdPerson, accusesClearedTown, stripMarkedSentences, sentenceHasBadMarker } from "./sanitize.js";
 
 const ROSTER = [
   { seat: 0, name: "Ada" }, { seat: 1, name: "Boris" }, { seat: 2, name: "Cleo" },
@@ -33,10 +33,70 @@ describe("hasBadMarker", () => {
       "Seat 4 has been silent the whole game.",
       "Seat 4 hasn't spoken much, which worries me.",
       "Seat 2 has not spoken, so they're hiding something.",
+      "Esme has been secretive since the night began.",
+      "He was acting strange during the night.",
       "Their lack of involvement raises concerns.",
       "Seat 1's defensive stance is telling.",
     ]) {
       expect(hasBadMarker(s)).toBe(true);
+    }
+  });
+
+  it("flags invented physical tells (impossible in a text game)", () => {
+    for (const s of [
+      "Boris keeps avoiding eye contact, he's clearly hiding something.",
+      "Her body language is all wrong today.",
+      "Cleo is fidgeting and her nervous tic gives her away.",
+      "His facial expression when I accused him said it all.",
+    ]) {
+      expect(hasBadMarker(s)).toBe(true);
+    }
+  });
+
+  it("flags invented demeanour / behavioural-baseline fabrication (impossible in a text game)", () => {
+    for (const s of [
+      "Her recent behavior doesn't align with her usual demeanor, so I'm wary.", // the exact 17:01 leak
+      "Esme has been acting unusually secretive lately.",
+      "Boris is acting strangely today, it worries me.",
+      "Cleo's whole demeanour is off.",
+      "Dmitri just isn't his usual self.",
+      "That's so out of character for Felix.",
+      "Ada hasn't been herself this round.",
+      "He's acting cagey and defensive about the vote.",
+    ]) {
+      expect(hasBadMarker(s)).toBe(true);
+    }
+  });
+
+  it("does NOT over-block grounded reads that merely share a stem ('usually', 'behavior', bare 'secretive')", () => {
+    for (const s of [
+      "I usually agree with Boris, but his argument today is thin.",
+      "Esme's voting behavior is what makes me cautious about her.",
+      "Boris has been secretive about which way he'll vote.",
+      "I'm acting on what Dmitri actually said, not a hunch.",
+    ]) {
+      expect(hasBadMarker(s)).toBe(false);
+    }
+  });
+
+  it("flags fabricated emotional state attributed to ANOTHER player (nervous around X, etc.)", () => {
+    for (const s of [
+      "Why does Felix always seem so nervous around me?",          // the cascading 18:01 leak
+      "His nervousness around Boris is what worries me.",
+      "Dmitri is nervous and won't meet the moment.",
+      "Esme looks anxious whenever the vote comes up.",
+      "Boris seems uneasy about where this is going.",
+    ]) {
+      expect(hasBadMarker(s)).toBe(true);
+    }
+  });
+
+  it("does NOT block the SPEAKER's own stated feeling ('I'm nervous', 'makes me nervous')", () => {
+    for (const s of [
+      "I'm nervous about rushing this vote without a real case.",
+      "Honestly, voting blind makes me nervous, so let's slow down.",
+    ]) {
+      expect(hasBadMarker(s)).toBe(false);
     }
   });
 
@@ -46,6 +106,7 @@ describe("hasBadMarker", () => {
       "Seat 1 said they want to watch the vote, which makes me cautious about them.",
       "Now that everyone has spoken, I lean toward seat 2 based on their own words.",
       "I have no firm read yet and want to hear more before today's vote.",
+      "Boris was killed by the Mafia during the previous night, so we are down a player.",
     ]) {
       expect(hasBadMarker(s)).toBe(false);
     }
@@ -219,6 +280,234 @@ describe("cleanDaySpeech — echo guard", () => {
   });
 });
 
+describe("stripLeadingEcho", () => {
+  const prior = ["Today, I need to hear from everyone who has spoken already. Who is hiding a dark secret?"];
+
+  it("drops a leading verbatim copy of a prior line and keeps the genuine point after it", () => {
+    const t = "Today, I need to hear from everyone who has spoken already. Who is hiding a dark secret? Honestly, Boris is pushing too hard and I don't buy it.";
+    expect(stripLeadingEcho(t, prior)).toBe("Honestly, Boris is pushing too hard and I don't buy it.");
+  });
+
+  it("leaves a genuinely original opening untouched", () => {
+    const t = "Boris is pushing too hard for my taste, and I want to know exactly why.";
+    expect(stripLeadingEcho(t, prior)).toBe(t);
+  });
+
+  it("returns the original text when the whole reply is an echo (lets the echo guard reject it)", () => {
+    expect(stripLeadingEcho(prior[0]!, prior)).toBe(prior[0]);
+  });
+
+  it("is a no-op with no prior lines", () => {
+    expect(stripLeadingEcho("Anything at all here.", [])).toBe("Anything at all here.");
+  });
+});
+
+describe("refersToSelfInThirdPerson", () => {
+  it("flags the speaker narrating itself in the third person", () => {
+    expect(refersToSelfInThirdPerson("Look at how Felix is handling himself, so confident.", "Felix")).toBe(true);
+    expect(refersToSelfInThirdPerson("Cassius has been consistently vocal here.", "Cassius")).toBe(true);
+    expect(refersToSelfInThirdPerson("Cassius' lack of substance is telling.", "Cassius")).toBe(true);
+  });
+
+  it("flags the speaker addressing ITSELF by name in the second person (vocative)", () => {
+    // Real leaks: a seat names itself and tells itself to speak — confused self-address.
+    expect(refersToSelfInThirdPerson("Oracle, please share your thoughts with the table today.", "Oracle")).toBe(true);
+    expect(refersToSelfInThirdPerson("Let's focus on the evidence. Oracle, share your thoughts.", "Oracle")).toBe(true);
+    expect(refersToSelfInThirdPerson("Oracle, why haven't you spoken up yet?", "Oracle")).toBe(true);
+  });
+
+  it("allows first person and a bare self-introduction", () => {
+    expect(refersToSelfInThirdPerson("I'm Felix, and I think Boris is bluffing.", "Felix")).toBe(false);
+    expect(refersToSelfInThirdPerson("I won't let Boris off the hook today.", "Felix")).toBe(false);
+    // Addressing ANOTHER player by name in the second person is legitimate, not self-reference.
+    expect(refersToSelfInThirdPerson("Boris, please share your thoughts with us today.", "Felix")).toBe(false);
+  });
+
+  it("does not flag the speaker naming someone else", () => {
+    expect(refersToSelfInThirdPerson("Boris is dodging and Cleo agrees with me.", "Felix")).toBe(false);
+  });
+});
+
+describe("cleanDaySpeech — leading-echo salvage + self-reference", () => {
+  it("salvages the real point after a copied preamble instead of rejecting the whole line", async () => {
+    const prior = ["Boris asks who among us is hiding a dark secret today."];
+    const draft = "Boris asks who among us is hiding a dark secret today. I'll say it plainly: I don't trust Cleo's dodging.";
+    const { provider, prompts } = scripted(["unused"]);
+    const out = await cleanDaySpeech(provider, "PROMPT", draft, "FB", NAMES, prior, undefined, ["Boris", "Cleo"]);
+    expect(out).toBe("I'll say it plainly: I don't trust Cleo's dodging.");
+    expect(prompts.length).toBe(0); // salvaged with no regeneration call
+  });
+
+  it("regenerates when the speaker narrates itself in the third person, then uses the first-person retry", async () => {
+    const { provider, prompts } = scripted(["I think Boris is the one stalling, and I'm voting that way today."]);
+    const out = await cleanDaySpeech(
+      provider, "PROMPT", "Cleo has been vocal and Cleo's points don't add up.", "FB",
+      NAMES, [], undefined, NAMES, "Cleo",
+    );
+    expect(out).toBe("I think Boris is the one stalling, and I'm voting that way today.");
+    expect(prompts[0]).toContain("third person");
+  });
+});
+
+describe("sentenceHasBadMarker — own-night-claim exemption", () => {
+  it("exempts a night reference INSIDE one's own investigation claim (real reveal / Mafia bluff)", () => {
+    for (const s of [
+      "I investigated Boris last night, and he is the Mafia.",
+      "I'm the Detective — my investigation last night proved Dmitri is Mafia.",
+      "I checked Esme last night and she came back clean.",
+    ]) {
+      expect(sentenceHasBadMarker(s)).toBe(false);
+    }
+  });
+
+  it("still flags a fabricated night observation of someone ELSE (not a claim)", () => {
+    for (const s of [
+      "Boris was acting suspicious last night.",
+      "Dmitri said nothing last night, which worries me.",
+    ]) {
+      expect(sentenceHasBadMarker(s)).toBe(true);
+    }
+  });
+
+  it("still flags OTHER fabrication even inside a claim (only the night WORD is exempt)", () => {
+    expect(sentenceHasBadMarker("I investigated Boris last night and his demeanor was off.")).toBe(true);
+    expect(sentenceHasBadMarker("I'm the Detective and Boris was acting nervous last night.")).toBe(true);
+  });
+});
+
+describe("stripMarkedSentences", () => {
+  it("keeps an investigation-claim sentence that cites the night, dropping only true fabrication", () => {
+    const draft =
+      "I investigated Boris last night and he is the Mafia. His demeanor has been off all game. Vote Boris out today.";
+    expect(stripMarkedSentences(draft)).toBe(
+      "I investigated Boris last night and he is the Mafia. Vote Boris out today.",
+    );
+  });
+
+  it("salvages a power-role claim/bluff by dropping only the fabricated sentence", () => {
+    const draft =
+      "I am the Detective, and my investigation proved Dmitri is the Mafia. He has been evasive and suspicious tonight. Let us vote Dmitri out today.";
+    const out = stripMarkedSentences(draft);
+    expect(out).toBe("I am the Detective, and my investigation proved Dmitri is the Mafia. Let us vote Dmitri out today.");
+    expect(hasBadMarker(out)).toBe(false);
+  });
+
+  it("leaves clean multi-sentence text untouched", () => {
+    const clean = "I lean toward Dmitri based on his own words. Let us vote him out today.";
+    expect(stripMarkedSentences(clean)).toBe(clean);
+  });
+
+  it("does not salvage a single dirty sentence (leaves it for the guard to reject)", () => {
+    const one = "Dmitri has been evasive and suspicious tonight.";
+    expect(stripMarkedSentences(one)).toBe(one);
+  });
+
+  it("keeps the original when salvage would leave too little to be a real contribution", () => {
+    const draft = "Hmm. Dmitri seems evasive and suspicious tonight, so vote him out tonight.";
+    expect(stripMarkedSentences(draft)).toBe(draft); // only "Hmm." would survive → not enough
+  });
+});
+
+describe("accusesClearedTown", () => {
+  it("flags a Detective pushing the vote onto / casting suspicion on a seat it cleared", () => {
+    // The exact live failure: investigated Esme=TOWN, then railroaded her in discussion.
+    const live =
+      "Today's vote should focus on Esme. She's been acting unusually secretive lately, and her recent behavior doesn't align with her usual demeanor. I believe she might be hiding something. Let's vote her out today.";
+    expect(accusesClearedTown(live, ["Esme"])).toEqual(["Esme"]);
+    for (const s of [
+      "I say we vote Esme out today.",
+      "My vote is Esme — she keeps dodging the real questions.",
+      "Esme is the one hiding something here.",
+      "Esme seems suspicious to me, plain and simple.",
+      "Esme should go today, no question.",
+      "Honestly, I distrust Esme more than anyone.",
+      "Let's all target Esme this round.",
+    ]) {
+      expect(accusesClearedTown(s, ["Esme"])).toEqual(["Esme"]);
+    }
+  });
+
+  it("does NOT flag vouching for, defending, or merely mentioning a cleared seat", () => {
+    for (const s of [
+      "Esme is innocent — look hard at Boris instead, he's the one dodging.", // vouch + redirect
+      "I trust Esme completely; my suspicion is on Dmitri today.",
+      "Don't let the table vote Esme out — she's clean.",                      // defence (negated)
+      "I won't turn on Esme; stand with me and we pressure Boris.",
+      "I'm with Esme here, and I think Boris is bluffing.",                    // positive mention
+      "Esme made a sharp point earlier that I happen to agree with.",
+    ]) {
+      expect(accusesClearedTown(s, ["Esme"])).toEqual([]);
+    }
+  });
+
+  it("only flags the CLEARED name, never another seat the same line accuses", () => {
+    // Vouches for cleared Esme while (correctly) accusing un-cleared Boris — only Esme is protected.
+    const s = "Esme is innocent, so my vote is Boris today — he's the one hiding something.";
+    expect(accusesClearedTown(s, ["Esme"])).toEqual([]);
+    // Sentence-scoped: a Boris accusation in its own sentence never spills onto a cleared seat.
+    const two = "I have cleared Esme in my own way. Boris is the suspect — vote Boris out.";
+    expect(accusesClearedTown(two, ["Esme"])).toEqual([]);
+  });
+
+  it("reports each cleared seat the line accuses, and is a no-op with no clears", () => {
+    const s = "We should remove Esme, and frankly Cleo is hiding something too.";
+    expect(accusesClearedTown(s, ["Esme", "Cleo"]).sort()).toEqual(["Cleo", "Esme"]);
+    expect(accusesClearedTown(s, [])).toEqual([]);
+  });
+});
+
+describe("cleanDaySpeech — cleared-Town guard", () => {
+  // clearedNames is the 10th arg; the day-discussion caller passes a Detective's living Town clears.
+  it("rejects a Detective accusing its cleared seat, then uses the clean (vouch) retry", async () => {
+    const { provider, prompts } = scripted(["Esme has my trust — Boris is the one I want answers from today."]);
+    const out = await cleanDaySpeech(
+      provider, "PROMPT", "Today's vote should focus on Esme; she's hiding something. Vote her out.", "FB",
+      NAMES, [], undefined, NAMES, "Cleo", ["Esme"],
+    );
+    expect(out).toBe("Esme has my trust — Boris is the one I want answers from today.");
+    expect(prompts[0]).toContain("innocent Town"); // the cleared-Town correction was appended
+    expect(prompts[0]).toContain("Esme");
+  });
+
+  it("falls back to the safe line when the retry still accuses the cleared seat", async () => {
+    const { provider } = scripted(["No, Esme really is suspicious, vote her out."]);
+    const out = await cleanDaySpeech(
+      provider, "PROMPT", "Esme is the mafia, vote Esme out today.", "SAFE-FALLBACK",
+      NAMES, [], undefined, NAMES, "Cleo", ["Esme"],
+    );
+    expect(out).toBe("SAFE-FALLBACK");
+  });
+
+  it("passes a genuine vouch for a cleared seat untouched (no false reject)", async () => {
+    const { provider, prompts } = scripted(["unused"]);
+    const vouch = "Esme is innocent in my book — let's put real pressure on Boris instead today.";
+    const out = await cleanDaySpeech(
+      provider, "PROMPT", vouch, "FB", NAMES, [], undefined, NAMES, "Cleo", ["Esme"],
+    );
+    expect(out).toBe(vouch);
+    expect(prompts.length).toBe(0); // no regeneration — vouching is exactly what it should do
+  });
+});
+
+describe("cleanDaySpeech — marked-sentence salvage", () => {
+  it("salvages a Mafia bluff wrapped around one fabricated sentence, with no regeneration", async () => {
+    const { provider, prompts } = scripted(["unused"]);
+    const draft =
+      "I am the Detective, and my investigation proved Dmitri is the Mafia. He has been evasive and suspicious tonight. Let us vote Dmitri out today.";
+    const out = await cleanDaySpeech(provider, "PROMPT", draft, "FB", NAMES, [], undefined, NAMES, "Cleo");
+    expect(out).toBe("I am the Detective, and my investigation proved Dmitri is the Mafia. Let us vote Dmitri out today.");
+    expect(prompts.length).toBe(0); // salvaged in-place, the drama survives
+  });
+
+  it("keeps a Detective reveal that cites its own night investigation (no false night-reject)", async () => {
+    const { provider, prompts } = scripted(["unused"]);
+    const reveal = "I investigated Boris last night and he is the Mafia. Vote Boris out today.";
+    const out = await cleanDaySpeech(provider, "PROMPT", reveal, "FB", NAMES, [], undefined, NAMES, "Esme");
+    expect(out).toBe(reveal); // the explicit role-claim survives intact, night reference and all
+    expect(prompts.length).toBe(0);
+  });
+});
+
 describe("stripSpeakerLabels", () => {
   it("removes a leading 'Name:' prefix from the speaker's own line", () => {
     expect(stripSpeakerLabels("Esme: I agree with Boris.", NAMES)).toBe("I agree with Boris.");
@@ -265,5 +554,23 @@ describe("cleanNightReason", () => {
     const out = cleanNightReason("Cleo 看起来很可疑，所以我们除掉她。", "kill", "Cleo");
     expect(out).toBe("Cleo looks like a strong early threat, so we remove them.");
     expect(hasNonEnglish(out)).toBe(false);
+  });
+
+  it("rejects third-person self-narration on a self-save and uses a first-person line", () => {
+    // The exact leak seen live: a Doctor saving itself echoes its persona blurb in the third person.
+    const out = cleanNightReason(
+      "Felix is the prosecutor and demands hard evidence, making him a likely target",
+      "save",
+      "Felix", // target == self (Doctor guarding itself)
+      "Felix",
+    );
+    expect(out).toBe("Guarding myself this round — I am a plausible target for the Mafia.");
+    expect(refersToSelfInThirdPerson(out, "Felix")).toBe(false);
+  });
+
+  it("keeps the third-person target line when the actor is NOT the target", () => {
+    // Narrating ANOTHER seat in the third person is fine — only self-narration is scrubbed.
+    const r = "Cleo is the loudest Town voice, so she is the safest kill.";
+    expect(cleanNightReason(r, "kill", "Cleo", "Boris")).toBe(r);
   });
 });

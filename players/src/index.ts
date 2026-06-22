@@ -19,7 +19,7 @@ export { hasBadMarker, cleanDaySpeech, cleanNightReason, stripSpeakerLabels, isE
 export { Player } from "./player.js";
 export type { PlayerOptions } from "./player.js";
 export { MockLocalProvider } from "./provider.js";
-export { ZeroGDirectProvider, createZeroGDirectProvider } from "./zerog.js";
+export { ZeroGDirectProvider, createZeroGDirectProvider, estimateCallTokens } from "./zerog.js";
 export type { ZeroGDirectConfig } from "./zerog.js";
 export { playMatch, privateKnowledge, toSettlementMove } from "./match.js";
 export type { MatchConfig, RecordedTurn, AttestedMatch, SettlementMove, SolDecision } from "./match.js";

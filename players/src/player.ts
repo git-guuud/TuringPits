@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parseDecision } from "./decision.js";
 import { parseReason } from "./reason.js";
-import { buildDecisionPrompt, buildDiscussionPrompt, buildReasonPrompt, buildSpeechPrompt } from "./prompt.js";
+import { buildDecisionPrompt, buildDiscussionPrompt, buildReasonPrompt, buildSpeechPrompt, recentTranscript } from "./prompt.js";
 import { cleanDaySpeech, cleanNightReason, namifySeats } from "./sanitize.js";
 import type { InferenceProvider, PlayerTurn, SamplingOptions, TurnContext } from "./types.js";
 
@@ -24,39 +24,76 @@ function seatName(ctx: TurnContext, seat: number): string {
   return ctx.roster?.find((p) => p.seat === seat)?.name ?? `seat ${seat}`;
 }
 
-/** The public speeches said so far this match — used to detect (and reject) parroting. */
-function priorSpeeches(ctx: TurnContext): string[] {
-  return ctx.transcript.map(([, text]) => text);
+/** Public speeches said so far by OTHER seats — used to detect (and reject) parroting. A seat's OWN
+ *  earlier lines are excluded on purpose: a power role must be free to RESTATE its established claim
+ *  across rounds (a Detective re-asserting "I investigated X — he's Mafia", a Mafia holding its bluff
+ *  line, an accused repeating its defence) without the echo guard reading that consistency as parroting
+ *  and collapsing the line to a bland fallback — the dominant reason genuine speeches were filtered out
+ *  from round 2 on. Echoing ANOTHER player's wording is still caught, which is all the ECHO_NOTE claims. */
+function othersPriorSpeeches(ctx: TurnContext): string[] {
+  // Compare only against the lines the model can SEE (the recent window) and only OTHER seats', so a
+  // seat is never rejected for "echoing" a line that was elided or that it said itself.
+  return recentTranscript(ctx)
+    .shown.filter(([seat]) => seat !== ctx.persona.seat)
+    .map(([, text]) => text);
 }
 
-/** Names of seats that have actually spoken in the public transcript (the only players one can
- *  legitimately react to). Used to reject day speech that invents words for a still-silent seat. */
-function spokenNames(ctx: TurnContext): string[] {
-  return [...new Set(ctx.transcript.map(([seat]) => seat))].map((seat) => seatName(ctx, seat));
+/** Names of seats this player holds CERTAIN knowledge about (its own investigation results). It may
+ *  name these in public even after they have died — e.g. a Detective citing "I investigated X" — so
+ *  they join the day-guard allow-list, which otherwise only permits LIVING seats. */
+function knownNames(ctx: TurnContext): string[] {
+  return (ctx.investigations ?? []).map((inv) => seatName(ctx, inv.target));
 }
 
-// Per-seat distinct fallback lines, so two seats that both fall back never land on the same text.
-// There must be at least as many as the max seat count (8) or `seat % length` collides and two
-// players say an identical canned line in the same round.
+/** Names of every LIVING seat. Naming a living player as a suspect or addressing them is legitimate
+ *  Mafia play — the thing that must NOT happen is fabricating their unobservable behaviour, which the
+ *  BAD_SPEECH markers (silence/quiet/evasive/"hasn't spoken") catch directly. So the day guard allows
+ *  any living name and lets the markers reject only the fabrication. Without this the model couldn't
+ *  raise a fresh suspicion about anyone who hadn't yet reached their turn, and collapsed to a bland
+ *  fallback — the single biggest source of the table's fence-sitting. Dead seats stay disallowed
+ *  (you cannot vote or meaningfully accuse a corpse). */
+function livingNames(ctx: TurnContext): string[] {
+  return ctx.alive.map((s) => seatName(ctx, s));
+}
+
+/** Names of LIVING seats this Detective has personally cleared as TOWN. A Detective must never publicly
+ *  push the day vote onto — or cast suspicion on — a seat its own investigation proved is Town; the
+ *  discussion prompt steers it to vouch, but the weak model ignores that, so the day guard rejects such
+ *  a line outright. Only LIVING clears matter (a dead clear can't be railroaded) and only for a
+ *  Detective; every other role (and a Detective with no living Town result) gets [] — a no-op guard. */
+function clearedTownNames(ctx: TurnContext): string[] {
+  if (ctx.role !== "DETECTIVE") return [];
+  const living = new Set(ctx.alive);
+  return (ctx.investigations ?? [])
+    .filter((inv) => inv.faction === "TOWN" && living.has(inv.target))
+    .map((inv) => seatName(ctx, inv.target));
+}
+
+// Per-seat distinct fallback lines, used only when a seat's real speech can't pass the guard. They
+// must stay SAFE (name no one, no hallucination markers) — but they are deliberately ACTIVE, not the
+// old passive "I'll wait and watch" lines: a passive fallback in the transcript modelled disengagement
+// for every later speaker and cascaded the whole table into fence-sitting. These instead PUSH the
+// table to commit, so even a fallback keeps the game moving. There must be ≥ the max seat count (8)
+// or `seat % length` collides and two players say an identical canned line in the same round.
 const DISCUSSION_FALLBACKS = [
-  "I'd rather hold back and see who pushes hardest in today's vote before I commit.",
-  "Nothing solid from me yet — I want to hear more before I point a finger at anyone.",
-  "I'm not ready to accuse anyone; let's see how today's vote actually breaks down.",
-  "I'll keep my read to myself for now and weigh how people cast their votes today.",
-  "Too early for me to call it — I'm still weighing what each of you has said.",
-  "I don't have a clear suspect, so I'll watch the vote and see who lines up where.",
-  "No firm read from me — I want to see who's willing to actually commit to a vote.",
-  "I'm staying open for now; the way people vote today will tell us more than talk has.",
+  "I won't be rushed, but I won't sit on my hands either — somebody give me a real reason to move on a name and I'm there.",
+  "Let's not waste today's vote on a shrug. If you have a suspicion, put it on the table and own it.",
+  "I'm done with vague hedging — I want to see who actually commits to a read and who keeps ducking the question.",
+  "Talk is cheap today. Make a case I can act on, or stop stalling the rest of us.",
+  "I'd rather we pile pressure on one solid suspect than scatter our votes and learn nothing.",
+  "Give me something concrete and I'm in — until then I'm pushing every one of you to take a real stance.",
+  "No free passes from me today: if you want my vote somewhere, earn it with an actual argument.",
+  "I'm listening hard for who's steering this table and why. Hand-waving won't survive my vote.",
 ];
 const VOTE_FALLBACKS: ((name: string) => string)[] = [
-  (n) => `My read is thin, but I'll cast my vote for ${n} today and see what it tells us.`,
-  (n) => `I'm not certain, yet ${n} is my pick in today's vote on limited information.`,
-  (n) => `Without a strong read, I'll go with ${n} for today's vote.`,
-  (n) => `I'll vote ${n} today — a provisional call, not a confident one.`,
-  (n) => `${n} gets my vote today, though I admit my read is still thin.`,
-  (n) => `On balance I'll put my vote on ${n} today, even if my read is far from settled.`,
-  (n) => `I'll point my vote at ${n} for now; it's a soft read, not a firm accusation.`,
-  (n) => `${n} is where I'll land today — more a hunch than a hard case, I'll admit.`,
+  (n) => `${n} gets my vote today. The case isn't airtight, but it's the strongest read I've got.`,
+  (n) => `I'm putting my vote on ${n} today — there's enough doubt there that I won't let it slide.`,
+  (n) => `My vote is ${n} today. Prove me wrong, but right now they are my pick.`,
+  (n) => `I'll commit to ${n} today — someone has to move first, and I'd rather it be on a real read.`,
+  (n) => `${n} today. I've weighed the table, and that's where my suspicion keeps landing.`,
+  (n) => `I'm voting ${n} today, and I'd urge anyone on the fence to look hard at them too.`,
+  (n) => `Locking my vote on ${n} for today — better to act on a read than waste the round.`,
+  (n) => `${n} is my call today. Not a certainty, but the closest thing to one I see here.`,
 ];
 
 export interface PlayerOptions {
@@ -118,10 +155,13 @@ export class Player {
         this.provider, speechPrompt, speechResult.text,
         voteFb(seatName(ctx, chosen.target)),
         ctx.roster?.map((p) => p.name) ?? [],
-        priorSpeeches(ctx),
+        othersPriorSpeeches(ctx),
         sampling(ctx, "speech-fix"),
-        // The vote target may legitimately be named even if still silent (you're voting for them).
-        [...spokenNames(ctx), seatName(ctx, ctx.persona.seat), seatName(ctx, chosen.target)],
+        // Any living seat may be named (you may suspect/address anyone); fabricated behaviour is
+        // caught by the markers, not the name list. Dead seats this player investigated stay allowed
+        // so a Detective can still cite a now-dead result.
+        [...livingNames(ctx), seatName(ctx, ctx.persona.seat), seatName(ctx, chosen.target), ...knownNames(ctx)],
+        seatName(ctx, ctx.persona.seat),
       );
       speech = namifySeats(speech, ctx.roster ?? []); // belt-and-suspenders: no stray "seat N" in speech
     } else {
@@ -129,7 +169,12 @@ export class Player {
       // observed), then swap any "seat N" for the name, so the audit log shows neither made-up
       // behaviour nor seat numbers. Grounded reasoning passes the scrub through unchanged.
       speech = namifySeats(
-        cleanNightReason(chosen.reason, ctx.decisionStub.action, seatName(ctx, chosen.target)),
+        cleanNightReason(
+          chosen.reason,
+          ctx.decisionStub.action,
+          seatName(ctx, chosen.target),
+          seatName(ctx, ctx.persona.seat),
+        ),
         ctx.roster ?? [],
       );
     }
@@ -169,11 +214,19 @@ export class Player {
       this.provider, prompt, speechResult.text,
       DISCUSSION_FALLBACKS[ctx.persona.seat % DISCUSSION_FALLBACKS.length]!,
       ctx.roster?.map((p) => p.name) ?? [],
-      priorSpeeches(ctx),
+      othersPriorSpeeches(ctx),
       sampling(ctx, "discuss-fix"),
-      // In discussion you may react only to players who have already spoken (plus yourself).
-      [...spokenNames(ctx), seatName(ctx, ctx.persona.seat)],
+      // Any living seat may be named (raising a fresh suspicion or addressing someone is legitimate);
+      // the markers, not the name list, reject fabricated behaviour. Plus any seat this player holds
+      // certain knowledge of, so a Detective can reveal a result before that seat has spoken.
+      [...livingNames(ctx), seatName(ctx, ctx.persona.seat), ...knownNames(ctx)],
+      seatName(ctx, ctx.persona.seat),
+      // A Detective must not turn the table against a seat it has privately cleared as Town; the
+      // prompt vouch-task is unreliable on this weak model, so the guard rejects such a line.
+      clearedTownNames(ctx),
     );
-    return { speech };
+    // belt-and-suspenders: swap any stray "seat N" for the name, as the vote path does — a discussion
+    // line that slips a raw seat number ("insights on seat 2") reads as a bug to a spectator.
+    return { speech: namifySeats(speech, ctx.roster ?? []) };
   }
 }

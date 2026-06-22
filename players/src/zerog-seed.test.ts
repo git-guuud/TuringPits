@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toProviderSeed } from "./zerog.js";
+import { toProviderSeed, estimateCallTokens, rateLimitBackoffMs } from "./zerog.js";
 
 const MAX_INT32 = 0x7fffffff; // 2_147_483_647
 
@@ -26,5 +26,36 @@ describe("toProviderSeed", () => {
 
   it("truncates floats to an integer", () => {
     expect(toProviderSeed(123.9)).toBe(123);
+  });
+});
+
+describe("estimateCallTokens", () => {
+  it("approximates input+output tokens from prompt length (≈4 chars/token + completion)", () => {
+    expect(estimateCallTokens("")).toBe(100); // just the completion allowance
+    expect(estimateCallTokens("a".repeat(4000))).toBe(1000 + 100); // 4000/4 + 100
+  });
+
+  it("grows monotonically with prompt size", () => {
+    expect(estimateCallTokens("x".repeat(8000))).toBeGreaterThan(estimateCallTokens("x".repeat(4000)));
+  });
+});
+
+describe("rateLimitBackoffMs", () => {
+  it("honours a 429 'wait N seconds' hint (+margin)", () => {
+    const e = new Error('0G Compute inference failed: 429 {"message":"Token rate limit exceeded. Please wait 13 seconds (limit: 2000 tokens/min)."}');
+    expect(rateLimitBackoffMs(e)).toBe(13 * 1000 + 1500);
+  });
+
+  it("defaults to a window-ish pause for a 429 with no explicit seconds", () => {
+    expect(rateLimitBackoffMs(new Error("429 rate limit error"))).toBe(12 * 1000 + 1500);
+  });
+
+  it("caps the backoff so a bogus huge hint cannot stall forever", () => {
+    expect(rateLimitBackoffMs(new Error("429 please wait 9999 seconds"))).toBe(65_000);
+  });
+
+  it("returns undefined for non-rate-limit errors (keeps their normal backoff)", () => {
+    expect(rateLimitBackoffMs(new Error("ETIMEDOUT socket hang up"))).toBeUndefined();
+    expect(rateLimitBackoffMs({ code: "TIMEOUT" })).toBeUndefined();
   });
 });

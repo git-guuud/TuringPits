@@ -33,7 +33,7 @@ const DECISION_RULE: Record<string, string> = {
   "MAFIA:kill":
     "Remove the biggest threat to your team — confident Town voices, and anyone who has claimed Detective or Doctor. Never target a teammate.",
   "MAFIA:vote":
-    "Steer the vote onto a Town target, or whoever threatens your team. Never vote a teammate.",
+    "Usually steer the vote onto a Town target, or whoever threatens your team. You MAY vote a teammate when deliberately sacrificing them buys the table's trust — but never turn on an ally by accident, and keep your vote consistent with what you argued in the discussion.",
   vote:
     "You have no secret alignment information. Base your pick ONLY on what players actually said and how they voted, and treat every role claim as a claim, not proof. If no one has given you a real reason to suspect them yet, pick provisionally and let your reason say you have no firm read.",
 };
@@ -42,16 +42,21 @@ function decisionRule(role: string, action: string): string {
   return DECISION_RULE[`${role}:${action}`] ?? DECISION_RULE[action] ?? "";
 }
 
-/** What a player may say about its own/others' roles during public talk (speech + discussion). */
+/**
+ * How a player should USE its role in public talk (speech + discussion). Written as active plays,
+ * not passive permission: the weak model defaults to bland fence-sitting unless a concrete, bold
+ * move is put in front of it. These are what make a match dramatic — a Detective reveal, a Mafia
+ * counter-claim — so they are phrased to be taken, while still leaving the timing to the agent.
+ */
 const CLAIM_GUIDANCE: Record<string, string> = {
   DETECTIVE:
-    "You MAY claim to be the Detective and reveal a finding to rally the Town — but it marks you as the Mafia's next target. Or stay hidden. Your call.",
+    "Your knowledge is your weapon. If you have caught a Mafia, CLAIM Detective: name them, say you investigated them, and drive the table to vote them out — it paints a target on you but can win outright. If you have only cleared Town, vouch for them or stay hidden one more round. Pick one and commit; do not sit on certain knowledge.",
   DOCTOR:
-    "You MAY hint that you are the Doctor to coordinate protection — but it marks you as a target. Or stay hidden. Your call.",
+    "If a clearly-innocent player is being railroaded, you can reveal you are the Doctor to break the momentum — but it makes you the Mafia's next target. Otherwise stay hidden and nudge the vote toward who you read as Mafia.",
   MAFIA:
-    "You MAY falsely claim to be the Detective or Doctor to misdirect the Town and pin suspicion on an innocent — but a claim that unravels exposes you.",
+    "Seize the initiative: you may falsely CLAIM to be the Detective or Doctor and pin a specific Town player as Mafia to get them voted out. Pick someone the table already distrusts, give a short concrete story, and commit fully — never reveal you are Mafia or that you know anyone's role.",
   TOWN:
-    "If a player claims a power role, weigh it skeptically — the Mafia fake roles too. Two players claiming the same role means at least one is faking.",
+    "Take a side and drive the vote. Back a role claim you find credible, or challenge one you think is a Mafia bluff — if two players claim the same role, one is faking, so press them. Commit to a read based on what people actually said; do not just say you will wait and watch.",
 };
 
 /**
@@ -60,11 +65,11 @@ const CLAIM_GUIDANCE: Record<string, string> = {
  * misremembered win conditions.
  */
 const RULES =
-  "HOW MAFIA WORKS: This is a hidden-role game. A secret Mafia faction hides among innocent Town members, and no one is told who the Mafia are. " +
-  "The game alternates between two phases. In the secret NIGHT phase the Mafia pick one player to remove, the Doctor protects one player, and the Detective learns one player's true side — all in private, with no discussion. " +
-  "In the public DAY phase the town finds out only WHICH seat is now gone, talks it over, and votes one player out. " +
-  "Removal is abstract: there are no weapons, methods, or causes of death — the only public fact is which seat is gone. " +
-  "The Town wins when every Mafia member is gone; the Mafia win once they equal or outnumber the Town.";
+  "HOW MAFIA WORKS: a hidden-role game where a secret Mafia faction hides among innocent Town members. " +
+  "In the private NIGHT phase the Mafia remove one player, the Doctor protects one, and the Detective learns one player's true side — no discussion. " +
+  "In the public DAY phase the town learns only which seat is now gone, talks it over, and votes one player out. " +
+  "Removal is abstract — no weapons, methods, or causes of death; the only public fact is which seat is gone. " +
+  "The Town wins when every Mafia is gone; the Mafia win once they equal or outnumber the Town.";
 
 /** Standing anti-hallucination rule shared by every prompt. Kept short and positive: weak models echo back any "bad" words it names, so it states what IS known rather than listing what to avoid. */
 const NO_INVENTION =
@@ -87,9 +92,8 @@ function phaseFraming(ctx: TurnContext): string {
     );
   }
   return (
-    `It is the DAY phase of round ${round}. The town is talking openly and will then hold TODAY'S vote to remove one player — ` +
-    `the vote happens now, in daylight, so call it "today's vote". The transcript below is everything anyone has said. ` +
-    `No one can see the night that just passed, so the only thing known about it is which seat is now gone.`
+    `It is the DAY phase of round ${round}. The town talks openly, then holds TODAY'S vote to remove one player — ` +
+    `call it "today's vote". No one saw the night that just passed, so the only thing known about it is which seat is now gone.`
   );
 }
 
@@ -132,12 +136,38 @@ function livingBlock(ctx: TurnContext): string {
   return rosterBlock(ctx) || `Living seats: ${ctx.alive.join(", ")}.`;
 }
 
+/**
+ * Legal targets in a DETERMINISTIC per-turn shuffled order for DISPLAY only. The weak model, given no
+ * behavioural information (e.g. every night-1 action), tends to pick whichever target is listed FIRST
+ * — so a fixed seat-order list made every such pick gravitate to the lowest living seat (seat 0 always
+ * died first; the Detective always burned night 1 investigating the seat about to be killed). Varying
+ * the presentation order per (seat, round, phase, action) spreads those no-info picks across seats.
+ * The underlying `ctx.legalTargets` (validation + the deterministic fallback) is untouched, and an
+ * informed pick is driven by the transcript, not list order, so this only adds variety where there is
+ * otherwise none — it never changes which targets are legal or how a decision is verified.
+ */
+function displayOrder(ctx: TurnContext): number[] {
+  const arr = [...ctx.legalTargets];
+  const d = ctx.decisionStub;
+  const key = `${d.nonce}:${d.player}:${d.round}:${d.phase}:${d.action}`;
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (Math.imul(h, 31) + key.charCodeAt(i)) | 0;
+  let s = (h >>> 0) || 1;
+  const rnd = (): number => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296);
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [arr[i], arr[j]] = [arr[j]!, arr[i]!];
+  }
+  return arr;
+}
+
 /** Legal targets as names+seats (the JSON still needs the seat number), or bare seats with no roster. */
 function legalTargetsBlock(ctx: TurnContext): string {
+  const order = displayOrder(ctx);
   if (ctx.roster && ctx.roster.length > 0) {
-    return `Legal targets (in the JSON give the seat NUMBER): ${ctx.legalTargets.map((s) => nameSeat(ctx, s)).join(", ")}.`;
+    return `Legal targets (in the JSON give the seat NUMBER): ${order.map((s) => nameSeat(ctx, s)).join(", ")}.`;
   }
-  return `Legal target seats: ${ctx.legalTargets.join(", ")}.`;
+  return `Legal target seats: ${order.join(", ")}.`;
 }
 
 function header(ctx: TurnContext): string {
@@ -147,13 +177,78 @@ function header(ctx: TurnContext): string {
   );
 }
 
+/**
+ * The persona's voice directive — the one forceful style instruction shared by every PUBLIC speech
+ * (vote justification + discussion). The model is effectively greedy (it ignores the sampling
+ * temperature we send) and collapses near-identical prompts to near-identical text, so the persona
+ * is the ONLY lever that makes seats diverge. We make it prescriptive about MANNER (tone, rhythm,
+ * sentence length, word choice) and demand the line read as instantly that character and never
+ * generic, then fold in the shared first-person/by-name/no-echo constraints so they stay in one place.
+ */
+function voiceDirective(ctx: TurnContext): string {
+  return (
+    `Write entirely in the voice of ${ctx.persona.name} — ${ctx.persona.blurb}: let that personality ` +
+    `drive your tone, rhythm and word choice so your line sounds instantly like that character, never generic. ` +
+    `Speak in the first person in your own words, address others by NAME (never "seat N"), start straight into ` +
+    `your point, do not prefix your line with a name label, do not echo another player's wording, and never ` +
+    `argue against your own lines (marked "(you)").`
+  );
+}
+
+/**
+ * How many of the most recent transcript lines any prompt shows (and the echo guard compares against).
+ * The transcript grows every day round, but past roughly one round the older lines add tokens without
+ * adding live context — a power role's certain results live in {@link publicFactsBlock}, deaths in
+ * {@link eventsBlock}, so only stale chatter is dropped. Under the provider's hard 2000 tokens/min cap
+ * that bloat is the main reason later rounds crawl, so bounding the window keeps every prompt a roughly
+ * constant size instead of growing each round. Tunable via `TRANSCRIPT_MAX_ENTRIES`; 0 or negative
+ * disables the cap (show everything). Default 12 ≈ one full day round for a 6-seat table.
+ */
+export const TRANSCRIPT_MAX_ENTRIES = (() => {
+  const raw = process.env.TRANSCRIPT_MAX_ENTRIES;
+  if (raw === undefined || raw === "") return 12;
+  const v = Number(raw);
+  return Number.isFinite(v) ? Math.trunc(v) : 12;
+})();
+
+/**
+ * The recent slice of the transcript the model is shown — the last {@link TRANSCRIPT_MAX_ENTRIES}
+ * entries — plus how many older entries were elided. Used by every prompt's transcript block, by the
+ * echo guard (so a seat is never rejected for "echoing" a line it cannot see), and by the recent-
+ * context task pickers ({@link underFire}/{@link frameTarget}), so "what the model knows" is one
+ * coherent window. The cap only affects what is SHOWN/compared; settlement reads none of this.
+ */
+export function recentTranscript(ctx: TurnContext): {
+  shown: readonly (readonly [number, string])[];
+  elided: number;
+} {
+  const all = ctx.transcript;
+  if (TRANSCRIPT_MAX_ENTRIES <= 0 || all.length <= TRANSCRIPT_MAX_ENTRIES) return { shown: all, elided: 0 };
+  return { shown: all.slice(-TRANSCRIPT_MAX_ENTRIES), elided: all.length - TRANSCRIPT_MAX_ENTRIES };
+}
+
 function transcriptBlock(ctx: TurnContext): string {
   if (ctx.transcript.length === 0) {
     return "(no discussion yet — this is the start of the game. You have NO behavioral evidence about anyone, so do not reference anyone's past behavior, votes, or statements: none exist.)";
   }
-  return ctx.transcript
-    .map(([seat, text]) => `  ${nameOf(ctx, seat)}${seat === ctx.persona.seat ? " (you)" : ""}: ${text}`)
-    .join("\n");
+  // A seat that has since been eliminated keeps its earlier lines in the record, but it is OUT of
+  // the game and cannot be voted — tag it so the model reacts to the LIVING, never rallies a vote
+  // against a corpse or treats a dead player's old accusation as a live thread.
+  const living = new Set(ctx.alive);
+  const { shown, elided } = recentTranscript(ctx);
+  const lines = shown.map(([seat, text]) => {
+    const tag = seat === ctx.persona.seat ? " (you)" : living.has(seat) ? "" : " (eliminated — cannot be voted)";
+    return `  ${nameOf(ctx, seat)}${tag}: ${text}`;
+  });
+  // Note that older lines exist so the model doesn't mistake the window's start for the game's start
+  // (which would wrongly suppress its reactions). Certain facts from earlier rounds survive in the
+  // events/facts blocks; only stale discussion is omitted here.
+  if (elided > 0) {
+    lines.unshift(
+      `  (… ${elided} earlier line${elided === 1 ? "" : "s"} from earlier rounds omitted — react to the recent lines below …)`,
+    );
+  }
+  return lines.join("\n");
 }
 
 /** The "FACTS YOU KNOW" block, or "" when this seat knows nothing certain. */
@@ -177,6 +272,29 @@ function factsBlock(ctx: TurnContext): string {
     }
   }
   return lines.length === 0 ? "" : ["FACTS YOU KNOW (certain — act on them):", ...lines].join("\n");
+}
+
+/**
+ * The slice of private knowledge a seat may legitimately ACT ON in PUBLIC talk: a Detective's
+ * certain findings (which it can choose to reveal to rally the Town) and, for Mafia, its secret
+ * ally/allies (so it never throws one under the bus while bluffing). Deliberately OMITS a seat's
+ * own night actions (kills/saves/investigation acts) — those must stay secret, so unlike
+ * `factsBlock` this never lists `ownHistory`. Empty for an ordinary Town seat. Used only by the
+ * public speech + discussion prompts so the agent has something concrete to claim or protect.
+ */
+function publicFactsBlock(ctx: TurnContext): string {
+  const lines: string[] = [];
+  if (ctx.role === "DETECTIVE" && ctx.investigations && ctx.investigations.length > 0) {
+    lines.push("Your investigation results (CERTAIN — you may reveal any of these to the table if you choose):");
+    for (const inv of ctx.investigations) lines.push(`  ${nameSeat(ctx, inv.target)} is ${inv.faction}`);
+  }
+  if (ctx.role === "MAFIA" && ctx.teammates && ctx.teammates.length > 0) {
+    lines.push(
+      `Your secret Mafia ally/allies: ${ctx.teammates.map((s) => nameSeat(ctx, s)).join(", ")}. ` +
+        `NEVER reveal this and never knowingly accuse them — everyone else is fair game.`,
+    );
+  }
+  return lines.length === 0 ? "" : ["WHAT YOU SECRETLY KNOW:", ...lines].join("\n");
 }
 
 /**
@@ -225,6 +343,9 @@ export function buildReasonPrompt(ctx: TurnContext): string {
 export function buildSpeechPrompt(ctx: TurnContext, chosenTarget: number, reason: string): string {
   const verb = ACTION_VERB[ctx.decisionStub.action] ?? ctx.decisionStub.action;
   const events = eventsBlock(ctx);
+  const target = nameOf(ctx, chosenTarget);
+  // Shared framing comes first; the single vote directive is the LAST thing the model reads, so it
+  // stays the most salient instruction (a weak model greedy-echoes whatever trails the prompt).
   return [
     `${header(ctx)} Your secret role is ${ctx.role}.`,
     RULES,
@@ -233,18 +354,79 @@ export function buildSpeechPrompt(ctx: TurnContext, chosenTarget: number, reason
     NO_INVENTION,
     ENGLISH_ONLY,
     CLAIM_GUIDANCE[ctx.role] ?? "",
+    voiceDirective(ctx),
+    publicFactsBlock(ctx),
     ``,
     phaseFraming(ctx),
     ...(events ? [events] : []),
     `Public discussion so far:`,
     transcriptBlock(ctx),
     ``,
-    `You have privately decided to ${verb} ${nameOf(ctx, chosenTarget)}. Your private reasoning: ${reason}`,
-    `In ONE or TWO sentences (under 40 words), tell the table that your vote in today's vote is for ${nameOf(ctx, chosenTarget)}. Base your reason only on what ${nameOf(ctx, chosenTarget)} THEMSELVES said above — quote a few of their own real words if they support it. Ignore how other players have described ${nameOf(ctx, chosenTarget)}; do not repeat anyone else's characterisations of them. If ${nameOf(ctx, chosenTarget)} has not spoken, that is just turn order and is NOT evidence — do NOT call them silent, quiet, or hiding, and do NOT invent anything they said or did; say only that your read is thin and you are voting provisionally.`,
-    `Stay in character as ${ctx.persona.name}, ${ctx.persona.blurb} — let that voice shape your wording so it sounds unlike anyone else. Speak as yourself in the first person, in the present tense about this daytime vote (say "today", not "tonight"). Address other players by NAME, never as "seat N", and do not prefix your line with a name label. Do not echo another player's wording, do not argue against your own lines (marked "(you)"), and never accuse yourself or reveal information that would hurt your faction.`,
+    `You have privately decided to ${verb} ${target}. Your private reasoning: ${reason}`,
+    `Now, in ONE or TWO sentences (under 40 words), make your case to the table for voting ${target} today. If "WHAT YOU SECRETLY KNOW" holds a CERTAIN fact about ${target}, state it and tell the table to follow you. Otherwise base it on what ${target} actually said — in your OWN words, never a copy — and ignore how others framed them. If ${target} hasn't spoken yet, that is just turn order: say your read is thin and provisional, and invent nothing. Speak in the present ("today", not "tonight"), never accuse yourself — make the case for ${target} now.`,
   ]
     .filter((l) => l !== "")
     .join("\n");
+}
+
+/**
+ * True when the table is actively turning on THIS seat — another player's line both names it AND
+ * carries accusation/vote language. The weak model otherwise mis-reads "the table is discussing
+ * Felix" (when it IS Felix) as a cue to agree and vote ITSELF out; flipping the task to a
+ * first-person defence both stops that self-railroad and turns the moment into real drama (the
+ * accused fighting back). A purely positive mention does not trip it — only suspicion aimed here.
+ */
+function underFire(ctx: TurnContext): boolean {
+  const self = nameOf(ctx, ctx.persona.seat);
+  if (!ctx.roster || self === `seat ${ctx.persona.seat}`) return false;
+  const selfRe = new RegExp(`\\b${self.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+  // Only count accusations the model can actually SEE (the recent window), so a self-defence task is
+  // never triggered by an elided line the prompt no longer shows.
+  return recentTranscript(ctx).shown.some(([s, t]) => s !== ctx.persona.seat && selfRe.test(t) && SUSPICION_RE.test(t));
+}
+
+/** Suspicion language: marks a line as aiming at a seat — used by {@link underFire} and {@link frameTarget}. */
+const SUSPICION_RE =
+  /\b(?:vote|suspect|suspicious|mafia|guilty|hiding|distrust|accuse|against|remove|eliminat|out)\b/i;
+
+/**
+ * A living non-teammate this Mafia can credibly frame with a fake Detective claim. Prefers, in order:
+ * a seat that is actively ACCUSING this Mafia (framing your accuser is the most coherent bluff when
+ * cornered — "I'm the Detective and MY accuser is the real Mafia"), then whoever the table is most
+ * suspicious of (a frame it half-believes already), then anyone who has actually spoken, with the
+ * per-turn shuffle as the final tie-break so the frame never just lands on the lowest seat. Returns
+ * null when no eligible target exists (only teammates remain) or this seat is not Mafia.
+ *
+ * The weak model will FRAME a Town player via plain accusation but won't INVENT a structured role-claim
+ * lie unprompted (see role-strategic-play memory). Handing the bluff task a concrete, named target turns
+ * it from open-ended invention into a fill-in-the-template instruction — the lever that gets it to fire.
+ */
+function frameTarget(ctx: TurnContext): number | null {
+  if (ctx.role !== "MAFIA") return null;
+  const teammates = new Set(ctx.teammates ?? []);
+  const self = ctx.persona.seat;
+  const eligible = new Set(ctx.alive.filter((s) => s !== self && !teammates.has(s)));
+  if (eligible.size === 0) return null;
+  // Score from the recent window only, so the frame keys off suspicion the model can actually see.
+  const tx = recentTranscript(ctx).shown;
+  const spoke = new Set(tx.map(([s]) => s));
+  const nameRe = (seat: number): RegExp =>
+    new RegExp(`\\b${nameOf(ctx, seat).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+  const selfRe = nameRe(self);
+  // A seat actively accusing US is the most coherent frame; otherwise weigh how much suspicion the
+  // table has already aimed at the seat (a frame others half-believe). Accuser bonus dominates.
+  const score = (seat: number): number => {
+    const accusesUs = tx.some(([s, t]) => s === seat && selfRe.test(t) && SUSPICION_RE.test(t));
+    const re = nameRe(seat);
+    const suspected = tx.filter(([s, t]) => s !== seat && s !== self && re.test(t) && SUSPICION_RE.test(t)).length;
+    return (accusesUs ? 100 : 0) + suspected;
+  };
+  return (
+    displayOrder(ctx)
+      .filter((s) => eligible.has(s))
+      .sort((a, b) => score(b) - score(a) || (spoke.has(b) ? 1 : 0) - (spoke.has(a) ? 1 : 0))
+      .at(0) ?? null
+  );
 }
 
 /**
@@ -257,9 +439,54 @@ export function buildSpeechPrompt(ctx: TurnContext, chosenTarget: number, reason
 export function buildDiscussionPrompt(ctx: TurnContext): string {
   const events = eventsBlock(ctx);
   const hasDiscussion = ctx.transcript.length > 0;
-  const task = hasDiscussion
-    ? `Add ONE short, fresh point to the debate (1-2 sentences, under 40 words). Respond BY NAME to another player whose line actually appears above — quote a few of their real words and say whether it makes you trust or suspect them. Players speak in turn, so anyone whose line is NOT above is simply waiting for their turn: that is completely normal and means nothing, so you must NEVER call a player quiet, silent, withdrawn, or suspicious for not having spoken, and never invent words or behaviour for someone whose line is not above. Call the vote "today's vote", never "tonight". Stay in character as ${ctx.persona.name}, ${ctx.persona.blurb} — let that voice make your wording unlike anyone else's. Speak as yourself in the first person, in your own words, addressing others by NAME (never "seat N"); start straight into your point (do not prefix your line with a name label), and do not argue against your own lines (marked "(you)").`
-    : `You are the first to speak, so there is nothing to go on yet beyond who has died. In 1-2 sentences (under 40 words), say plainly that there is no information to judge anyone on yet, and suggest how the town should start narrowing down the Mafia (for example, watching who votes for whom in today's vote). Do not accuse anyone of anything specific, and do not call anyone quiet or silent for not having spoken. Refer to the vote as "today's vote", never "tonight". Stay in character as ${ctx.persona.name}, ${ctx.persona.blurb}. Speak as yourself in the first person, addressing others by NAME (never "seat N"), and start straight into your point (do not prefix your line with a name label).`;
+  // A Detective sitting on a CONFIRMED Mafia is the single most game-changing thing at the table, so
+  // when it holds one we make the reveal the task itself — not an option buried in the role guidance
+  // it kept declining to take. (The target is in `knownNames`, so the moderator guard allows naming
+  // it even before it has spoken.) Town/Doctor/Mafia keep the open-ended bolder task below.
+  const caught =
+    ctx.role === "DETECTIVE" ? (ctx.investigations ?? []).find((i) => i.faction === "MAFIA") : undefined;
+  // A seat under active suspicion defends itself (unless it is a Detective holding a caught Mafia —
+  // then revealing IS its best defence, so `caught` wins). This both stops the self-railroad (the
+  // model agreeing to vote ITSELF out) and makes the accused fight back, the heart of the drama.
+  const fire = !caught && underFire(ctx);
+  // A Detective that has only CLEARED-Town results (no Mafia caught) must not accuse anyone it has
+  // personally cleared — the weak model otherwise INVERTS its own certain knowledge and accuses the
+  // innocent it investigated (seen live: investigated Esme=TOWN, then "Esme is secretive, vote her
+  // out", misleading the whole table). The binding vote already avoids confirmed-Town (DETECTIVE:vote
+  // rule), but the non-binding SPEECH did not. So steer it to vouch/redirect. `caught` and self-
+  // defence both outrank this (a real Mafia or its own survival come first).
+  const clearedTown =
+    !caught && !fire && ctx.role === "DETECTIVE"
+      ? (ctx.investigations ?? []).filter((i) => i.faction === "TOWN")
+      : [];
+  const clearedNames = clearedTown.map((i) => nameOf(ctx, i.target)).join(" and ");
+  // From round 2 on (a credible frame has had time to form), a Mafia is handed a bold fake-Detective
+  // bluff as its TASK, aimed at a concrete non-teammate target. The weak model FRAMES via plain
+  // accusation but won't author a structured role-claim lie unprompted (role-strategic-play memory) —
+  // a named target turns the bluff into a fill-in-the-template instruction. This OUTRANKS self-defence:
+  // a Mafia is usually under some suspicion by round 2, and claiming Detective (framing its accuser) is
+  // a stronger, more watchable response than a generic rebuttal — otherwise the bluff would stay
+  // dormant in real games. Never fires for a Town/Detective seat (frameTarget returns null).
+  const frame =
+    !caught && ctx.role === "MAFIA" && ctx.decisionStub.round >= 2 ? frameTarget(ctx) : null;
+  // Each task is kept SHORT and, crucially, ENDS ON ITS ACTION COMMAND — never on the "today's
+  // vote, not tonight" reminder, which this greedy model latches onto and echoes ("Today's vote,
+  // please.") instead of playing. The phase framing already supplies the "today's vote" anchor.
+  const task = caught
+    ? `You are the Detective and your investigation PROVED ${nameSeat(ctx, caught.target)} is Mafia — proof no one else has. In your own voice, under 40 words, reveal it now and keep all three parts (your role, your result, the vote), like: "I am the Detective. I investigated ${nameOf(ctx, caught.target)} and ${nameOf(ctx, caught.target)} is Mafia — vote ${nameOf(ctx, caught.target)} out today." Be certain, no hedging.`
+    : frame !== null
+    ? `You are secretly Mafia — seize today's vote with a bold bluff. In your own voice, under 40 words, claim the Detective role now and keep all three parts (your role, your "result", the vote), like: "I am the Detective. I investigated ${nameOf(ctx, frame)} and ${nameOf(ctx, frame)} is Mafia — vote ${nameOf(ctx, frame)} out today." Never hint you are Mafia, never name an ally.`
+    : fire
+    ? `The table is turning on YOU — players above are pushing to vote you out. In 1-2 sentences (under 40 words), defend YOURSELF in the first person: rebut their reason using what was actually said, and turn the heat back onto whoever is pushing hardest or whose own case is weakest. Speak as "I"; never agree you are guilty, never vote for yourself, and invent nothing. Make your defence now.`
+    : clearedTown.length > 0
+    ? `Your own secret investigation has CLEARED ${clearedNames} — you KNOW for certain they are innocent Town, not Mafia. In 1-2 sentences (under 40 words) about today's vote: NEVER accuse or push the vote onto ${clearedNames}; instead steer suspicion toward a player you have NOT cleared, or push back if the table wrongly turns on ${clearedNames}. You need not reveal how you know. Speak in the present ("today", not "tonight"). Commit to a read now.`
+    : hasDiscussion
+    ? `In 1-2 sentences (under 40 words), move today's vote forward in your OWN words — never copy or requote another player's line. Take a real side: challenge or back a point someone above actually made, or name who you most suspect and say plainly why. You may make a role claim or call out one you think is a bluff. Speak in the present ("today", not "tonight"); a player who hasn't reached their turn yet is just waiting, never a suspect for that alone. Commit to a read — don't say you'll just wait and watch.`
+    : `You speak first, so the only fact yet is who has died — there is no behaviour to judge. In 1-2 sentences (under 40 words) about today's vote (present tense, say "today", not "tonight"), open with intent: name who you most want to hear from and why, put a sharp question to the table, or — if your role hands you something concrete (see above) — stake your claim. Don't invent behaviour for anyone or call a waiting player quiet. Open the debate now.`;
+  // The leaning is deliberately NOT injected: pushing a pre-chosen target makes a weak model
+  // fabricate behaviour to justify it (esp. for a seat that has not spoken). Discussion stays
+  // grounded in the transcript; the binding vote target is chosen later in its own reason call.
+  // voiceDirective sits in the upper framing so `task` is the LAST, most salient instruction.
   return [
     `${header(ctx)} Your secret role is ${ctx.role}.`,
     RULES,
@@ -268,15 +495,14 @@ export function buildDiscussionPrompt(ctx: TurnContext): string {
     NO_INVENTION,
     ENGLISH_ONLY,
     CLAIM_GUIDANCE[ctx.role] ?? "",
+    voiceDirective(ctx),
+    publicFactsBlock(ctx),
     ``,
     phaseFraming(ctx),
     ...(events ? [events] : []),
     `Public discussion so far:`,
     transcriptBlock(ctx),
     ``,
-    // The leaning is deliberately NOT injected: pushing a pre-chosen target makes a weak model
-    // fabricate behaviour to justify it (esp. for a seat that has not spoken). Discussion stays
-    // grounded in the transcript; the binding vote target is chosen later in its own reason call.
     task,
   ]
     .filter((l) => l !== "")
@@ -292,14 +518,26 @@ export function buildDiscussionPrompt(ctx: TurnContext): string {
 export function buildDecisionPrompt(ctx: TurnContext, chosenTarget: number): string {
   const sample: Decision = { ...ctx.decisionStub, target: chosenTarget };
   const skeleton = encodeDecision(sample);
+  // This is a transcription task, not a conversation: the model's ENTIRE output must equal
+  // `skeleton` byte-for-byte (parseDecision re-checks with strict equality). We therefore frame
+  // it as "copy this line exactly" and call out every drift mode a chat model tends to add —
+  // code fences, spaces after `:`/`,`, a trailing newline, reordered keys, quoted numbers, prose.
+  // The exact line is repeated last so it's the most recent thing the model sees before replying.
   return [
-    `You are seat ${ctx.decisionStub.player} (role ${ctx.role}) in a Mafia game.`,
-    `You have chosen to ${ctx.decisionStub.action} seat ${chosenTarget}.`,
-    `Legal target seats: ${ctx.legalTargets.join(", ")}.`,
+    `Transcription task. You record your ${ctx.decisionStub.action} on seat ${chosenTarget} as one line of JSON.`,
+    `This is not a conversation — do not reply to it, only copy the line below.`,
     ``,
-    `Respond with ONLY this exact line of compact JSON, unchanged:`,
+    `Copy this line EXACTLY, character for character — your entire response must equal it:`,
     skeleton,
     ``,
-    `No prose, no code fences, no extra whitespace — only that JSON object.`,
+    `It must be byte-for-byte identical:`,
+    `- keep the keys in this order: nonce, phase, round, player, action, target;`,
+    `- keep target as the number ${chosenTarget} (not a string, not a different seat);`,
+    `- numbers stay bare numbers; only the existing strings keep their double quotes;`,
+    `- NO space after any ':' or ',', and NO space, quote, or newline before or after the object;`,
+    `- NO code fences, NO backticks, NO markdown, NO prose, NO explanation — nothing but the line.`,
+    ``,
+    `Output only this, and nothing else:`,
+    skeleton,
   ].join("\n");
 }

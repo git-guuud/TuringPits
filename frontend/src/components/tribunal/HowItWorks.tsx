@@ -50,21 +50,21 @@ export function HowItWorks() {
             aria-modal="true"
             aria-label="How the Tribunal works"
             onClick={(e) => e.stopPropagation()}
-            className="panel relative w-full max-w-[460px] border border-line-2 px-7 py-7"
+            className="panel relative w-full max-w-[920px] border border-line-2 px-[56px] py-[34px]"
           >
             <button
               type="button"
               aria-label="Close"
               onClick={close}
-              className="absolute right-4 top-4 font-mono text-[12px] text-mute transition-colors hover:text-cream"
+              className="absolute right-[27px] top-[27px] font-mono text-[20px] text-mute transition-colors hover:text-cream"
             >
               ✕
             </button>
 
-            <div className="eyebrow mb-1">The Tribunal</div>
-            <h2 className="mb-4 font-display text-[24px] font-semibold tracking-[0.04em] text-cream">How it works</h2>
+            <div className="eyebrow mb-[7px]">The Tribunal</div>
+            <h2 className="mb-[18px] font-display text-[41px] font-semibold tracking-[0.04em] text-cream">How it works</h2>
 
-            <ol className="space-y-3.5">
+            <ol className="space-y-[16px]">
               <Step n="1" title="AI agents play Mafia">
                 Five LLMs sit the bench. A hidden <span className="text-convict">Mafia</span> minority schemes
                 against an unknowing <span className="text-acquit">Town</span> majority — debating, accusing,
@@ -73,7 +73,7 @@ export function HowItWorks() {
               <Step n="2" title="You wager on the outcome">
                 Before testimony begins, you bet on a single question:{" "}
                 <span className="italic text-cream-dim">will the hidden hand walk free?</span>
-                <div className="mt-2 space-y-1.5 font-mono text-[11px]">
+                <div className="mt-[14px] space-y-[10px] font-mono text-[19px]">
                   <div>
                     <span className="text-[#d98a55]">ACQUITTED</span>{" "}
                     <span className="text-mute">= the Mafia wins (reaches parity)</span>
@@ -97,7 +97,7 @@ export function HowItWorks() {
             <button
               type="button"
               onClick={close}
-              className="mt-6 w-full rounded-sm border border-gilt px-3 py-2.5 font-mono text-[11px] uppercase tracking-[0.18em] text-gilt transition-colors hover:bg-gilt hover:text-ink"
+              className="mt-[26px] w-full rounded-sm border border-gilt px-[20px] py-[13px] font-mono text-[19px] uppercase tracking-[0.18em] text-gilt transition-colors hover:bg-gilt hover:text-ink"
             >
               Enter the court
             </button>
@@ -110,13 +110,13 @@ export function HowItWorks() {
 
 function Step({ n, title, children }: { n: string; title: string; children: React.ReactNode }) {
   return (
-    <li className="flex gap-3">
-      <span className="flex h-6 w-6 flex-none items-center justify-center rounded-full border border-line-2 font-mono text-[11px] text-gilt">
+    <li className="flex gap-[20px]">
+      <span className="flex h-[41px] w-[41px] flex-none items-center justify-center rounded-full border border-line-2 font-mono text-[19px] text-gilt">
         {n}
       </span>
       <div className="leading-snug">
-        <div className="font-display text-[15px] tracking-[0.06em] text-cream">{title}</div>
-        <div className="mt-0.5 font-body text-[13.5px] text-cream-dim">{children}</div>
+        <div className="font-display text-[26px] tracking-[0.06em] text-cream">{title}</div>
+        <div className="mt-[3px] font-body text-[23px] text-cream-dim">{children}</div>
       </div>
     </li>
   );

@@ -6,6 +6,12 @@ import "./lib/DecisionCodec.sol";
 import "./lib/TeeEnvelope.sol";
 import "./lib/MafiaRules.sol";
 
+/// @dev Minimal ERC20 surface the market needs to escrow + pay out wagers in the bet token.
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
+
 /// @title MafiaMarket — multi-match parimutuel YES/NO faction-win market factory with
 ///        fully on-chain, TEE-verified, trust-minimized settlement for AI-Mafia matches.
 /// @dev Settlement is trust-MINIMIZED, not trustless. It assumes (a) `teeSigner` is the genuine
@@ -79,6 +85,9 @@ contract MafiaMarket {
 
     address public owner;
     address public protocolTreasury;
+    /// @notice The ERC20 every wager, payout, refund and fee is denominated in (see MockBetToken).
+    ///         All amounts/pools below are token base units (18 decimals), not native 0G.
+    IERC20 public immutable betToken;
     uint256 public nextMatchId;
     uint128 public protocolFeeAccrued;
 
@@ -98,10 +107,12 @@ contract MafiaMarket {
 
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
-    constructor(address _treasury) {
+    constructor(address _treasury, address _betToken) {
         require(_treasury != address(0), "zero treasury");
+        require(_betToken != address(0), "zero token");
         owner = msg.sender;
         protocolTreasury = _treasury;
+        betToken = IERC20(_betToken);
     }
 
     /// @notice Hand the trusted-host role to a new address (e.g. key rotation).
@@ -165,29 +176,40 @@ contract MafiaMarket {
     event BetPlaced(uint256 indexed matchId, address indexed user, bool isYes, uint128 amount, uint128 newPoolYes, uint128 newPoolNo);
     event BettingLocked(uint256 indexed matchId, uint128 finalPoolYes, uint128 finalPoolNo);
 
-    function betYes(uint256 matchId) external payable { _bet(matchId, true); }
-    function betNo(uint256 matchId) external payable { _bet(matchId, false); }
+    // Bets are denominated in the bet token (CHIP). The bettor must `approve` this contract for at
+    // least `amount` first; the wager is pulled via transferFrom (the ERC20 analog of the old
+    // payable msg.value). `amount` is token base units (<= MAX_BET_PER_TX << 2^128).
+    function betYes(uint256 matchId, uint128 amount) external { _bet(matchId, true, amount); }
+    function betNo(uint256 matchId, uint128 amount) external { _bet(matchId, false, amount); }
 
-    function _bet(uint256 matchId, bool isYes) private {
+    function _bet(uint256 matchId, bool isYes, uint128 amount) private {
         Match storage m = matches[matchId];
+        // Betting stays OPEN until the match is settled (state leaves Created) — there is no early
+        // block-based close. The only bounds are: betting has opened, the match isn't already
+        // settled/locked/refunding, and the settlement deadline hasn't lapsed (past it the match is
+        // refund-eligible, so new stakes are refused).
         require(m.state == MatchState.Created, "not open");
         require(block.number >= m.bettingOpenBlock, "betting not started");
-        require(block.number < m.bettingCloseBlock, "betting closed");
-        require(msg.value >= MIN_BET, "below min bet");
-        require(msg.value <= MAX_BET_PER_TX, "above max bet");
-        uint128 amt = uint128(msg.value); // <= MAX_BET_PER_TX << 2^128
+        require(block.number <= m.settlementDeadlineBlock, "betting closed");
+        require(amount >= MIN_BET, "below min bet");
+        require(amount <= MAX_BET_PER_TX, "above max bet");
+        // Pull the stake into escrow; reverts (no state change) on insufficient balance/allowance.
+        require(betToken.transferFrom(msg.sender, address(this), amount), "token transfer failed");
         if (isYes) {
-            m.poolYes += amt;
-            stakeYes[matchId][msg.sender] += amt;
+            m.poolYes += amount;
+            stakeYes[matchId][msg.sender] += amount;
         } else {
-            m.poolNo += amt;
-            stakeNo[matchId][msg.sender] += amt;
+            m.poolNo += amount;
+            stakeNo[matchId][msg.sender] += amount;
         }
-        emit BetPlaced(matchId, msg.sender, isYes, amt, m.poolYes, m.poolNo);
+        emit BetPlaced(matchId, msg.sender, isYes, amount, m.poolYes, m.poolNo);
     }
 
-    // Convenience/UX + event only: settle() and enterRefundMode() both accept Created or Locked, so calling this is optional (it just emits BettingLocked and lets indexers see the transition).
-    function lockBetting(uint256 matchId) external {
+    // Optional, owner-only manual close. Betting otherwise stays open until settle(); the host can
+    // call this to freeze the pools early (e.g. once the match ends, before submitting settlement).
+    // onlyOwner so no third party can close betting ahead of the host (which would break the
+    // "open until settled" guarantee). settle()/enterRefundMode() also accept Created, so this is optional.
+    function lockBetting(uint256 matchId) external onlyOwner {
         Match storage m = matches[matchId];
         require(m.state == MatchState.Created, "not lockable");
         require(block.number >= m.bettingCloseBlock, "betting still open");
@@ -210,8 +232,9 @@ contract MafiaMarket {
         bytes32 transcriptCID
     ) external onlyOwner {
         Match storage m = matches[matchId];
+        // Betting stays open until this settle() lands (it flips state to Settled, ending bets). The
+        // host may settle as soon as the match resolves — there is no minimum betting-window wait.
         require(m.state == MatchState.Created || m.state == MatchState.Locked, "not settleable");
-        require(block.number >= m.bettingCloseBlock, "betting still open");
         require(block.number <= m.settlementDeadlineBlock, "deadline passed");
 
         _checkRoleReveal(m, revealedRoles, salt);
@@ -371,8 +394,7 @@ contract MafiaMarket {
         uint256 s = uint256(stakeYes[matchId][msg.sender]) + stakeNo[matchId][msg.sender];
         require(s > 0, "no stake");
         claimed[matchId][msg.sender] = true;
-        (bool ok, ) = msg.sender.call{value: s}("");
-        require(ok, "transfer failed");
+        require(betToken.transfer(msg.sender, s), "transfer failed");
         emit Refunded(matchId, msg.sender, s);
     }
 
@@ -380,8 +402,7 @@ contract MafiaMarket {
         uint128 amt = protocolFeeAccrued;
         require(amt > 0, "nothing to withdraw");
         protocolFeeAccrued = 0;
-        (bool ok, ) = protocolTreasury.call{value: amt}("");
-        require(ok, "transfer failed");
+        require(betToken.transfer(protocolTreasury, amt), "transfer failed");
     }
 
     event Claimed(uint256 indexed matchId, address indexed user, uint256 payout);
@@ -414,8 +435,7 @@ contract MafiaMarket {
         }
 
         claimed[matchId][msg.sender] = true;
-        (bool ok, ) = msg.sender.call{value: payout}("");
-        require(ok, "transfer failed");
+        require(betToken.transfer(msg.sender, payout), "transfer failed");
         emit Claimed(matchId, msg.sender, payout);
     }
 }

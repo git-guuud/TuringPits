@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import type { ViewState } from "../../state/matchStore.js";
+import { CATCHUP_THRESHOLD, type ViewState } from "../../state/matchStore.js";
 import { useTypewriter } from "../../lib/useTypewriter.js";
 import { getMuted, setMuted } from "../../lib/typeSound.js";
 import { Testimony } from "./Testimony.js";
@@ -186,8 +186,13 @@ function sceneFor(s: ViewState): Scene {
   };
 }
 
-export function Court({ s, advance }: { s: ViewState; advance: () => void }) {
+export function Court({ s, advance, skipToPresent }: { s: ViewState; advance: () => void; skipToPresent: () => void }) {
   const scene = sceneFor(s);
+  // The stage paces each beat (seconds on screen) while the server emits them ~1/s, so the viewer
+  // steadily falls behind "live" — and a late joiner replays from the very start. When the backlog
+  // is meaningful, offer a prominent jump straight to the newest beat. Hidden once the record is
+  // closed (playbackComplete) — there's nothing further to skip to.
+  const behindLive = !s.playbackComplete && s.pendingBeats >= CATCHUP_THRESHOLD;
   // The structured move behind the current speech (a day vote names its target).
   const moveLine = (() => {
     const b = s.currentBeat;
@@ -224,6 +229,19 @@ export function Court({ s, advance }: { s: ViewState; advance: () => void }) {
 
   return (
     <section className="panel relative flex min-h-0 flex-col items-center justify-center overflow-y-auto px-8 pb-8 pt-3.5">
+      {/* Replaying banner — make it unmistakable the stage is behind live, with one big jump to now. */}
+      {behindLive && (
+        <button
+          type="button"
+          onClick={skipToPresent}
+          title="Jump past the replay to the latest moment"
+          className="absolute left-1/2 top-3 z-40 flex -translate-x-1/2 items-center gap-3 rounded-full border border-gilt bg-gilt/15 px-6 py-3 font-mono text-[13px] uppercase tracking-[0.22em] text-gilt shadow-[0_0_24px_rgba(240,197,82,0.3)] backdrop-blur-sm transition-colors hover:bg-gilt hover:text-ink"
+        >
+          <span className="h-2 w-2 animate-livepulse rounded-full bg-gilt" />
+          Replaying · {s.pendingBeats} behind
+          <span className="text-[15px] tracking-normal">⏭ Skip to present</span>
+        </button>
+      )}
       {/* Stage controls — mute the typewriter, and open the testimony log over the stage. */}
       <div className="absolute right-3 top-3 z-30 flex items-center gap-2">
         <button

@@ -16,6 +16,31 @@ export interface SettlementFixture {
 
 const ROLE_ENUM: Record<string, number> = { MAFIA: 0, DOCTOR: 1, DETECTIVE: 2, TOWN: 3 };
 
+/**
+ * Deploy the MockBetToken (CHIP) + a MafiaMarket bound to it. Bets are denominated in CHIP, so the
+ * market needs a token to settle in. Returns both so tests can mint/approve and assert token balances.
+ */
+export async function deployMarket(owner: any, treasury: { address: string }) {
+  const Token = await ethers.getContractFactory("MockBetToken");
+  const token = await Token.connect(owner).deploy();
+  await token.waitForDeployment();
+  const Market = await ethers.getContractFactory("MafiaMarket");
+  const market = await Market.connect(owner).deploy(treasury.address, await token.getAddress());
+  await market.waitForDeployment();
+  return { market, token };
+}
+
+/**
+ * Give each signer a CHIP balance (via the faucet) and approve the market to pull it, so they can
+ * bet. The faucet hands out 1000 CHIP per call — ample for the small wagers the tests place.
+ */
+export async function fundBettors(token: any, marketAddress: string, signers: any[], faucetCalls = 1) {
+  for (const s of signers) {
+    for (let i = 0; i < faucetCalls; i++) await token.connect(s).faucet();
+    await token.connect(s).approve(marketAddress, ethers.MaxUint256);
+  }
+}
+
 /** Build a full honest settlement: real-shaped envelopes over the scripted match. */
 export async function buildSettlement(
   seed: string, n: number, nonce: string, signer: Wallet,

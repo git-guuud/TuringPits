@@ -34,6 +34,9 @@ export interface OrchestratorConfig {
   moveIntervalMs: number;
   feeBps: number;
   feeBpsDraw: number;
+  // Called as soon as a match is created on-chain (before it could fail mid-run), so the caller can
+  // track it and guarantee a refund path if the round is later abandoned. See sweepAbandonedMatches.
+  onMatchCreated?: (matchId: number, settlementDeadlineBlock: number) => void;
   // Settlement deadline budget (wall-clock seconds after match start). Must comfortably exceed
   // how long the match takes to play out — live 0G inference is rate-limited (~10/min), so a
   // full match runs many minutes. Default is generous; settle() reverts "deadline passed" past it.
@@ -93,7 +96,9 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
   const n = cfg.playerCount;
   const seed = cfg.seed ?? randomSeed();
   const nonce = `live-${Date.now()}`;
-  const personas = buildPersonas(n);
+  // Cast personas from the match seed so the table draws a different, reproducible-per-seed set of
+  // voices each round (roles are seeded the same way), instead of always the first N in fixed order.
+  const personas = buildPersonas(n, seed);
 
   // 1. Roles + commit (engine). Roles stay secret until settle's reveal.
   const roleNames = assignRoles(seed, n) as string[];
@@ -189,6 +194,9 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
   }
   if (matchId < 0) matchId = Number(await rpc("nextMatchId", () => market.getFunction("nextMatchId")())) - 1;
   console.log(`[orch] matchId=${matchId} betting blocks ${bettingOpenBlock}..${bettingCloseBlock}`);
+  // Register the match NOW (before any later step can throw) so the caller can guarantee a refund
+  // path even if this round is abandoned after bets are placed.
+  cfg.onMatchCreated?.(matchId, settlementDeadlineBlock);
 
   // 4. match_init + open market.
   hub.broadcast({
@@ -232,29 +240,29 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
     await sleep(3000);
   }
 
-  // 5b. Live betting: chain is in [open, close). This is exactly when _bet() is accepted, so the
-  //     UI "BET NOW" now matches on-chain reality — no "betting not started", no dead zone.
-  console.log(`[orch] betting LIVE until block ${bettingCloseBlock} (~${cfg.bettingWindowSeconds}s)`);
-  for (let h = await head(); h < bettingCloseBlock; h = await head()) {
+  // 5b. Betting is now LIVE and STAYS OPEN until settle() — there is no block-based close and no
+  //     lock step. The market accepts wagers right through the match; only settlement closes it.
+  //     We emit no `closesAt`, so the UI shows an open market with no countdown.
+  console.log(`[orch] betting LIVE — open until settled`);
+  {
     const p = await readPools();
-    // Project the close to wall-clock from the blocks remaining and the measured rate, so the
-    // client can count down smoothly between these ~4s pushes.
-    const closesAt = Date.now() + Math.max(0, (bettingCloseBlock - h) / bps) * 1000;
-    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, closesAt, yesPool: p.yesPool, noPool: p.noPool } });
-    await sleep(4000);
+    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, yesPool: p.yesPool, noPool: p.noPool } });
   }
 
-  // 6. Lock (optional convenience; settle works from Created too).
-  try {
-    await rpc("lockBetting", async () => {
-      const lockTx = await market.getFunction("lockBetting")(matchId);
-      return lockTx.wait();
-    });
-  } catch (e) {
-    console.warn("[orch] lockBetting skipped:", (e as Error).message);
-  }
-  const pl = await readPools();
-  hub.broadcast({ type: "market", market: { state: "LOCKED", yesPool: pl.yesPool, noPool: pl.noPool } });
+  // Keep pushing live pool sizes (still OPEN) on a background tick while the match plays, so bets
+  // placed during the match show up immediately. Cleared right before settlement.
+  const poolTick = setInterval(() => {
+    void (async () => {
+      try {
+        const p = await readPools();
+        hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, yesPool: p.yesPool, noPool: p.noPool } });
+      } catch {
+        /* transient RPC read; next tick retries */
+      }
+    })();
+  }, 4000);
+
+  // 6. (no lock step — betting stays open until settle).
 
   // 7. Run the match, streaming redacted turns paced by onTurn's await.
   //    NIGHT IS NEVER STREAMED PER-ACTOR: a night turn names the seat + its action (kill/save/
@@ -264,32 +272,38 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
   //    the *broadcast* does not affect on-chain verification.
   const gate = newNightGate(personas.map((p) => p.seat));
 
-  const result = await runMatch({
-    seed,
-    n,
-    nonce,
-    personas,
-    provider: inference,
-    onTurn: async (turn, state) => {
-      const msgs = gateTurn(
-        gate,
-        turn.structuredDecision.phase,
-        turn.structuredDecision.round,
-        toPublicState(state),
-        toPublicTurn(turn),
-      );
-      for (const m of msgs) {
-        hub.broadcast(m);
+  let result;
+  try {
+    result = await runMatch({
+      seed,
+      n,
+      nonce,
+      personas,
+      provider: inference,
+      onTurn: async (turn, state) => {
+        const msgs = gateTurn(
+          gate,
+          turn.structuredDecision.phase,
+          turn.structuredDecision.round,
+          toPublicState(state),
+          toPublicTurn(turn),
+        );
+        for (const m of msgs) {
+          hub.broadcast(m);
+          await sleep(cfg.moveIntervalMs);
+        }
+      },
+      // Daytime deliberation streams as-is: it is public day speech (the discussion pass never runs
+      // at night), so no role can leak. Paced like a turn so the stage can read it.
+      onDiscussion: async (entry, state) => {
+        hub.broadcast({ type: "discussion", seat: entry.seat, round: entry.round, speech: entry.speech, state: toPublicState(state) });
         await sleep(cfg.moveIntervalMs);
-      }
-    },
-    // Daytime deliberation streams as-is: it is public day speech (the discussion pass never runs
-    // at night), so no role can leak. Paced like a turn so the stage can read it.
-    onDiscussion: async (entry, state) => {
-      hub.broadcast({ type: "discussion", seat: entry.seat, round: entry.round, speech: entry.speech, state: toPublicState(state) });
-      await sleep(cfg.moveIntervalMs);
-    },
-  });
+      },
+    });
+  } finally {
+    // Stop the live pool ticker — betting closes via settle() next (or the match was abandoned).
+    clearInterval(poolTick);
+  }
 
   // 8. Reveal the roles + winner.
   hub.broadcast({ type: "reveal", roles: roleNames as never, winner: result.winner ?? "TOWN" });
@@ -326,4 +340,63 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
     });
   }
   console.log(`[orch] settled matchId=${matchId} outcome=${pf.outcome} side=${side} tx=${settleRcpt?.hash}`);
+}
+
+/**
+ * Liveness backstop for the continuous-rounds loop. When a round is abandoned (e.g. inference/RPC
+ * failure between betting and settle), its match is left in Created/Locked with bettors' stakes
+ * locked until someone calls enterRefundMode after the deadline. This sweeps the matches the server
+ * created and, for any that are past their settlement deadline AND still hold bets, flips them to
+ * RefundMode so bettors can refund() their full stake immediately — instead of depending on a
+ * third party. Idempotent and safe to call every round: settled/already-refunded matches are just
+ * dropped from `pending`, and matches still inside their settlement window are left untouched.
+ *
+ * MUST be called from the same single-threaded loop as runOneMatch (never concurrently): both send
+ * txs from the host wallet, so serializing them avoids nonce races.
+ */
+export async function sweepAbandonedMatches(
+  cfg: OrchestratorConfig,
+  pending: Map<number, number>, // matchId -> settlementDeadlineBlock
+): Promise<void> {
+  if (pending.size === 0) return;
+  const provider = new JsonRpcProvider(cfg.rpcUrl, cfg.chainId);
+  const host = new Wallet(cfg.hostPrivateKey, provider);
+  const market = new Contract(cfg.marketAddress, MAFIA_MARKET_ABI, host);
+
+  let head: number;
+  try {
+    head = await provider.getBlockNumber();
+  } catch (e) {
+    console.warn(`[orch] sweep skipped — could not read head:`, (e as Error).message);
+    return;
+  }
+
+  for (const [matchId, deadline] of [...pending]) {
+    try {
+      const m = await market.getFunction("matches")(matchId);
+      const state = Number(m.state); // 0 None, 1 Created, 2 Locked, 3 Settled, 4 RefundMode
+      // Finalized one way or another → stop tracking; bettors claim()/refund() at will.
+      if (state === 3 || state === 4) {
+        pending.delete(matchId);
+        continue;
+      }
+      // Still inside its settlement window → the host may yet settle; leave it for a later sweep.
+      if (head <= deadline) continue;
+
+      // Past deadline and never settled. If it holds no bets there is nothing to protect — drop it
+      // without spending gas. Otherwise flip it so stakes become refundable right now.
+      const hasBets = (m.poolYes as bigint) > 0n || (m.poolNo as bigint) > 0n;
+      if (!hasBets) {
+        pending.delete(matchId);
+        continue;
+      }
+      const tx = await market.getFunction("enterRefundMode")(matchId);
+      await tx.wait();
+      pending.delete(matchId);
+      console.log(`[orch] abandoned matchId=${matchId} past deadline → RefundMode; bettors can refund()`);
+    } catch (e) {
+      // Leave it in `pending` so a later sweep retries; refund stays available on-chain regardless.
+      console.warn(`[orch] sweep matchId=${matchId} failed:`, (e as Error).message);
+    }
+  }
 }

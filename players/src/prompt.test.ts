@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildReasonPrompt, buildSpeechPrompt, buildDecisionPrompt, buildDiscussionPrompt } from "./prompt.js";
+import { buildReasonPrompt, buildSpeechPrompt, buildDecisionPrompt, buildDiscussionPrompt, recentTranscript, TRANSCRIPT_MAX_ENTRIES } from "./prompt.js";
 import type { TurnContext } from "./types.js";
 
 const base: TurnContext = {
@@ -33,7 +33,10 @@ describe("buildReasonPrompt", () => {
   it("includes the public transcript and the legal targets", () => {
     const p = buildReasonPrompt(base);
     expect(p).toContain("seat 3 is suspicious");
-    expect(p).toContain("0, 1, 3, 4");
+    // Legal targets are present but listed in a per-turn shuffled DISPLAY order (breaks seat-0 bias),
+    // so assert the SET, not a fixed sequence.
+    const seats = p.match(/Legal target seats: ([^\n.]+)/)![1]!.match(/\d+/g)!.map(Number).sort((a, b) => a - b);
+    expect(seats).toEqual([0, 1, 3, 4]);
   });
 
   it("asks for a JSON target+reason object", () => {
@@ -172,7 +175,7 @@ describe("buildDiscussionPrompt", () => {
   it("asks for a debate contribution reacting to a named player, no decision JSON", () => {
     const ctx: TurnContext = { ...base, role: "TOWN", stage: "discussion" };
     const p = buildDiscussionPrompt(ctx);
-    expect(p.toLowerCase()).toContain("add one short, fresh point to the debate");
+    expect(p.toLowerCase()).toContain("move today's vote forward in your own words");
     expect(p).toContain("seat 3");        // grounded in the transcript ("seat 3 is suspicious")
     expect(p).not.toContain('"target"');  // free-form, not a decision
   });
@@ -185,9 +188,130 @@ describe("buildDiscussionPrompt", () => {
   it("when no one has spoken yet, opens honestly and forbids specific accusations", () => {
     const ctx: TurnContext = { ...base, role: "TOWN", stage: "discussion", transcript: [] };
     const p = buildDiscussionPrompt(ctx).toLowerCase();
-    expect(p).toContain("first to speak");
-    expect(p).toContain("no information to judge anyone on yet");
-    expect(p).toContain("do not accuse anyone of anything specific");
+    expect(p).toContain("you speak first");
+    expect(p).toContain("there is no behaviour to judge");
+    expect(p).toContain("don't invent behaviour for anyone");
+  });
+
+  it("flips to a first-person self-defense when the table is turning on this seat", () => {
+    const ctx: TurnContext = {
+      ...base, roster,
+      persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
+      transcript: [[0, "I suspect Cleo is hiding something — let's vote her out today."]],
+    };
+    const p = buildDiscussionPrompt(ctx);
+    expect(p).toContain("The table is turning on YOU");
+    expect(p).toContain("Make your defence now");
+    expect(p).not.toContain("move today's vote forward"); // not the generic reactor task
+  });
+
+  it("does NOT flip to self-defense on a purely positive mention of this seat", () => {
+    const ctx: TurnContext = {
+      ...base, roster,
+      persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
+      transcript: [[0, "I really trust Cleo — she's been thoughtful and fair today."]],
+    };
+    const p = buildDiscussionPrompt(ctx);
+    expect(p).not.toContain("The table is turning on YOU");
+  });
+
+  it("a Detective with only cleared-Town results vouches instead of accusing them", () => {
+    const ctx: TurnContext = {
+      ...base, roster, role: "DETECTIVE",
+      investigations: [{ round: 1, target: 1, faction: "TOWN" }], // Boris privately cleared
+    };
+    const p = buildDiscussionPrompt(ctx);
+    expect(p).toContain("CLEARED Boris");
+    expect(p).toContain("NEVER accuse or push the vote onto Boris");
+    expect(p).not.toContain("move today's vote forward"); // not the generic accuse-someone reactor task
+  });
+
+  it("a Detective that has CAUGHT a Mafia still reveals (caught outranks vouch)", () => {
+    const ctx: TurnContext = {
+      ...base, roster, role: "DETECTIVE",
+      investigations: [
+        { round: 1, target: 1, faction: "TOWN" },   // Boris cleared
+        { round: 2, target: 3, faction: "MAFIA" },   // Dmitri caught
+      ],
+    };
+    const p = buildDiscussionPrompt(ctx);
+    expect(p).toContain("reveal it now");          // the reveal task (with a fill-in template)
+    expect(p).toContain("I am the Detective");      // the template exemplar
+    expect(p).toContain("Dmitri"); // the caught Mafia is named as the reveal target
+  });
+
+  it("hands a round-2 MAFIA a fake-Detective bluff aimed at the most-suspected non-teammate", () => {
+    const ctx: TurnContext = {
+      ...base, roster, role: "MAFIA", teammates: [4], // Esme (seat 4) is the secret ally
+      persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
+      transcript: [
+        [0, "Dmitri keeps dodging every question — I suspect him."],
+        [1, "I'd vote Dmitri today, he's hiding something."],
+      ],
+      decisionStub: { nonce: "deadbeef", phase: "day", round: 2, player: 2, action: "vote" },
+    };
+    const p = buildDiscussionPrompt(ctx);
+    expect(p).toContain("claim the Detective role");             // the bluff is the TASK
+    expect(p).toContain("Dmitri is Mafia");                      // aimed at the suspected non-teammate
+    expect(p).toContain("vote Dmitri out today");
+    expect(p).not.toContain("vote Esme out");                    // never frames the teammate
+    expect(p).not.toContain("Esme is Mafia");
+    expect(p).not.toContain("tonight");                          // safe for the day guard
+  });
+
+  it("never frames a teammate even when the table most suspects the ally", () => {
+    const ctx: TurnContext = {
+      ...base, roster, role: "MAFIA", teammates: [4],
+      persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
+      transcript: [
+        [0, "Honestly Esme is the one I distrust most, she should be gone today."], // the ally is suspected
+        [1, "Right, I'm leaning hard against Esme this round."],
+      ],
+      decisionStub: { nonce: "deadbeef", phase: "day", round: 2, player: 2, action: "vote" },
+    };
+    const p = buildDiscussionPrompt(ctx);
+    expect(p).toContain("claim the Detective role"); // still bluffs (a non-teammate exists)
+    expect(p).not.toContain("vote Esme out today");  // but the frame is never the ally
+    expect(p).not.toContain("Esme is Mafia");
+  });
+
+  it("does NOT bluff a round-1 MAFIA (no credible frame has formed yet)", () => {
+    const ctx: TurnContext = {
+      ...base, roster, role: "MAFIA", teammates: [4],
+      persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
+      transcript: [[0, "Dmitri keeps dodging — I suspect him."]],
+      decisionStub: { nonce: "deadbeef", phase: "day", round: 1, player: 2, action: "vote" },
+    };
+    const p = buildDiscussionPrompt(ctx);
+    expect(p).not.toContain("claim the Detective role");
+    expect(p.toLowerCase()).toContain("move today's vote forward"); // the generic reactor instead
+  });
+
+  it("a round-2 MAFIA under fire turns the bluff on its accuser (bluff outranks generic self-defense)", () => {
+    // A Mafia is usually suspected by round 2; claiming Detective and framing the accuser is a stronger,
+    // more watchable reply than a bland rebuttal — so the bluff outranks the self-defense branch here.
+    const ctx: TurnContext = {
+      ...base, roster, role: "MAFIA", teammates: [4],
+      persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
+      transcript: [[0, "Cleo is hiding something — let's vote Cleo out today."]], // Ada accuses Cleo
+      decisionStub: { nonce: "deadbeef", phase: "day", round: 2, player: 2, action: "vote" },
+    };
+    const p = buildDiscussionPrompt(ctx);
+    expect(p).toContain("claim the Detective role");
+    expect(p).toContain("Ada is Mafia");                        // frames the accuser, not a random seat
+    expect(p).not.toContain("The table is turning on YOU");     // not the generic self-defense
+  });
+
+  it("a round-1 MAFIA under fire still falls back to self-defense (no bluff before round 2)", () => {
+    const ctx: TurnContext = {
+      ...base, roster, role: "MAFIA", teammates: [4],
+      persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
+      transcript: [[0, "Cleo is hiding something — let's vote Cleo out today."]],
+      decisionStub: { nonce: "deadbeef", phase: "day", round: 1, player: 2, action: "vote" },
+    };
+    const p = buildDiscussionPrompt(ctx);
+    expect(p).not.toContain("claim the Detective role");
+    expect(p).toContain("The table is turning on YOU");
   });
 });
 
@@ -213,8 +337,9 @@ describe("name-based addressing (roster present)", () => {
 
   it("names the vote target in the speech while keeping the seat number for the decision JSON", () => {
     const speech = buildSpeechPrompt({ ...namedCtx, stage: "vote" }, 1, "x");
-    expect(speech).toContain("vote in today's vote is for Boris"); // named target
-    expect(speech).not.toContain("is for seat 1");
+    expect(speech).toContain("make your case to the table for voting Boris today"); // named target
+    expect(speech).toContain("the case for Boris now"); // and named again in the closing command
+    expect(speech).not.toContain("voting seat 1");      // the ask never refers to the target by seat number
 
     const reason = buildReasonPrompt({ ...namedCtx, decisionStub: { ...base.decisionStub, player: 2 } });
     expect(reason).toContain("Boris (seat 1)"); // legal targets carry name + seat for JSON
@@ -281,8 +406,7 @@ describe("self-reference & parroting guards", () => {
 
   it("disarms the 'silence = guilt' trope: not-yet-spoken seats are just waiting their turn", () => {
     const lc = buildDiscussionPrompt({ ...base, stage: "discussion" }).toLowerCase();
-    expect(lc).toContain("waiting for their turn");
-    expect(lc).toContain("never call a player quiet, silent");
+    expect(lc).toContain("just waiting, never a suspect for that alone");
   });
 
   it("tells the speech to stay first-person and not rebut its own lines", () => {
@@ -331,5 +455,33 @@ describe("phase framing & public death record (anti-hallucination grounding)", (
 
   it("omits the death record entirely before anyone has died", () => {
     expect(buildReasonPrompt(base)).not.toContain("WHAT HAS HAPPENED");
+  });
+});
+
+describe("transcript window (TRANSCRIPT_MAX_ENTRIES)", () => {
+  // A long transcript: more entries than the cap, each line uniquely identifiable.
+  const long = Array.from({ length: TRANSCRIPT_MAX_ENTRIES + 6 }, (_, i) => [i % 5, `line number ${i} marker`] as const);
+  const longCtx: TurnContext = { ...base, transcript: long };
+
+  it("recentTranscript keeps only the last TRANSCRIPT_MAX_ENTRIES and reports the elided count", () => {
+    const { shown, elided } = recentTranscript(longCtx);
+    expect(shown.length).toBe(TRANSCRIPT_MAX_ENTRIES);
+    expect(elided).toBe(6);
+    expect(shown[shown.length - 1]![1]).toBe(long[long.length - 1]![1]); // newest kept
+  });
+
+  it("shows the most recent lines, drops the oldest, and flags that earlier lines were omitted", () => {
+    const p = buildReasonPrompt(longCtx);
+    expect(p).toContain(`line number ${long.length - 1} marker`); // newest is shown
+    expect(p).not.toContain("line number 0 marker");              // oldest is dropped
+    expect(p).toContain("earlier rounds omitted");                 // elision marker present
+  });
+
+  it("does not window or annotate a transcript within the cap", () => {
+    const shortCtx: TurnContext = { ...base, transcript: [[0, "only line here marker"]] };
+    const p = buildReasonPrompt(shortCtx);
+    expect(p).toContain("only line here marker");
+    expect(p).not.toContain("omitted");
+    expect(recentTranscript(shortCtx).elided).toBe(0);
   });
 });
