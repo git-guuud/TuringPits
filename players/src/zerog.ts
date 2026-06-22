@@ -1,11 +1,30 @@
 import { Buffer } from "node:buffer";
 import { hexlify, JsonRpcProvider, verifyMessage, Wallet } from "ethers";
 import { createZGComputeNetworkBroker } from "@0gfoundation/0g-compute-ts-sdk";
-import { locateContent, resHashHex } from "./envelope.js";
+import { locateContent, resHashHex, type ProviderMeta } from "./envelope.js";
+import { createMinIntervalThrottle, type Throttle } from "./throttle.js";
+import { withRetry, isTransientError } from "./retry.js";
 import type { Attestation, InferenceProvider } from "./types.js";
 
 /** 0G Galileo testnet (`STATUS.md` → confirmed facts). */
 const GALILEO_CHAIN_ID = 16602;
+
+/**
+ * Minimum spacing between inference requests (ms). The testnet provider caps `/chat/completions`
+ * at 10 requests/min; 6.5s/request stays just under that with margin. Override via config.
+ */
+const DEFAULT_MIN_REQUEST_INTERVAL_MS = 6500;
+
+/**
+ * Coerce a sampling seed into the value the 0G/vLLM backend accepts: a non-negative signed
+ * 32-bit integer. `callSeed` (players/src/player.ts) produces a uint32 that can exceed
+ * 2^31-1, which the provider rejects with `400 'seed' must be Integer`. Truncating + masking
+ * to 31 bits keeps it deterministic while staying in range. `& 0x7fffffff` also forces an
+ * integer, so any stray float/NaN becomes a valid value too.
+ */
+export function toProviderSeed(seed: number): number {
+  return Math.trunc(seed) & 0x7fffffff;
+}
 
 export interface ZeroGDirectConfig {
   /** Funded wallet private key (`COMPUTE_PRIVATE_KEY`). Server-side only. */
@@ -17,6 +36,8 @@ export interface ZeroGDirectConfig {
   /** Minimum ledger balance (0G) to ensure on first use. SDK enforces a 3-0G floor. Default 3. */
   readonly minLedger?: number;
   readonly chainId?: number;
+  /** Minimum ms between inference requests (provider rate limit). Default 6500 (≈9/min). */
+  readonly minRequestIntervalMs?: number;
 }
 
 /**
@@ -48,18 +69,42 @@ export class ZeroGDirectProvider implements InferenceProvider {
     private readonly model: string,
     /** The provider's registered TEE signer (envelope must recover to this). */
     readonly teeSignerAddress: string,
+    /** Paces requests under the provider's rate limit (see {@link createMinIntervalThrottle}). */
+    private readonly throttle: Throttle = createMinIntervalThrottle(DEFAULT_MIN_REQUEST_INTERVAL_MS),
   ) {}
+
+  /**
+   * The provider's signed envelope metadata (providerType / providerIdentity / tlsFingerprint),
+   * captured once at setup. Constant per provider, and the EXACT values the on-chain verifier
+   * must be registered with so `ecrecover` matches — see {@link createZeroGDirectProvider}.
+   */
+  meta?: ProviderMeta;
 
   async complete(
     prompt: string,
     opts?: import("./types.js").SamplingOptions,
   ): Promise<{ text: string; attestation: Attestation }> {
+    // Retry transient network failures (testnet drops connections); each attempt re-throttles so
+    // retries also respect the rate limit. Reverts / 4xx (e.g. bad seed) are NOT retried.
+    return withRetry(() => this.completeOnce(prompt, opts), {
+      isRetryable: isTransientError,
+      onRetry: (e, attempt, d) =>
+        console.warn(`[0g] transient inference failure (retry ${attempt} in ${d}ms): ${(e as Error).message ?? e}`),
+    });
+  }
+
+  private async completeOnce(
+    prompt: string,
+    opts?: import("./types.js").SamplingOptions,
+  ): Promise<{ text: string; attestation: Attestation }> {
+    // Space requests out so a burst of turns stays under the provider's per-minute cap.
+    await this.throttle();
     const headers = await this.broker.inference.getRequestHeaders(this.providerAddress, prompt);
     const reqBody: Record<string, unknown> = { model: this.model, messages: [{ role: "user", content: prompt }] };
     // Sampling params on the request do NOT affect settlement: the TEE envelope signs the
     // RESPONSE, and reqHashHex (envelope part[0]) is the provider's own request hash.
     if (opts?.temperature !== undefined) reqBody.temperature = opts.temperature;
-    if (opts?.seed !== undefined) reqBody.seed = opts.seed;
+    if (opts?.seed !== undefined) reqBody.seed = toProviderSeed(opts.seed);
     const res = await fetch(`${this.endpoint}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers },
@@ -125,7 +170,14 @@ export class ZeroGDirectProvider implements InferenceProvider {
  * `players/scripts/live-direct.mjs`. The caller passes `.env` values — this reads no globals.
  */
 export async function createZeroGDirectProvider(config: ZeroGDirectConfig): Promise<ZeroGDirectProvider> {
-  const { privateKey, rpcUrl, providerAddress, minLedger = 3, chainId = GALILEO_CHAIN_ID } = config;
+  const {
+    privateKey,
+    rpcUrl,
+    providerAddress,
+    minLedger = 3,
+    chainId = GALILEO_CHAIN_ID,
+    minRequestIntervalMs = DEFAULT_MIN_REQUEST_INTERVAL_MS,
+  } = config;
   const wallet = new Wallet(privateKey, new JsonRpcProvider(rpcUrl, chainId));
   const broker = await createZGComputeNetworkBroker(wallet);
 
@@ -141,5 +193,23 @@ export async function createZeroGDirectProvider(config: ZeroGDirectConfig): Prom
   }
 
   const { endpoint, model } = await broker.inference.getServiceMetadata(providerAddress);
-  return new ZeroGDirectProvider(broker, providerAddress, endpoint, model, status.teeSignerAddress);
+  const provider = new ZeroGDirectProvider(
+    broker,
+    providerAddress,
+    endpoint,
+    model,
+    status.teeSignerAddress,
+    createMinIntervalThrottle(minRequestIntervalMs),
+  );
+
+  // Probe once to capture the provider's REAL signed envelope metadata (type/identity/tls).
+  // These must be registered on-chain verbatim or settle() reverts "bad TEE signature": the
+  // signer signs over its real tlsFingerprint, not a placeholder. Constant per provider.
+  const { attestation } = await provider.complete("Reply with one short word to establish provider metadata.");
+  provider.meta = {
+    providerType: attestation.providerType,
+    providerIdentity: attestation.providerIdentity,
+    tlsFingerprint: attestation.tlsFingerprint,
+  };
+  return provider;
 }

@@ -13,7 +13,10 @@
   "dependencies": {
     "@turingpits/engine": "*",
     "@turingpits/storage": "*",
-    "ws": "^8.17.0"
+    "ws": "^8.17.0",
+    "@turingpits/players": "*",
+    "ethers": "^6.13.0",
+    "dotenv": "^16.4.7"
   },
   "devDependencies": {
     "@types/ws": "^8.5.0",
