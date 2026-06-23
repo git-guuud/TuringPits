@@ -370,6 +370,45 @@ export function buildSpeechPrompt(ctx: TurnContext, chosenTarget: number, reason
 }
 
 /**
+ * MERGED day-vote prompt (call 1 of 2, replacing the separate reason + speech calls): the player
+ * BOTH picks the seat to vote out AND makes its public case, in one inference. It carries the full
+ * speech scaffolding (role stance, claim guidance, voice, public facts, transcript) plus the legal
+ * targets and the vote heuristic, and asks for two labelled lines — `TARGET:` / `CASE:` — which a
+ * weak model formats far more reliably than JSON around a long free-text field. Parsed by
+ * {@link parseVoteSpeech}; NOT load-bearing (the signed decision is still produced separately and
+ * pinned to the chosen target). Collapsing two ~1.1k-token calls into one is a direct token saving
+ * under the provider's token-rate limit. Night turns keep {@link buildReasonPrompt} (no public speech).
+ */
+export function buildVoteSpeechPrompt(ctx: TurnContext): string {
+  const events = eventsBlock(ctx);
+  const rule = decisionRule(ctx.role, "vote");
+  return [
+    `${header(ctx)} Your secret role is ${ctx.role}.`,
+    RULES,
+    ROLE_STANCE[ctx.role] ?? "",
+    livingBlock(ctx),
+    NO_INVENTION,
+    ENGLISH_ONLY,
+    CLAIM_GUIDANCE[ctx.role] ?? "",
+    voiceDirective(ctx),
+    publicFactsBlock(ctx),
+    ``,
+    phaseFraming(ctx),
+    ...(events ? [events] : []),
+    `Public discussion so far:`,
+    transcriptBlock(ctx),
+    ``,
+    ...(rule ? [rule] : []),
+    legalTargetsBlock(ctx),
+    `Pick ONE living player to vote out today and make your case for it. Base it ONLY on what players actually said; if "WHAT YOU SECRETLY KNOW" holds a CERTAIN fact, use it and tell the table to follow you. Speak in the present ("today", not "tonight"), never vote yourself, invent nothing. Output EXACTLY these two lines and nothing else:`,
+    `TARGET: <the seat NUMBER of the player you vote to remove>`,
+    `CASE: <your 1-2 sentence case to the table for that vote, under 40 words, in your own voice>`,
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
+}
+
+/**
  * True when the table is actively turning on THIS seat — another player's line both names it AND
  * carries accusation/vote language. The weak model otherwise mis-reads "the table is discussing
  * Felix" (when it IS Felix) as a cue to agree and vote ITSELF out; flipping the task to a
@@ -430,6 +469,97 @@ function frameTarget(ctx: TurnContext): number | null {
 }
 
 /**
+ * The living non-self seat the recent transcript aims the most suspicion at — the seat the table is
+ * already turning on (null if no roster, no one has spoken, or no suspicion has been voiced). Read
+ * off the SAME recent window the model is shown, so it never points at a seat whose accusing line has
+ * been elided. Used by the per-seat discussion angles that hand a CONCRETE target to react to (accuse
+ * the pile-on, or defend it), turning an open menu — which this greedy model collapses onto one stock
+ * accusation — into a fill-in-the-name instruction.
+ */
+function mostSuspected(ctx: TurnContext): number | null {
+  if (!ctx.roster) return null;
+  const self = ctx.persona.seat;
+  const tx = recentTranscript(ctx).shown;
+  const nameRe = (seat: number): RegExp =>
+    new RegExp(`\\b${nameOf(ctx, seat).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+  let best: number | null = null;
+  let bestScore = 0;
+  for (const seat of ctx.alive) {
+    if (seat === self) continue;
+    const re = nameRe(seat);
+    const score = tx.filter(([s, t]) => s !== seat && re.test(t) && SUSPICION_RE.test(t)).length;
+    if (score > bestScore) {
+      bestScore = score;
+      best = seat;
+    }
+  }
+  return best;
+}
+
+/**
+ * Living non-self seats that have ALREADY spoken in the recent window, in the per-turn shuffled
+ * display order (so different seats key off a different "first" peer rather than always the lowest
+ * seat). The angle tasks that question / back a specific player draw their target from here, so the
+ * named seat is always one the speaker can legitimately react to (it actually has a line on the table).
+ */
+function spokenPeers(ctx: TurnContext): number[] {
+  if (!ctx.roster) return [];
+  const self = ctx.persona.seat;
+  const spoke = new Set(recentTranscript(ctx).shown.map(([s]) => s));
+  return displayOrder(ctx).filter((s) => s !== self && spoke.has(s));
+}
+
+/**
+ * How many distinct rhetorical angles {@link discussionAngle} rotates through. Set to the product seat
+ * count (6) so that within a single round the `(seat + round)` assignment hands every living seat a
+ * DIFFERENT angle — two seats never receive the same instruction at the same time, which is what stops
+ * the greedy model collapsing the whole table onto one name-swapped accusation template.
+ */
+const ANGLE_COUNT = 6;
+
+/**
+ * The generic day-discussion task, specialised into one of {@link ANGLE_COUNT} distinct rhetorical
+ * MOVES assigned deterministically per `(seat, round)`. The weak model is effectively greedy: given
+ * the old single "take a side / name who you suspect" MENU it resolved EVERY seat to the same stock
+ * accusation, name-swapped ("X's sudden shift feels suspicious — X is hiding something."). Handing
+ * each seat a different concrete move — question, accuse, defend a pile-on, demand proof, build on a
+ * peer, challenge the trusted — and, where the move needs one, a named target it can legitimately
+ * react to ({@link spokenPeers} / {@link mostSuspected}, so nothing is invented), turns an open menu
+ * into the fill-in-the-template instruction this model reliably follows, so seats diverge by CONTENT,
+ * not just persona voice. Each line is SHORT, POSITIVE and ENDS on its action command (this model
+ * latches onto whatever trails the prompt). Angles fall back to a name-free variant when no suitable
+ * peer has spoken yet. The binding vote target is still chosen later in the vote turn's own call —
+ * an angle steers the TALK, never the signed decision.
+ */
+function discussionAngle(ctx: TurnContext): string {
+  const idx = (ctx.persona.seat + ctx.decisionStub.round) % ANGLE_COUNT;
+  const peers = spokenPeers(ctx);
+  const peer = peers.length > 0 ? nameOf(ctx, peers[0]!) : "";
+  const heatSeat = mostSuspected(ctx);
+  const heat = heatSeat !== null ? nameOf(ctx, heatSeat) : "";
+  switch (idx) {
+    case 0: // QUESTIONER — interrogate a specific peer, withhold your vote until answered
+      return peer
+        ? `Put ONE sharp, specific question to ${peer} about something ${peer} actually said above, and say you won't vote with ${peer} until you get a straight answer. Ask it now.`
+        : `Open with a sharp question: name the ONE thing about today's vote you most need answered before you'll commit, and put it to the table. Ask it now.`;
+    case 1: // ACCUSER — one blunt named suspect, grounded, no hedging
+      return `Name your single prime suspect for today and back it by quoting the words of theirs that worry you most — no maybes, no hedging. State that accusation now.`;
+    case 2: // DEFENDER / bandwagon-breaker — weigh the case against whoever is drawing heat
+      return heat
+        ? `${heat} is drawing the table's heat. Say plainly whether the case against ${heat} actually holds up — and if it's thin, call out the rush and point suspicion somewhere better. Take that stand now.`
+        : `Push back on the loudest read at the table: say whether it is actually earned or just the easy answer, and where you would look instead. Make that case now.`;
+    case 3: // EVIDENCE-DEMANDER — raise the bar, ask for a real reason before any vote
+      return `Cut through the noise: say the talk so far is long on suspicion and short on proof, and demand that someone put a real, checkable reason on the table before this vote is spent. Set that bar now.`;
+    case 4: // BUILDER — endorse a peer's point and push it one step toward a name
+      return peer
+        ? `${peer} made a point worth more than it got. Say you are with ${peer}, then carry that reasoning one step further, toward an actual name. Build on it now.`
+        : `Lay down a concrete frame the table can build on: name what would actually make you trust or doubt someone today, then invite others onto it. Set it now.`;
+    default: // CONTRARIAN — challenge the comfortable consensus / the most-trusted seat
+      return `Go against the grain: name who this table seems to TRUST most right now and ask out loud whether that trust is earned or just comfortable. Press that now.`;
+  }
+}
+
+/**
  * Discussion prompt (DAY discussion pass): free-form debate before the vote, grounded purely in
  * the public transcript. It pushes the debate forward — reacting to a named player and adding one
  * new point, optionally claiming/bluffing a role — but is deliberately NOT given a pre-chosen
@@ -481,7 +611,7 @@ export function buildDiscussionPrompt(ctx: TurnContext): string {
     : clearedTown.length > 0
     ? `Your own secret investigation has CLEARED ${clearedNames} — you KNOW for certain they are innocent Town, not Mafia. In 1-2 sentences (under 40 words) about today's vote: NEVER accuse or push the vote onto ${clearedNames}; instead steer suspicion toward a player you have NOT cleared, or push back if the table wrongly turns on ${clearedNames}. You need not reveal how you know. Speak in the present ("today", not "tonight"). Commit to a read now.`
     : hasDiscussion
-    ? `In 1-2 sentences (under 40 words), move today's vote forward in your OWN words — never copy or requote another player's line. Take a real side: challenge or back a point someone above actually made, or name who you most suspect and say plainly why. You may make a role claim or call out one you think is a bluff. Speak in the present ("today", not "tonight"); a player who hasn't reached their turn yet is just waiting, never a suspect for that alone. Commit to a read — don't say you'll just wait and watch.`
+    ? `In 1-2 sentences (under 40 words), in your OWN words and never a copy of another player's line — speak in the present ("today", not "tonight"), and a player who hasn't reached their turn yet is just waiting, never a suspect for that alone. Now do exactly this: ${discussionAngle(ctx)}`
     : `You speak first, so the only fact yet is who has died — there is no behaviour to judge. In 1-2 sentences (under 40 words) about today's vote (present tense, say "today", not "tonight"), open with intent: name who you most want to hear from and why, put a sharp question to the table, or — if your role hands you something concrete (see above) — stake your claim. Don't invent behaviour for anyone or call a waiting player quiet. Open the debate now.`;
   // The leaning is deliberately NOT injected: pushing a pre-chosen target makes a weak model
   // fabricate behaviour to justify it (esp. for a seat that has not spoken). Discussion stays

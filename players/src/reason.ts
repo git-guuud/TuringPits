@@ -52,3 +52,50 @@ export function parseReason(text: string, legalTargets: readonly number[]): Reas
 
   throw new Error(`reason output names no legal target (legal: ${legalTargets.join(", ")}): ${text}`);
 }
+
+/**
+ * A DAY vote turn's MERGED output: the chosen target plus the public case for it, produced by one
+ * inference instead of a separate reason call and speech call. Under the testnet's token-rate limit
+ * a match is throttled by total tokens shipped, so collapsing two ~1.1k-token calls into one is a
+ * direct speedup with no settlement impact (the signed decision is still a separate constrained call).
+ */
+export interface VoteSpeechResult {
+  readonly target: number;
+  /** The raw public case (still passes through the day-speech guard before broadcast). May be "". */
+  readonly speech: string;
+}
+
+/**
+ * Parse the merged vote call's output. The prompt asks for two labelled lines —
+ *   `TARGET: <seat>` / `CASE: <1–2 sentence case>`
+ * — which a weak model handles far more reliably than JSON with a long free-text field (no quote
+ * escaping to get wrong). Lenient like {@link parseReason}: a `TARGET`/`VOTE` label wins, else the
+ * first legal seat integer anywhere; the case is whatever follows `CASE`/`SAY`, else the text minus
+ * the target line. Returns null only when NO legal target can be recovered (caller resamples); a
+ * recovered target with an empty case signals the caller to fall back to a dedicated speech call.
+ */
+export function parseVoteSpeech(text: string, legalTargets: readonly number[]): VoteSpeechResult | null {
+  const legal = new Set(legalTargets);
+  let target: number | undefined;
+  const labelled =
+    text.match(/\bTARGET\b\s*[:=]?\s*(?:seat\s*)?#?\s*(\d+)/i) ??
+    text.match(/\bVOTE\b\s*[:=]?\s*(?:seat\s*)?#?\s*(\d+)/i);
+  if (labelled && legal.has(Number(labelled[1]))) target = Number(labelled[1]);
+  if (target === undefined) {
+    for (const tok of text.match(/\d+/g) ?? []) {
+      if (legal.has(Number(tok))) {
+        target = Number(tok);
+        break;
+      }
+    }
+  }
+  if (target === undefined) return null;
+
+  let speech = "";
+  const cased = text.match(/\b(?:CASE|SAY|SPEECH)\b\s*[:=]?\s*([\s\S]+)/i);
+  if (cased) speech = cased[1]!.trim();
+  else speech = text.replace(/\bTARGET\b[^\n]*\n?/i, "").replace(/\bVOTE\b[^\n]*\n?/i, "").trim();
+  // Drop wrapping quotes/backticks/code-fences the model sometimes adds around the case.
+  speech = speech.replace(/^```[a-z]*\s*|\s*```$/gi, "").replace(/^["'`]+|["'`]+$/g, "").trim();
+  return { target, speech };
+}

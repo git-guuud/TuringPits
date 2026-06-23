@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildReasonPrompt, buildSpeechPrompt, buildDecisionPrompt, buildDiscussionPrompt, recentTranscript, TRANSCRIPT_MAX_ENTRIES } from "./prompt.js";
+import { buildReasonPrompt, buildSpeechPrompt, buildDecisionPrompt, buildDiscussionPrompt, buildVoteSpeechPrompt, recentTranscript, TRANSCRIPT_MAX_ENTRIES } from "./prompt.js";
 import type { TurnContext } from "./types.js";
 
 const base: TurnContext = {
@@ -172,10 +172,11 @@ describe("buildDecisionPrompt", () => {
 });
 
 describe("buildDiscussionPrompt", () => {
-  it("asks for a debate contribution reacting to a named player, no decision JSON", () => {
+  it("asks for a grounded, present-tense debate contribution, no decision JSON", () => {
     const ctx: TurnContext = { ...base, role: "TOWN", stage: "discussion" };
     const p = buildDiscussionPrompt(ctx);
-    expect(p.toLowerCase()).toContain("move today's vote forward in your own words");
+    expect(p.toLowerCase()).toContain("in your own words");
+    expect(p.toLowerCase()).toContain('"today", not "tonight"');
     expect(p).toContain("seat 3");        // grounded in the transcript ("seat 3 is suspicious")
     expect(p).not.toContain('"target"');  // free-form, not a decision
   });
@@ -284,7 +285,7 @@ describe("buildDiscussionPrompt", () => {
     };
     const p = buildDiscussionPrompt(ctx);
     expect(p).not.toContain("claim the Detective role");
-    expect(p.toLowerCase()).toContain("move today's vote forward"); // the generic reactor instead
+    expect(p).toContain("do exactly this:"); // the generic per-seat angle reactor instead
   });
 
   it("a round-2 MAFIA under fire turns the bluff on its accuser (bluff outranks generic self-defense)", () => {
@@ -312,6 +313,105 @@ describe("buildDiscussionPrompt", () => {
     const p = buildDiscussionPrompt(ctx);
     expect(p).not.toContain("claim the Detective role");
     expect(p).toContain("The table is turning on YOU");
+  });
+});
+
+describe("buildDiscussionPrompt — per-seat rhetorical angles (mode-collapse fix)", () => {
+  // A 6-seat table so the (seat + round) angle assignment can cover all six angles in one round.
+  const sixRoster = [
+    { seat: 0, name: "Ada", blurb: "a tactician" },
+    { seat: 1, name: "Boris", blurb: "an accuser" },
+    { seat: 2, name: "Cleo", blurb: "a peacemaker" },
+    { seat: 3, name: "Dmitri", blurb: "a contrarian" },
+    { seat: 4, name: "Esme", blurb: "a strategist" },
+    { seat: 5, name: "Felix", blurb: "a prosecutor" },
+  ];
+  // Several seats have spoken (and the table is leaning on Dmitri) so the name-bearing angles fire.
+  const sixBase = (seat: number, round = 2): TurnContext => ({
+    persona: { seat, ...sixRoster[seat]! },
+    role: "TOWN",
+    roster: sixRoster,
+    alive: [0, 1, 2, 3, 4, 5],
+    transcript: [
+      [0, "I think Dmitri is suspicious and hiding something."],
+      [1, "Agreed, Dmitri keeps dodging — I'd vote Dmitri."],
+      [5, "Dmitri is the one I distrust most today."],
+    ],
+    decisionStub: { nonce: "deadbeef", phase: "day", round, player: seat, action: "vote" },
+    legalTargets: [0, 1, 2, 3, 4, 5].filter((s) => s !== seat),
+    stage: "discussion",
+  });
+
+  // The last line of the prompt IS the assigned angle task (it ends on its action command).
+  const taskOf = (ctx: TurnContext): string => {
+    const lines = buildDiscussionPrompt(ctx).split("\n");
+    return lines[lines.length - 1]!;
+  };
+
+  it("gives every living seat a DISTINCT angle in the same round (no shared template)", () => {
+    const tasks = [0, 1, 2, 3, 4, 5].map((seat) => taskOf(sixBase(seat)));
+    expect(new Set(tasks).size).toBe(tasks.length); // all six are different
+  });
+
+  it("rotates a given seat's angle across rounds (so it isn't the same move every day)", () => {
+    const r2 = taskOf(sixBase(2, 2));
+    const r3 = taskOf(sixBase(2, 3));
+    expect(r2).not.toBe(r3);
+  });
+
+  it("each angle ends on its own action command, not on a 'today not tonight' reminder", () => {
+    for (const seat of [0, 1, 2, 3, 4, 5]) {
+      const t = taskOf(sixBase(seat));
+      expect(t.trimEnd()).toMatch(/now\.$|now\.”?$/i); // … now.
+      expect(t.trimEnd()).not.toMatch(/tonight"?\)?\.?$/i);
+    }
+  });
+
+  it("angles only name players grounded in the transcript, never a silent uninvolved seat", () => {
+    // Grounded = a seat that has spoken (0=Ada, 1=Boris, 5=Felix) or the seat the table is already
+    // suspecting (3=Dmitri, the heat target). Cleo (2) and Esme (4) are neither, so no angle may
+    // put words on them — that would be the exact invented-behaviour fabrication the guard rejects.
+    const grounded = new Set(["Ada", "Boris", "Felix", "Dmitri"]);
+    for (const seat of [0, 1, 2, 3, 4, 5]) {
+      const t = taskOf(sixBase(seat));
+      for (const name of ["Cleo", "Esme"]) {
+        if (name === sixRoster[seat]!.name) continue; // ignore self-name (the angles never use it)
+        expect(t).not.toContain(name);
+      }
+      const named = ["Ada", "Boris", "Dmitri", "Esme", "Felix"].filter(
+        (n) => n !== sixRoster[seat]!.name && t.includes(n),
+      );
+      for (const n of named) expect(grounded.has(n)).toBe(true);
+    }
+  });
+
+  it("the defender angle targets whoever the table is piling on (the most-suspected seat)", () => {
+    // Find the seat whose (seat+round)%6 === 2 (the defender angle): seat 0 at round 2.
+    const t = taskOf(sixBase(0, 2));
+    expect(t).toContain("Dmitri is drawing the table's heat"); // the pile-on target, chosen concretely
+  });
+
+  it("falls back to a name-free angle variant when no peer has spoken yet", () => {
+    // Round 1, second speaker, only the opener (seat 0) has spoken: a questioner/builder seat still
+    // gets a coherent angle, just without a peer name.
+    const ctx: TurnContext = {
+      persona: { seat: 4, ...sixRoster[4]! }, // (4 + 2) % 6 = 0 → questioner
+      role: "TOWN",
+      roster: sixRoster,
+      alive: [0, 1, 2, 3, 4, 5],
+      transcript: [[0, "I have no read yet — let's hear from everyone."]],
+      decisionStub: { nonce: "deadbeef", phase: "day", round: 2, player: 4, action: "vote" },
+      legalTargets: [0, 1, 2, 3, 5],
+      stage: "discussion",
+    };
+    const t = taskOf(ctx);
+    // peer = Ada (seat 0 spoke); questioner angle names Ada. Now use a transcript where the only
+    // speaker is the seat itself so spokenPeers is empty → name-free variant.
+    expect(t).toContain("Ada"); // sanity: peer-bearing when a peer exists
+    const noPeer: TurnContext = { ...ctx, transcript: [[4, "I'll open: who do we trust?"]] };
+    const tNoPeer = taskOf(noPeer);
+    expect(tNoPeer.toLowerCase()).toContain("ask it now"); // questioner fallback, no peer name
+    for (const name of ["Ada", "Boris", "Cleo", "Dmitri", "Felix"]) expect(tNoPeer).not.toContain(name);
   });
 });
 
@@ -455,6 +555,32 @@ describe("phase framing & public death record (anti-hallucination grounding)", (
 
   it("omits the death record entirely before anyone has died", () => {
     expect(buildReasonPrompt(base)).not.toContain("WHAT HAS HAPPENED");
+  });
+});
+
+describe("buildVoteSpeechPrompt (merged reason+speech)", () => {
+  const roster = [
+    { seat: 0, name: "Ada", blurb: "a calm tactician" },
+    { seat: 1, name: "Boris", blurb: "a loud accuser" },
+    { seat: 2, name: "Cleo", blurb: "a peacemaker" },
+    { seat: 3, name: "Dmitri", blurb: "a contrarian" },
+    { seat: 4, name: "Esme", blurb: "a quiet strategist" },
+  ];
+  const ctx: TurnContext = { ...base, roster, transcript: [[0, "Boris is dodging — I suspect him."]] };
+
+  it("asks for ONE call that both picks the target and writes the case (TARGET/CASE format)", () => {
+    const p = buildVoteSpeechPrompt(ctx);
+    expect(p).toContain("TARGET:");
+    expect(p).toContain("CASE:");
+    expect(p).toContain("Legal targets");            // the legal-target list (for the pick)
+    expect(p).toContain("Boris is dodging");          // grounded in the transcript
+    expect(p.toLowerCase()).toContain("in the voice of"); // carries the speech voice directive
+  });
+
+  it("carries the role's claim guidance so power roles can still reveal/bluff in the merged call", () => {
+    const det = buildVoteSpeechPrompt({ ...ctx, role: "DETECTIVE", investigations: [{ round: 1, target: 1, faction: "MAFIA" }] });
+    expect(det).toContain("CLAIM Detective");        // CLAIM_GUIDANCE present
+    expect(det).toContain("investigation results");  // its certain facts are available to cite
   });
 });
 

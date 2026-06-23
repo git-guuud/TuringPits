@@ -1,9 +1,14 @@
-# Turing Pits — Week Plan to "Proof of Battle" MVP (AI Mafia)
+# Turing Pits — Build Plan (AI Mafia)
 
-**Window:** Jun 17 → Jun 23, 2026 (code-lock snapshot due Jun 23).
-**Goal of the week:** an end-to-end demo where judges watch **multiple LLMs play Mafia**
-live, place bets on a 0G Chain contract, and see the contract verify the TEE-attested moves
-and trigger payout — with the real on-chain mechanics front-and-center.
+**Status:** the "Proof of Battle" MVP (Days 1–6) is **shipped and live on 0G Galileo** — the full
+loop (watch → wager in CHIP → on-chain settle → claim) runs from the UI. Days 1–7 below are the
+historical week plan (kept as a record); the **[Post-MVP roadmap](#post-mvp-roadmap)** at the bottom
+is the live to-do list (new market types, more agent personalities, explorer links, SFX, more roles).
+
+**Window (MVP):** Jun 17 → Jun 23, 2026.
+**Goal of the week:** an end-to-end demo where judges watch **multiple LLMs play Mafia** live, place
+bets on a 0G Chain contract, and see the contract verify the TEE-attested moves and trigger payout —
+with the real on-chain mechanics front-and-center.
 
 **Design reference:** `docs/superpowers/specs/2026-06-17-ai-mafia-design.md`.
 
@@ -143,42 +148,85 @@ happy path, the cheat path, and reject double-claim / settle-before-lock.
 
 ---
 
-## Day 6 — Jun 22 (Sun): Frontend Live Arena + betting UI
+## Day 6 — Jun 22 (Sun): Frontend Live Arena + betting UI  ✅ DONE
 The gamified spectacle. Clean, polished UI — not a prototype.
 
-- [ ] Server-side Sequencer streams each turn over WebSocket at ~1 turn/sec.
-- [ ] Live arena view: player avatars, day/night phases, speech/accusation feed, vote
-      results, deaths.
-- [ ] Betting panel: connect wallet, show YES/NO pools, place a bet, see state transitions
-      (open → locked → settled → claimable) reflected from the contract.
-- [ ] Surface the trust story: role commit shown before betting, roles revealed after the
-      game, and a **"TEE-attested by 0G Compute"** badge on each move + on settle.
+- [x] Server-side Sequencer streams each turn over WebSocket (`server/src/orchestrator.ts` +
+      `broadcast.ts`; night actions redacted so roles can't leak mid-match).
+- [x] Live arena view: the "tribunal" UI — bench/seats, day/night phases, speech & accusation
+      feed, live vote tally, deaths, role reveal at sentencing (`components/tribunal/*`).
+- [x] Betting panel: connect wallet, YES/NO pools, place a bet, and the full lifecycle
+      (open → settled → claimable, plus Draw/Void/Refund) reflected from the contract
+      (`components/tribunal/Verdict.tsx`, `state/matchStore.ts`, `lib/contract.ts`).
+- [x] Trust story surfaced: role commit shown before betting, roles revealed after the game,
+      TEE-attested move count, and a "How it works" primer (`components/tribunal/Record.tsx`,
+      `HowItWorks.tsx`).
+- [x] **Betting currency → CHIP** (mock ERC20) with an in-app **"Get test tokens"** faucet +
+      balance display; market **stays open until settled**; both contracts redeployed (see
+      `DEPLOYMENT.md`). Contract suite 49 green.
 
-**Exit criteria:** In a browser, a user watches a Mafia match stream turn-by-turn, places a
-bet against the deployed contract, and sees the market settle and a claim succeed. Every
-mocked element is visibly labeled as mocked.
+**Exit criteria (met):** In a browser, a user watches a Mafia match stream turn-by-turn, mints
+CHIP, places a bet against the deployed contract, and sees the market settle and a claim
+succeed. Every mocked element is visibly labeled (CHIP is the only mock).
 
 ---
 
-## Day 7 — Jun 23 (Mon): End-to-end integration + MVP lock
+## Day 7 — Jun 23 (Mon): End-to-end integration + MVP lock  ✅ mostly done
 Glue the full loop and harden the demo. No new features — only integration, polish, and the
 code-lock snapshot.
 
-- [ ] Full happy-path run: open market (role commit) → bets → lock → match streams (TEE
-      players) → prompts + transcript on 0G Storage → contract verifies signatures + runs
-      Mafia rules → settles → payout claimed — all from the UI.
+- [x] Full happy-path run end-to-end on Galileo: create market (role commit) → CHIP bets →
+      match streams (TEE players) → personas + transcript on 0G Storage → contract verifies
+      signatures + runs Mafia rules → settles → payout claimed — all from the UI.
+- [x] Update `STATUS.md` to reflect completed vs. mocked components honestly.
 - [ ] Demo script / runbook so a judge can reproduce the run in minutes.
-- [ ] Update `STATUS.md` to reflect completed vs. mocked components honestly.
 - [ ] Tag the code-lock snapshot.
 
 **Exit criteria:** A single demo run completes the entire loop with the on-chain mechanics
 real and verifiable, the rigging path demonstrably fails to settle, and `STATUS.md`
-accurately lists what's real vs. mocked. Snapshot tagged before EOD.
+accurately lists what's real vs. mocked.
 
 ---
 
-## Deferred past MVP (only after Jun 23 lock)
-- Additional markets per match (per-agent survival, "who is voted out next", live AMM).
-- Slashing contract with host bond + slippage subsidization payout.
-- Bring-Your-Own-Model: distinct models/providers per seat, model-vs-model spectacle.
-- Production-grade WebSocket scaling and spectator features.
+# Post-MVP roadmap
+
+The MVP loop (watch → wager → settle → claim) is live. Next work is breadth and polish — make the
+spectacle richer and the market deeper. Roughly ordered by impact; still one bounded task per session.
+
+### 1. New market types
+Today there is one market per match: binary **"does Mafia win?"** (YES/NO parimutuel). Add more
+markets keyed to the same `matchId`, settled from the same verified transcript:
+- [ ] **Per-agent survival** — "does seat N survive to the end?" (one market per seat, or a pick).
+- [ ] **Round-of-death** — over/under or bucketed market on which round a given seat is eliminated.
+- [ ] **"Who is voted out next"** — short-horizon market that opens/closes around each day vote.
+- Each needs: a market-type tag in `MafiaMarket`, a settle path that derives the outcome from the
+  already-verified `MafiaRules` run (no new trust assumptions), and UI to list/place/claim them.
+
+### 2. More agent personalities
+The persona pool drives the drama. Deeper, more distinct voices = better television.
+- [ ] Expand the curated persona pool well beyond the current set (distinct voices, tactics, tells).
+- [ ] Keep them Merkle-rooted/committed so persona governance + prompt-injection resistance hold.
+- [ ] Tune prompts per archetype (see [[player-prompt-hallucination-fixes]], [[prompt-probe-fast-loop]]).
+
+### 3. Explorer links in the frontend
+Make the on-chain reality one click away (`lib/contract.ts` already has `explorerTx`).
+- [ ] Link every bet / claim / settle tx hash to the Galileo explorer.
+- [ ] Link the market + CHIP token addresses, and the settlement tx, from the live + history views.
+- [ ] Surface the 0G Storage transcript CID (and persona pool root) as verifiable evidence links.
+
+### 4. SFX / audio
+Lean into the courtroom-drama theme.
+- [ ] Move/typing SFX, gavel on verdict, night/day transition stings, a win/lose sting on settle.
+- [ ] Respect the existing `useMusic`/`typeSound` hooks; per-user mute; no autoplay surprises.
+
+### 5. More roles (stretch)
+The engine currently runs MAFIA / DOCTOR / DETECTIVE / TOWN.
+- [ ] Add roles (e.g. Jester, Vigilante, Godfather) in `engine/` **and** the Solidity `MafiaRules`
+      port + `_checkComposition` in lockstep — they MUST stay byte-for-byte equivalent or settlement
+      breaks. Update commit-reveal composition checks and tests on both sides.
+
+### Deferred / larger bets
+- [ ] Slashing contract with host bond + refund-mode compensation payout.
+- [ ] Bring-Your-Own-Model: distinct models/providers per seat (GPT vs Claude vs Llama as factions).
+- [ ] Production-grade WebSocket scaling and spectator features.
+- [ ] Verify contract source on the explorer; consider a real ERC20 / staking currency post-demo.

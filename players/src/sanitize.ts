@@ -218,6 +218,62 @@ export function stripLeadingEcho(text: string, prior: readonly string[]): string
 }
 
 /**
+ * Drop whole SENTENCES that near-duplicate an EARLIER speaker's sentence, keeping the unique ones —
+ * the trailing/embedded counterpart to {@link stripLeadingEcho}. The weak model mode-collapses onto
+ * shared stock closers ("Let's unite and vote X out today.", "Let's focus on the facts and make an
+ * informed decision together.") that every seat reaches for, so a genuinely unique OPENING gets the
+ * whole line rejected for one parroted closing sentence — the single biggest driver of the live regen
+ * rate (echo was ~all of a ~33% reject rate). Stripping just the echoed sentence(s) salvages the real
+ * point with no regeneration call. Mirrors {@link stripMarkedSentences}: returns the original when
+ * nothing is dropped or too little would remain (then the echo guard rejects→regenerates). The
+ * threshold matches {@link isEcho}'s sentence check, so it removes exactly what would otherwise trip.
+ */
+export function stripEchoedSentences(text: string, prior: readonly string[], sentence = 0.85): string {
+  const segs = sentences(text);
+  if (segs.length <= 1) return text; // a single sentence is all-or-nothing — leave it for the echo guard
+  const priorSents = prior
+    .flatMap(sentences)
+    .map((s) => tokens(s))
+    .filter((t) => t.length >= 7)
+    .map((t) => new Set(t));
+  if (priorSents.length === 0) return text;
+  const kept = segs.filter((s) => {
+    const t = tokens(s);
+    if (t.length < 7) return true; // too short to be a meaningful echo — keep
+    const st = new Set(t);
+    return !priorSents.some((p) => jaccard(st, p) >= sentence);
+  });
+  if (kept.length === segs.length) return text; // nothing dropped
+  const out = kept.join(" ").trim();
+  return tokens(out).length >= 5 ? out : text; // too little left → let the echo guard reject→regenerate
+}
+
+/**
+ * Drop whole SENTENCES that name a player OUTSIDE the allow-list — a seat that has died (so it can no
+ * longer be voted or meaningfully re-litigated), keeping the clean ones. The weak model fixates on a
+ * player who was prominent in the recent transcript and keeps re-accusing them AFTER they are killed
+ * (live: the most-discussed seat died on night 1 and the next day's lines kept pushing the vote onto
+ * the corpse). Such a line was rejected WHOLE → a regeneration call, then often a canned fallback;
+ * salvaging just the clean sentences keeps the genuine point and removes a regeneration. Mirrors
+ * {@link stripMarkedSentences} / {@link stripEchoedSentences}: a no-op when no allow-list is supplied
+ * (back-compat), when a single sentence is all-or-nothing, when nothing is dropped, or when too little
+ * would remain (then the forbidden-name guard rejects→regenerates as before).
+ */
+export function stripForbiddenNameSentences(
+  text: string,
+  roster: readonly string[],
+  allowed: readonly string[],
+): string {
+  if (roster.length === 0 || allowed.length === 0) return text;
+  const segs = sentences(text);
+  if (segs.length <= 1) return text;
+  const kept = segs.filter((s) => forbiddenNames(s, roster, allowed).length === 0);
+  if (kept.length === segs.length) return text; // nothing dropped
+  const out = kept.join(" ").trim();
+  return tokens(out).length >= 5 ? out : text; // too little left → leave it for the guard
+}
+
+/**
  * Drop whole SENTENCES that carry a hallucination marker (night-confusion, physical tell, invented
  * demeanour, CJK), keeping the clean ones. The weak model often produces a strong line plus ONE bad
  * sentence — most damagingly a power-role CLAIM ("I'm the Detective, I investigated Dmitri — he's
@@ -333,9 +389,9 @@ const LANGUAGE_NOTE =
 
 /** Correction appended when regenerating a speech that parroted another player. */
 const ECHO_NOTE =
-  "Your previous reply was REJECTED for repeating what another player already said. Do NOT echo or " +
-  "lightly reword anyone else's line — make a genuinely DIFFERENT point in your own words, or briefly " +
-  "say you have nothing new to add yet.";
+  "Your previous reply was REJECTED for repeating what another player already said. Drop that wording " +
+  "entirely and make the SPECIFIC move the instruction at the end of the prompt asks for, in completely " +
+  "fresh words — a different point from a different angle, never a reword of anyone else's line.";
 
 /** Correction appended when the speech narrates the speaker itself in the third person. */
 const selfRefNote = (name: string): string =>
@@ -387,7 +443,14 @@ export async function cleanDaySpeech(
   // bluff wrapped around one bad "evasive tonight" line survives instead of being nuked whole), then
   // strip transcript-format labels. Only what's left is judged — the dominant round-1 reject modes.
   const clean = (t: string): string =>
-    stripSpeakerLabels(stripMarkedSentences(stripLeadingEcho(t, priorTexts)), names);
+    stripSpeakerLabels(
+      stripForbiddenNameSentences(
+        stripMarkedSentences(stripEchoedSentences(stripLeadingEcho(t, priorTexts), priorTexts)),
+        names,
+        allowedNames,
+      ),
+      names,
+    );
   const note = (t: string): string => {
     const parts: string[] = [];
     if (hasNonEnglish(t)) parts.push(LANGUAGE_NOTE);
@@ -409,9 +472,14 @@ export async function cleanDaySpeech(
     if (accusedCleared.length > 0) parts.push(clearedTownNote(accusedCleared));
     return parts.join(" ");
   };
+  dayGuard.total++;
   const first = clean(rawText);
   const firstNote = note(first);
-  if (firstNote === "") return first;
+  if (firstNote === "") {
+    logGuardStats();
+    return first;
+  }
+  dayGuard.rejected++; // the raw speech was rejected → a regeneration call is now made
   // Opt-in diagnostics: GUARD_DEBUG surfaces WHY a speech was rejected (which is otherwise invisible —
   // only the bland fallback reaches the transcript), so prompt tuning can target the real failure mode.
   const dbg = (stage: string, t: string) => {
@@ -421,11 +489,31 @@ export async function cleanDaySpeech(
   try {
     const retry = await provider.complete(`${basePrompt}\n\n${firstNote}`, opts);
     const retried = clean(retry.text);
-    if (note(retried) === "") return retried;
+    if (note(retried) === "") {
+      logGuardStats();
+      return retried;
+    }
     dbg("retry", retried);
   } catch {
     // fall through to the safe fallback
   }
+  dayGuard.fallback++; // the regeneration also failed → the canned fallback enters the transcript
   if (process.env.GUARD_DEBUG) console.error(`[GUARD → FALLBACK] ${fallback}`);
+  logGuardStats();
   return fallback;
+}
+
+/**
+ * Diagnostics: how often a DAY speech is rejected by the guard (and thus regenerated), and how often
+ * the regeneration also fails so the canned fallback is used. Counted across both the discussion and
+ * the vote speech. Logged only when `GUARD_STATS` is set, so it never noises up the test output.
+ */
+const dayGuard = { total: 0, rejected: 0, fallback: 0 };
+function logGuardStats(): void {
+  if (!process.env.GUARD_STATS || dayGuard.total % 5 !== 0) return;
+  const pct = (n: number): number => Math.round((100 * n) / dayGuard.total);
+  console.log(
+    `[guard] ${dayGuard.rejected}/${dayGuard.total} day speeches rejected→regenerated (${pct(dayGuard.rejected)}%), ` +
+      `${dayGuard.fallback} fell to the canned fallback (${pct(dayGuard.fallback)}%)`,
+  );
 }

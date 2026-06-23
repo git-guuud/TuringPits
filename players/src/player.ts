@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parseDecision } from "./decision.js";
-import { parseReason } from "./reason.js";
-import { buildDecisionPrompt, buildDiscussionPrompt, buildReasonPrompt, buildSpeechPrompt, recentTranscript } from "./prompt.js";
+import { parseReason, parseVoteSpeech } from "./reason.js";
+import { buildDecisionPrompt, buildDiscussionPrompt, buildReasonPrompt, buildSpeechPrompt, buildVoteSpeechPrompt, recentTranscript } from "./prompt.js";
 import { cleanDaySpeech, cleanNightReason, namifySeats } from "./sanitize.js";
 import type { InferenceProvider, PlayerTurn, SamplingOptions, TurnContext } from "./types.js";
 
@@ -128,65 +128,84 @@ export class Player {
   }
 
   async takeTurn(ctx: TurnContext): Promise<PlayerTurn> {
-    // 1. Reason: privately choose a target. Resample on unusable output; fall back to a
-    //    deterministic legal pick so a poor reasoning turn can never stall the match.
-    let chosen = { target: ctx.legalTargets[0] ?? 0, reason: "" };
-    for (let attempt = 0; attempt <= this.decisionRetries; attempt++) {
-      const reasonResult = await this.provider.complete(buildReasonPrompt(ctx), sampling(ctx, "reason"));
-      try {
-        chosen = parseReason(reasonResult.text, ctx.legalTargets);
-        break;
-      } catch {
-        // Keep resampling; the deterministic default above stands if every attempt fails.
-      }
-    }
+    const isDay = ctx.decisionStub.phase === "day";
+    // The seat this turn targets. A deterministic legal default stands if every sample is unusable,
+    // so a weak model can never stall the match.
+    let target = ctx.legalTargets[0] ?? 0;
+    let speech: string;
 
-    // 2. Speak — DAY ONLY. Night actions (kill/save/investigate) are secret: there is NO public
-    //    speech at night, only the private reasoning + the signed action. At night the turn
-    //    carries that reasoning for the post-game record, and `playMatch` never broadcasts it;
-    //    in the day debate the player justifies its chosen vote aloud. Free-form, not signed.
-    let speech = chosen.reason;
-    if (ctx.decisionStub.phase === "day") {
-      const speechPrompt = buildSpeechPrompt(ctx, chosen.target, chosen.reason);
-      const speechResult = await this.provider.complete(speechPrompt, sampling(ctx, "speech"));
-      // Moderator guard: keep night-confusion / "silence = guilt" out of the broadcast vote speech.
+    if (isDay) {
+      // 1+2 MERGED (day vote): ONE call both picks the seat to vote out AND writes the public case,
+      //    replacing the former separate reason + speech calls. Under the provider's token-rate limit
+      //    a match is bounded by total tokens shipped, so collapsing two ~1.1k-token calls into one is
+      //    a direct speedup. Resample only when no legal target is recovered; the default above stands.
+      let rawSpeech = "";
+      let gotSpeech = false;
+      for (let attempt = 0; attempt <= this.decisionRetries; attempt++) {
+        const merged = await this.provider.complete(buildVoteSpeechPrompt(ctx), sampling(ctx, "vote"));
+        const parsed = parseVoteSpeech(merged.text, ctx.legalTargets);
+        if (parsed) {
+          target = parsed.target;
+          rawSpeech = parsed.speech;
+          gotSpeech = parsed.speech.trim().length > 0;
+          break;
+        }
+      }
+      // The day-speech guard regenerates from a speech-only prompt pinned to the chosen target; if the
+      //    merged call produced no usable case (rare), that same prompt also produces the first speech.
+      const speechPrompt = buildSpeechPrompt(ctx, target, "");
+      if (!gotSpeech) {
+        const speechResult = await this.provider.complete(speechPrompt, sampling(ctx, "speech"));
+        rawSpeech = speechResult.text;
+      }
+      // Moderator guard: keep night-confusion / "silence = guilt" / third-person self-talk out of the
+      //    broadcast vote speech.
       const voteFb = VOTE_FALLBACKS[ctx.persona.seat % VOTE_FALLBACKS.length]!;
       speech = await cleanDaySpeech(
-        this.provider, speechPrompt, speechResult.text,
-        voteFb(seatName(ctx, chosen.target)),
+        this.provider, speechPrompt, rawSpeech,
+        voteFb(seatName(ctx, target)),
         ctx.roster?.map((p) => p.name) ?? [],
         othersPriorSpeeches(ctx),
         sampling(ctx, "speech-fix"),
         // Any living seat may be named (you may suspect/address anyone); fabricated behaviour is
         // caught by the markers, not the name list. Dead seats this player investigated stay allowed
         // so a Detective can still cite a now-dead result.
-        [...livingNames(ctx), seatName(ctx, ctx.persona.seat), seatName(ctx, chosen.target), ...knownNames(ctx)],
+        [...livingNames(ctx), seatName(ctx, ctx.persona.seat), seatName(ctx, target), ...knownNames(ctx)],
         seatName(ctx, ctx.persona.seat),
       );
       speech = namifySeats(speech, ctx.roster ?? []); // belt-and-suspenders: no stray "seat N" in speech
     } else {
-      // NIGHT private reasoning: scrub invented reads (esp. round 1, when no one could have been
-      // observed), then swap any "seat N" for the name, so the audit log shows neither made-up
-      // behaviour nor seat numbers. Grounded reasoning passes the scrub through unchanged.
+      // NIGHT: a secret action — reason call only, NO public speech (kill/save/investigate are hidden).
+      //    The private reasoning is carried for the post-game record and never broadcast. Resample
+      //    unusable output; the deterministic target above stands if every attempt fails.
+      let reason = "";
+      for (let attempt = 0; attempt <= this.decisionRetries; attempt++) {
+        const reasonResult = await this.provider.complete(buildReasonPrompt(ctx), sampling(ctx, "reason"));
+        try {
+          const chosen = parseReason(reasonResult.text, ctx.legalTargets);
+          target = chosen.target;
+          reason = chosen.reason;
+          break;
+        } catch {
+          // Keep resampling; the deterministic default above stands if every attempt fails.
+        }
+      }
+      // Scrub invented reads (esp. round 1) + third-person self-narration, then swap any "seat N" for
+      //    the name, so the audit log shows neither made-up behaviour nor seat numbers.
       speech = namifySeats(
-        cleanNightReason(
-          chosen.reason,
-          ctx.decisionStub.action,
-          seatName(ctx, chosen.target),
-          seatName(ctx, ctx.persona.seat),
-        ),
+        cleanNightReason(reason, ctx.decisionStub.action, seatName(ctx, target), seatName(ctx, ctx.persona.seat)),
         ctx.roster ?? [],
       );
     }
 
-    // 3. Decide: emit the canonical decision for the chosen target. Pinning the accepted target
-    //    to `chosen.target` keeps speech and action in lockstep; a drifting/non-canonical sample
-    //    is resampled (never repaired — that would invalidate the signature).
+    // 3. Decide: emit the canonical decision for the chosen target. Pinning the accepted target to
+    //    `target` keeps speech and action in lockstep; a drifting/non-canonical sample is resampled
+    //    (never repaired — that would invalidate the signature).
     let lastErr: unknown;
     for (let attempt = 0; attempt <= this.decisionRetries; attempt++) {
-      const decisionResult = await this.provider.complete(buildDecisionPrompt(ctx, chosen.target));
+      const decisionResult = await this.provider.complete(buildDecisionPrompt(ctx, target));
       try {
-        const structuredDecision = parseDecision(decisionResult.text, ctx.decisionStub, [chosen.target]);
+        const structuredDecision = parseDecision(decisionResult.text, ctx.decisionStub, [target]);
         return { speech, structuredDecision, attestation: decisionResult.attestation };
       } catch (err) {
         lastErr = err;

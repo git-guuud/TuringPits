@@ -2,14 +2,25 @@
 
 _Updated: 2026-06-22_
 
+> **Betting currency → CHIP (mock ERC20):** wagers now settle in `MockBetToken` (CHIP), not native
+> 0G — `betYes/betNo(matchId, amount)` pull via approve+transferFrom; payouts/refunds/fees pay CHIP.
+> The menu shows the CHIP balance + a "Get test tokens" faucet button. **Betting also stays open
+> until settle()** (no block-based close/lock). Redeployed to Galileo: market
+> `0xe371b4592a74a1Fda217956E52e07C5E821DA44F`, token `0xC983771bee3Acea4AB72045F6E6D0D22b6E1b1a6`
+> (see DEPLOYMENT.md). Contract suite 49 green; frontend + server type-check clean.
+
 ## Current task
-**AI Mafia** (multiple LLMs playing Mafia). Days 1–5 **complete** (engine, TEE players,
-commit-reveal, 0G Storage, deployed on-chain verifier/market — see `TODO.md`). **Live 0G-TEE
-provider now wired in and confirmed:** the `players/` `Attestation` evolved to the live
-envelope model (`sha256(req):sha256(res):type:identity:tls_fp`) that `TeeEnvelope.sol`
-verifies; `ZeroGDirectProvider` (Direct SDK) replaced the broken Router path and passed a live
-inference; and a cross-layer Hardhat test settles a real `playMatch` transcript on the deployed
-contract. **Next: Day 6 (frontend live arena + betting UI).** Design:
+**AI Mafia** (multiple LLMs playing Mafia). Days 1–6 **complete**: engine, TEE players,
+commit-reveal, 0G Storage, on-chain verifier/market, **and the frontend live arena + betting UI**.
+**Live 0G-TEE provider wired in and confirmed:** the `players/` `Attestation` uses the live envelope
+model (`sha256(req):sha256(res):type:identity:tls_fp`) that `TeeEnvelope.sol` verifies;
+`ZeroGDirectProvider` (Direct SDK) passed a live inference; and a cross-layer Hardhat test settles a
+real `playMatch` transcript on the deployed contract. The full demo loop (watch → wager → settle →
+claim) runs end-to-end on Galileo.
+
+**Latest change — betting currency → CHIP + open-until-settled** (see the banner above): wagers moved
+from native 0G to the `MockBetToken` (CHIP) ERC20 with an in-app faucet, the market stays open until
+`settle()`, and both contracts were redeployed. Design:
 `docs/superpowers/specs/2026-06-17-ai-mafia-design.md`.
 
 ## Done
@@ -105,10 +116,11 @@ contract. **Next: Day 6 (frontend live arena + betting UI).** Design:
       skipped by default. Uploads paid by the funded `COMPUTE_PRIVATE_KEY` wallet.
 
 ## In progress
-- (none — live-TEE provider wiring complete; next is Day 6.)
+- (none — frontend + betting UI shipped; CHIP currency migration + redeploy complete.)
 
 ## Pending
-- Days 6–7 per `TODO.md`.
+- Polish / demo-day hardening per `TODO.md` (Day 7). Optional follow-ups: verify contract source on
+  the explorer; broaden market types (agent survival, round-of-death) per `IDEA.md` roadmap.
 
 ## 0G integration — confirmed facts (live, 2026-06-17)
 Durable findings from real testnet calls (`players/scripts/live-turn.mjs`,
@@ -139,9 +151,10 @@ Durable findings from real testnet calls (`players/scripts/live-turn.mjs`,
   on-chain-`ecrecover`able) is fully real; the execution guarantee is weaker than "hardware TEE."
 
 ## Mocks / stubs in place
-- `engine/`, `players/`, `storage/`, and `contracts/` are real (no mocks). `storage`
-  upload/download/round-trip is live-confirmed on testnet (Day 4). `server`/`frontend` are
-  still no-op stubs (Day 6).
+- `engine/`, `players/`, `storage/`, `contracts/`, `server/`, and `frontend/` are all real (no
+  mocks). `storage` upload/download/round-trip is live-confirmed on testnet (Day 4). The one
+  intentional mock is **`MockBetToken` (CHIP)** — the betting currency is a faucet-mintable test
+  ERC20 with no value (clearly marked `# MOCK`); all market mechanics it touches are real.
 - **The real `players/` ↔ `contracts` wiring is done and proven offline.** The `players/`
   `Attestation` now carries the live-confirmed 0G-TEE **envelope**
   (`reqHash:sha256(body):type:identity:tls`, see confirmed facts) that `TeeEnvelope.sol`

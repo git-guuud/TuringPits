@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { hasBadMarker, hasNonEnglish, cleanDaySpeech, cleanNightReason, stripSpeakerLabels, isEcho, namifySeats, forbiddenNames, stripLeadingEcho, refersToSelfInThirdPerson, accusesClearedTown, stripMarkedSentences, sentenceHasBadMarker } from "./sanitize.js";
+import { hasBadMarker, hasNonEnglish, cleanDaySpeech, cleanNightReason, stripSpeakerLabels, isEcho, namifySeats, forbiddenNames, stripLeadingEcho, stripEchoedSentences, refersToSelfInThirdPerson, accusesClearedTown, stripMarkedSentences, stripForbiddenNameSentences, sentenceHasBadMarker } from "./sanitize.js";
 
 const ROSTER = [
   { seat: 0, name: "Ada" }, { seat: 1, name: "Boris" }, { seat: 2, name: "Cleo" },
@@ -302,6 +302,54 @@ describe("stripLeadingEcho", () => {
   });
 });
 
+describe("stripEchoedSentences", () => {
+  // The real live mode-collapse: every seat reaches for the same stock closer.
+  const prior = [
+    "Vesper's timing and confidence are suspicious. Let's focus on the facts and make an informed decision together.",
+    "Flint's vote aligns with this, and Pip agrees. Let's unite and vote Vesper out today.",
+  ];
+
+  it("drops a parroted closing sentence and keeps the unique opening (no regen needed)", () => {
+    const t = "I'm going to vote for Flint. His alibi is shaky at best, and his confidence seems misplaced. Let's focus on the facts and make an informed decision together.";
+    const out = stripEchoedSentences(t, prior);
+    expect(out).toContain("His alibi is shaky at best");      // the unique point survives
+    expect(out).not.toContain("make an informed decision");    // the parroted closer is gone
+  });
+
+  it("strips an echoed stock sentence wherever it sits, salvaging the rest", () => {
+    const t = "Vesper's alibi is riddled with inconsistencies. Let's unite and vote Vesper out today.";
+    const out = stripEchoedSentences(t, prior);
+    expect(out).toBe("Vesper's alibi is riddled with inconsistencies.");
+  });
+
+  it("leaves a genuinely original line untouched", () => {
+    const t = "Boris keeps changing his story and I want a straight answer from him before any vote.";
+    expect(stripEchoedSentences(t, prior)).toBe(t);
+  });
+
+  it("returns the original when stripping would leave too little (lets the echo guard reject it)", () => {
+    // Whole line is the parroted closer → nothing unique remains → leave for the guard → regen/fallback.
+    expect(stripEchoedSentences("Let's unite and vote Vesper out today.", prior)).toBe(
+      "Let's unite and vote Vesper out today.",
+    );
+  });
+
+  it("is a no-op with no prior lines", () => {
+    expect(stripEchoedSentences("Any original point at all goes here, untouched.", [])).toBe(
+      "Any original point at all goes here, untouched.",
+    );
+  });
+
+  it("salvages a partial echo in cleanDaySpeech WITHOUT a regeneration call", async () => {
+    const { provider, prompts } = scripted(["unused"]);
+    const draft = "I'm going after Flint. His alibi is shaky and his confidence is misplaced. Let's unite and vote Vesper out today.";
+    const out = await cleanDaySpeech(provider, "PROMPT", draft, "FB", NAMES, prior);
+    expect(out).toContain("His alibi is shaky");
+    expect(out).not.toContain("Let's unite and vote Vesper out today");
+    expect(prompts.length).toBe(0); // salvaged in place — no regeneration inference
+  });
+});
+
 describe("refersToSelfInThirdPerson", () => {
   it("flags the speaker narrating itself in the third person", () => {
     expect(refersToSelfInThirdPerson("Look at how Felix is handling himself, so confident.", "Felix")).toBe(true);
@@ -405,6 +453,37 @@ describe("stripMarkedSentences", () => {
   it("keeps the original when salvage would leave too little to be a real contribution", () => {
     const draft = "Hmm. Dmitri seems evasive and suspicious tonight, so vote him out tonight.";
     expect(stripMarkedSentences(draft)).toBe(draft); // only "Hmm." would survive → not enough
+  });
+});
+
+describe("stripForbiddenNameSentences", () => {
+  const roster = ["Ada", "Boris", "Cleo", "Dmitri", "Esme"];
+  // Boris, Cleo, Dmitri are living/allowed; Ada has died (not in the allow-list).
+  const allowed = ["Boris", "Cleo", "Dmitri"];
+
+  it("drops a sentence that re-accuses a dead seat, keeping the living point", () => {
+    const draft = "Let's demand a concrete fact before we vote. The case against Ada is the strongest here.";
+    expect(stripForbiddenNameSentences(draft, roster, allowed)).toBe("Let's demand a concrete fact before we vote.");
+  });
+
+  it("leaves text untouched when every named seat is allowed", () => {
+    const clean = "I press Dmitri on his dodge. Boris should answer for his rush too.";
+    expect(stripForbiddenNameSentences(clean, roster, allowed)).toBe(clean);
+  });
+
+  it("is a no-op without an allow-list (back-compat)", () => {
+    const draft = "The case against Ada is strong. Vote her out today.";
+    expect(stripForbiddenNameSentences(draft, roster, [])).toBe(draft);
+  });
+
+  it("does not salvage a single dead-seat sentence (leaves it for the guard to reject)", () => {
+    const one = "The strongest case today is clearly against Ada.";
+    expect(stripForbiddenNameSentences(one, roster, allowed)).toBe(one);
+  });
+
+  it("keeps the original when salvage would leave too little to be a real contribution", () => {
+    const draft = "Right. Ada is the one we should be voting out today, no question about it.";
+    expect(stripForbiddenNameSentences(draft, roster, allowed)).toBe(draft); // only "Right." remains
   });
 });
 

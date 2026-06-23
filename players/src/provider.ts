@@ -21,13 +21,26 @@ function mockRespond(prompt: string): string {
     return encodeDecision(skeleton);
   }
 
-  const legalMatch = prompt.match(/Legal target seats?: ([\d, ]+)/);
-  if (legalMatch) {
-    // Reason prompt → pick a legal target deterministically (hash the prompt) and emit the
-    // `{target, reason}` object `parseReason` expects.
-    const legal = legalMatch[1]!.split(",").map((s) => Number(s.trim())).filter(Number.isInteger);
+  // All target-bearing prompts carry a "Legal target(s)…" line; pull every legal seat from it
+  // (handles both the bare "Legal target seats: 0, 1" form and the roster "Name (seat 0), …" form).
+  const legalLine = prompt.split("\n").find((l) => /Legal target/i.test(l));
+  const legal = legalLine ? (legalLine.match(/\d+/g) ?? []).map(Number) : [];
+  const pick = (): number => {
     const h = createHash("sha256").update(prompt).digest();
-    const target = legal[h.readUInt32BE(0) % legal.length]!;
+    return legal.length ? legal[h.readUInt32BE(0) % legal.length]! : 0;
+  };
+
+  if (prompt.includes("TARGET: <the seat NUMBER")) {
+    // Merged day-vote prompt → emit the two labelled lines `parseVoteSpeech` expects: a legal target
+    // and a clean in-character case (free text, so it can never be mistaken for a decision).
+    const target = pick();
+    return `TARGET: ${target}\nCASE: Seat ${target} keeps dodging the real questions, so they get my vote today.`;
+  }
+
+  if (legalLine && legal.length > 0) {
+    // Reason prompt (night) → pick a legal target deterministically and emit the `{target, reason}`
+    // object `parseReason` expects.
+    const target = pick();
     return JSON.stringify({ target, reason: `seat ${target} is the likeliest threat by my read` });
   }
 

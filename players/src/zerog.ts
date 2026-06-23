@@ -127,6 +127,13 @@ export class ZeroGDirectProvider implements InferenceProvider {
    */
   meta?: ProviderMeta;
 
+  /** Running tallies so the server can report what fraction of inference calls had to be retried
+   *  (almost always a rate-limit 429) and how much wall-clock the backoffs cost. Diagnostics only. */
+  private callsTotal = 0;
+  private callsRetried = 0;
+  private rateLimitedCalls = 0;
+  private backoffMsTotal = 0;
+
   async complete(
     prompt: string,
     opts?: import("./types.js").SamplingOptions,
@@ -135,13 +142,34 @@ export class ZeroGDirectProvider implements InferenceProvider {
     // retries also respect the rate limit. A 429 backs off for the provider's full requested wait
     // (rateLimitBackoffMs), so we give it more attempts than the default to outlast a token window.
     // Reverts / 4xx (e.g. bad seed) are NOT retried.
-    return withRetry(() => this.completeOnce(prompt, opts), {
-      retries: 6,
-      isRetryable: isTransientError,
-      delayForError: rateLimitBackoffMs,
-      onRetry: (e, attempt, d) =>
-        console.warn(`[0g] transient inference failure (retry ${attempt} in ${d}ms): ${(e as Error).message ?? e}`),
-    });
+    this.callsTotal++;
+    let retried = false;
+    let rateLimited = false;
+    try {
+      return await withRetry(() => this.completeOnce(prompt, opts), {
+        retries: 6,
+        isRetryable: isTransientError,
+        delayForError: rateLimitBackoffMs,
+        onRetry: (e, attempt, d) => {
+          retried = true;
+          if (rateLimitBackoffMs(e) !== undefined) rateLimited = true;
+          this.backoffMsTotal += d;
+          console.warn(`[0g] transient inference failure (retry ${attempt} in ${d}ms): ${(e as Error).message ?? e}`);
+        },
+      });
+    } finally {
+      if (retried) this.callsRetried++;
+      if (rateLimited) this.rateLimitedCalls++;
+      // Periodic summary so the retry rate is visible without per-call noise math.
+      if (this.callsTotal % 5 === 0) {
+        const pct = (n: number) => Math.round((100 * n) / this.callsTotal);
+        console.log(
+          `[0g] retry stats: ${this.callsRetried}/${this.callsTotal} calls retried (${pct(this.callsRetried)}%), ` +
+            `${this.rateLimitedCalls} rate-limited (${pct(this.rateLimitedCalls)}%), ` +
+            `~${Math.round(this.backoffMsTotal / 1000)}s total backoff`,
+        );
+      }
+    }
   }
 
   private async completeOnce(

@@ -97,14 +97,14 @@ describe("Player.takeTurn", () => {
     expect(verifyAttestation(turn.attestation)).toBe(true);
   });
 
-  it("makes the structured decision target the seat chosen during reasoning (speech ⇆ action)", async () => {
-    // respond: decision prompt → echo the pinned skeleton; reason prompt → choose seat 1; else prose.
+  it("makes the structured decision target the seat chosen during the merged vote (speech ⇆ action)", async () => {
+    // respond: decision prompt → echo the pinned skeleton; merged day-vote prompt → pick seat 1 + case.
     const respond = (prompt: string): string => {
       if (prompt.startsWith("Transcription task")) {
         return prompt.split("\n").find((l) => l.trimStart().startsWith('{"nonce"'))!.trim();
       }
       if (prompt.includes("Legal target seats")) {
-        return '{"target":1,"reason":"seat 1 has dodged every direct question"}';
+        return "TARGET: 1\nCASE: Seat 1 keeps deflecting — I am going after them.";
       }
       return "Seat 1 keeps deflecting — I am going after them.";
     };
@@ -113,6 +113,23 @@ describe("Player.takeTurn", () => {
     expect(turn.structuredDecision.target).toBe(1);
     expect(turn.speech).toContain("Seat 1");
     expect(verifyAttestation(turn.attestation)).toBe(true);
+  });
+
+  it("falls back to a dedicated speech call when the merged vote gives a target but no case", async () => {
+    const seen: string[] = [];
+    const respond = (prompt: string): string => {
+      seen.push(prompt);
+      if (prompt.startsWith("Transcription task")) {
+        return prompt.split("\n").find((l) => l.trimStart().startsWith('{"nonce"'))!.trim();
+      }
+      if (prompt.includes("TARGET: <the seat NUMBER")) return "TARGET: 1"; // legal target, but no CASE
+      return "Seat 1 has been dodging every question — they get my vote today."; // the speech fallback
+    };
+    const turn = await new Player(new MockLocalProvider(FIXED_KEY, respond)).takeTurn(ctx);
+    expect(turn.structuredDecision.target).toBe(1);
+    expect(turn.speech).toContain("Seat 1"); // the dedicated speech call supplied the case
+    expect(seen.filter((p) => p.includes("TARGET: <the seat NUMBER")).length).toBe(1);
+    expect(seen.filter((p) => p.includes("You have privately decided to")).length).toBe(1); // fallback fired
   });
 
   it("falls back to a legal target when the reasoning inference never names one", async () => {
@@ -182,13 +199,12 @@ describe("Player inference diversity", () => {
   it("passes temperature+seed to non-signed calls but none to the signed decision call", async () => {
     const { provider, calls } = capturing();
     await new Player(provider).takeTurn(voteCtx(0));
-    // 3 calls: reason, speech, decision (day vote).
-    expect(calls.length).toBe(3);
-    expect(calls[0]!.opts?.temperature).toBeGreaterThan(0); // reason
-    expect(calls[0]!.opts?.seed).toBeTypeOf("number"); // reason seed present
-    expect(calls[1]!.opts?.temperature).toBeGreaterThan(0); // speech
-    expect(calls[1]!.opts?.seed).toBeTypeOf("number");
-    expect(calls[2]!.opts).toBeUndefined();                  // signed decision: unchanged request
+    // 2 calls now: the merged vote+speech (sampled), then the signed decision (unsampled). The old
+    // separate reason call folded into the merged one.
+    expect(calls.length).toBe(2);
+    expect(calls[0]!.opts?.temperature).toBeGreaterThan(0); // merged vote+speech
+    expect(calls[0]!.opts?.seed).toBeTypeOf("number");      // merged seed present
+    expect(calls[1]!.opts).toBeUndefined();                 // signed decision: unchanged request
   });
 
   it("derives a different seed per seat for the same turn", async () => {
@@ -196,7 +212,7 @@ describe("Player inference diversity", () => {
     const b = capturing();
     await new Player(a.provider).takeTurn(voteCtx(0));
     await new Player(b.provider).takeTurn(voteCtx(1));
-    expect(a.calls[1]!.opts?.seed).not.toBe(b.calls[1]!.opts?.seed);
+    expect(a.calls[0]!.opts?.seed).not.toBe(b.calls[0]!.opts?.seed); // merged call carries the per-seat seed
   });
 });
 

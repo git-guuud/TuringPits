@@ -217,12 +217,14 @@ describe("playMatch (Day 2 exit criteria)", () => {
         return prompt.split("\n").find((l) => l.trimStart().startsWith('{"nonce"'))!.trim();
       }
       if (prompt.includes("You have privately decided to")) return `PUBLICSPEECH_${n++}_`;
-      // The reason prompt is the only remaining one carrying a "Legal target(s)…" line; anything
-      // else here is a free-form discussion prompt (matched as the default, so it stays robust to
-      // task rewording). The legal line names seats as "Ada (seat 0)" or bare "0, 1, 3, 4".
+      // The reason (night) and merged-vote (day) prompts both carry a "Legal target(s)…" line;
+      // anything else is a free-form discussion prompt (the default). The legal line names seats as
+      // "Ada (seat 0)" or bare "0, 1, 3, 4".
       const legalLine = prompt.match(/Legal target[^:]*:\s*([^\n]+)/);
-      if (!legalLine) return `DISCUSSION_${n++}_`;
-      const legal = (legalLine[1]!.match(/\d+/g) ?? []).map(Number);
+      const legal = legalLine ? (legalLine[1]!.match(/\d+/g) ?? []).map(Number) : [];
+      // Merged day-vote prompt → labelled target + a PUBLIC case (distinct token so a leak shows up).
+      if (prompt.includes("TARGET: <the seat NUMBER")) return `TARGET: ${legal[0]}\nCASE: PUBLICSPEECH_${n++}_`;
+      if (legal.length === 0) return `DISCUSSION_${n++}_`;
       return `{"target":${legal[0]},"reason":"PRIVATEREASON_${n++}_"}`;
     };
     const prompts: string[] = [];
