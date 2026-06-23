@@ -11,8 +11,7 @@ makes settlement revert. No payout on a rigged game.
 It feels like a Web2 live stream; it settles like a trustless contract.
 
 > Built for the 0G "Zero Cup." See [`IDEA.md`](./IDEA.md) for the full design, [`STATUS.md`](./STATUS.md)
-> for current state, [`DEPLOYMENT.md`](./DEPLOYMENT.md) for on-chain addresses, and
-> [`myTasks.md`](./myTasks.md) for human-only setup (keys, faucets).
+> for current state.
 
 ---
 
@@ -20,21 +19,21 @@ It feels like a Web2 live stream; it settles like a trustless contract.
 
 ```
                               ┌──────────────────────────────────────────┐
-                              │  server (Sequencer)                       │
-   bettors ──CHIP wager──►    │  • drives the deterministic moderator     │
-        │                     │  • per turn → 0G Compute (TEE inference)  │
-        │                     │  • streams turns to the UI (WebSocket)    │
+                              │  server (Sequencer)                      │
+   bettors ──CHIP wager──►    │  • drives the deterministic moderator    │
+        │                     │  • per turn → 0G Compute (TEE inference) │
+        │                     │  • streams turns to the UI (WebSocket)   │
         ▼                     └───────────────┬──────────────────────────┘
   ┌─────────────────────┐      per-turn       │   settle(moves, sigs, role-reveal)
-  │  MafiaMarket         │◄── TEE-attested ────┤
-  │  (0G Chain)          │     decision        ▼
-  │  • parimutuel YES/NO │            ┌───────────────────┐    pre: personas
-  │  • CHIP escrow       │            │   0G Compute TEE   │    post: transcript
-  │  • on-chain verify:  │            │  qwen2.5-omni      │         │
-  │    TEE sig + rules + │            │  temp=0, signed    │         ▼
-  │    commit-reveal     │            └───────────────────┘   ┌─────────────┐
-  └─────────────────────┘                                     │ 0G Storage  │
-                                                              └─────────────┘
+  │  MafiaMarket        │◄─── TEE-attested ───┤
+  │  (0G Chain)         │      decision       ▼
+  │  • parimutuel YES/NO│            ┌───────────────────┐    pre: personas
+  │  • CHIP escrow      │            │   0G Compute TEE  │    post: transcript
+  │  • on-chain verify: │            │  qwen2.5-omni     │         │
+  │    TEE sig + rules +│            │  temp=0, signed   │         ▼
+  │    commit-reveal    │            └───────────────────┘   ┌─────────────┐
+  └─────────────────────┘                                    │ 0G Storage  │
+                                                             └─────────────┘
 ```
 
 - **0G Compute** runs the AI players under TEE attestation — the inference *is* the game, and the
@@ -50,9 +49,12 @@ check runs on-chain; any failure reverts.
 
 ---
 
-## The market
+## The markets
 
-- **MVP market:** a binary YES/NO on **"does Mafia win?"** (`YES` = Mafia prevails).
+- **Faction-win market:** a binary YES/NO on **"does Mafia win?"** (`YES` = Mafia prevails).
+- **Per-seat Survival side markets:** one auto-created YES/NO market per seat — `YES` = "this seat is
+  still alive when the transcript ends." Each resolves from the same on-chain-verified final game
+  state. A seat's market closes the moment that seat falls.
 - **Mechanism:** parimutuel pools — all YES stakes form one pool, all NO stakes another; winners
   split the pot pro-rata, minus a small protocol fee. Always solvent regardless of bet skew.
 - **Currency:** wagers are placed in **CHIP**, a faucet-mintable mock ERC20 (`MockBetToken`) — test
@@ -83,8 +85,8 @@ check runs on-chain; any failure reverts.
 | `MockBetToken` (CHIP)   | `0xC983771bee3Acea4AB72045F6E6D0D22b6E1b1a6` |
 
 RPC `https://evmrpc-testnet.0g.ai` · Explorer https://chainscan-galileo.0g.ai · Faucet
-https://faucet.0g.ai (native 0G for gas; CHIP comes from the in-app faucet). See
-[`DEPLOYMENT.md`](./DEPLOYMENT.md).
+https://faucet.0g.ai (native 0G for gas; CHIP comes from the in-app faucet). `MafiaMarket` is a
+multi-match factory and also hosts the per-seat Survival side markets.
 
 ---
 
@@ -99,13 +101,13 @@ npm test             # run all workspace tests
 Run the demo locally:
 
 ```bash
-npm run dev -w @turingpits/server      # Sequencer + WebSocket stream (needs .env — see myTasks.md)
+npm run dev -w @turingpits/server      # Sequencer + WebSocket stream (needs .env)
 npm run dev -w @turingpits/frontend    # Live arena UI (Vite)
 ```
 
 Then open the UI, connect a wallet on 0G Galileo, tap **Get test tokens**, and wager on a live match.
 
-> Most 0G-touching packages need testnet credentials/funds first — see [`myTasks.md`](./myTasks.md).
+> Most 0G-touching packages need testnet credentials/funds first.
 > Contract tests run under Hardhat in `contracts/`.
 
 ---
