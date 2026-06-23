@@ -52,6 +52,24 @@ export interface MarketSnapshot {
   winningSide?: Side;
   /** Set when SETTLED — the full resolution (incl. DRAW/VOID refund outcomes). */
   outcome?: Outcome;
+  /** Per-seat survival side markets (one per seat). Absent until the server has read them. */
+  props?: PropSnapshot[];
+}
+
+/**
+ * A per-seat survival side market, projected from the contract for the UI. YES = "this seat
+ * survives to the end". Pools are CHIP decimal strings; `outcome` is set once the match settles
+ * (YES = survived, NO = fell, VOID = nobody backed the winning side → refund).
+ */
+export interface PropSnapshot {
+  index: number;
+  kind: "SURVIVAL";
+  seat: number;
+  yesPool: string;
+  noPool: string;
+  /** True once the host froze this seat's market on-chain (the seat fell) — no more bets accepted. */
+  closed: boolean;
+  outcome?: Outcome;
 }
 
 export type WsMessage =

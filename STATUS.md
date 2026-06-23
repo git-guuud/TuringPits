@@ -6,7 +6,8 @@ _Updated: 2026-06-22_
 > 0G — `betYes/betNo(matchId, amount)` pull via approve+transferFrom; payouts/refunds/fees pay CHIP.
 > The menu shows the CHIP balance + a "Get test tokens" faucet button. **Betting also stays open
 > until settle()** (no block-based close/lock). Redeployed to Galileo: market
-> `0xe371b4592a74a1Fda217956E52e07C5E821DA44F`, token `0xC983771bee3Acea4AB72045F6E6D0D22b6E1b1a6`
+> `0xb5bb5394270E0770F62d284eE0bf3802fAD06b41` (now also hosts per-seat **survival side markets** —
+> see DEPLOYMENT.md / TODO.md Post-MVP #1), token `0xC983771bee3Acea4AB72045F6E6D0D22b6E1b1a6`
 > (see DEPLOYMENT.md). Contract suite 49 green; frontend + server type-check clean.
 
 ## Current task

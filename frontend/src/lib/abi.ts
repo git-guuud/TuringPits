@@ -28,6 +28,17 @@ export const MAFIA_MARKET_ABI = [
   "function stakeYes(uint256 matchId, address user) view returns (uint128)",
   "function stakeNo(uint256 matchId, address user) view returns (uint128)",
   "function claimed(uint256 matchId, address user) view returns (bool)",
+  // survival side markets ("props"): one Survival market per seat (propIdx == seat), auto-created
+  // with the match and resolved from the same verified run at settle(). YES = "seat survives".
+  "function betPropYes(uint256 matchId, uint256 propIdx, uint128 amount)",
+  "function betPropNo(uint256 matchId, uint256 propIdx, uint128 amount)",
+  "function claimProp(uint256 matchId, uint256 propIdx)",
+  "function refundProp(uint256 matchId, uint256 propIdx)",
+  "function propCount(uint256 matchId) view returns (uint256)",
+  "function getProp(uint256 matchId, uint256 propIdx) view returns (tuple(uint8 kind, uint8 param, bool closed, uint128 poolYes, uint128 poolNo, uint8 outcome, uint128 netPot, uint128 winningPool))",
+  "function propStakeYes(uint256 matchId, uint256 propIdx, address user) view returns (uint128)",
+  "function propStakeNo(uint256 matchId, uint256 propIdx, address user) view returns (uint128)",
+  "function propClaimed(uint256 matchId, uint256 propIdx, address user) view returns (bool)",
   "function MIN_BET() view returns (uint256)",
   // total matches ever created — the History screen walks [0, nextMatchId) to list past battles.
   "function nextMatchId() view returns (uint256)",

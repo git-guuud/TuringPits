@@ -196,7 +196,13 @@ spectacle richer and the market deeper. Roughly ordered by impact; still one bou
 ### 1. New market types
 Today there is one market per match: binary **"does Mafia win?"** (YES/NO parimutuel). Add more
 markets keyed to the same `matchId`, settled from the same verified transcript:
-- [ ] **Per-agent survival** — "does seat N survive to the end?" (one market per seat, or a pick).
+- [x] **Per-agent survival** — "does seat N survive to the end?" (one market per seat). Shipped:
+      `MafiaMarket` auto-creates one `Survival` prop per seat (`PropKind` enum + `param`, extensible),
+      `betPropYes/No` / `claimProp` / `refundProp` mirror the main market, and `_settleProps` resolves
+      every prop from the SAME verified run (`g.alive[seat]`) inside the existing `settle()` — no new
+      trust, no extra tx. 10 Hardhat tests (survival outcomes cross-checked vs the engine's `alive`
+      set; Yes/No/Void/claim/refund). Server reads + pushes prop pools; frontend `SideBets.tsx` lists
+      each seat's market in the Verdict rail. Redeployed to Galileo `0xb5bb5394270E0770F62d284eE0bf3802fAD06b41`.
 - [ ] **Round-of-death** — over/under or bucketed market on which round a given seat is eliminated.
 - [ ] **"Who is voted out next"** — short-horizon market that opens/closes around each day vote.
 - Each needs: a market-type tag in `MafiaMarket`, a settle path that derives the outcome from the

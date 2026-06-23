@@ -79,7 +79,7 @@ check runs on-chain; any failure reverts.
 
 | Contract                | Address                                      |
 | ----------------------- | -------------------------------------------- |
-| `MafiaMarket`           | `0xe371b4592a74a1Fda217956E52e07C5E821DA44F` |
+| `MafiaMarket`           | `0xb5bb5394270E0770F62d284eE0bf3802fAD06b41` |
 | `MockBetToken` (CHIP)   | `0xC983771bee3Acea4AB72045F6E6D0D22b6E1b1a6` |
 
 RPC `https://evmrpc-testnet.0g.ai` · Explorer https://chainscan-galileo.0g.ai · Faucet

@@ -13,9 +13,16 @@ export const MAFIA_MARKET_ABI = [
   "function nextMatchId() view returns (uint256)",
   "function createMatch((bytes32 roleCommit, bytes32 personaPoolRoot, address teeSigner, string providerType, string providerIdentity, string tlsFingerprint, string nonce, uint8 playerCount, uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock, uint16 feeBps, uint16 feeBpsDraw) p) returns (uint256)",
   "function lockBetting(uint256 matchId)",
+  // host-only: freeze one survival market mid-match once its seat falls (payout-neutral; stops new bets on a decided seat)
+  "function closeProp(uint256 matchId, uint256 propIdx)",
   "function settle(uint256 matchId, ((uint8 phase, uint32 round, uint8 player, uint8 action, uint8 target) decision, bytes rawResponseBody, uint256 contentOffset, uint256 contentLen, string reqHashHex, bytes signature)[] moves, uint8[] revealedRoles, bytes32 salt, bytes32 transcriptCID)",
   // reads (pools / state / outcome live in the Match struct)
   "function matches(uint256) view returns (uint8 state, uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot, address teeSigner, string providerType, string providerIdentity, string tlsFingerprint, string nonce, uint8 playerCount, uint128 poolYes, uint128 poolNo, uint8 outcome, uint128 netPot, uint128 winningPool, bytes32 transcriptCID, uint16 feeBps, uint16 feeBpsDraw)",
+  // survival side markets ("props"): one Survival market per seat, auto-created with the match and
+  // resolved from the same verified run at settle(). The server only READS these and pushes the
+  // pools/outcome to clients; the prop bets/claims are sent from the spectator wallet (frontend).
+  "function propCount(uint256 matchId) view returns (uint256)",
+  "function getProp(uint256 matchId, uint256 propIdx) view returns (tuple(uint8 kind, uint8 param, bool closed, uint128 poolYes, uint128 poolNo, uint8 outcome, uint128 netPot, uint128 winningPool))",
   // events
   "event MatchCreated(uint256 indexed matchId, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot, address teeSigner, uint8 playerCount, uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock)",
   "event BettingLocked(uint256 indexed matchId, uint128 finalPoolYes, uint128 finalPoolNo)",

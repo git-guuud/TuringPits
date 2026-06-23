@@ -11,6 +11,8 @@ export interface SettlementFixture {
   nonce: string;
   playerCount: number;
   mafiaWins: boolean;
+  /** Final survival truth in seat order (== g.alive on-chain after settle). */
+  alive: boolean[];
   teeSigner: Wallet;
 }
 
@@ -46,7 +48,7 @@ export async function buildSettlement(
   seed: string, n: number, nonce: string, signer: Wallet,
 ): Promise<SettlementFixture> {
   const engine = await import("@turingpits/engine");
-  const { decisions, mafiaWins } = await scriptedMatch(seed, n, nonce);
+  const { decisions, mafiaWins, alive } = await scriptedMatch(seed, n, nonce);
   const roleNames = engine.assignRoles(seed, n) as string[];
   const roles = roleNames.map((r) => ROLE_ENUM[r]);
   const salt = engine.generateSalt();
@@ -58,7 +60,7 @@ export async function buildSettlement(
     const env = await buildEnvelope(signer, decisionStr);
     moves.push({ decision: toSol(d), ...env });
   }
-  return { moves, roles, salt, commit, nonce, playerCount: n, mafiaWins, teeSigner: signer };
+  return { moves, roles, salt, commit, nonce, playerCount: n, mafiaWins, alive, teeSigner: signer };
 }
 
 /** Valid block schedule relative to the current chain head. */

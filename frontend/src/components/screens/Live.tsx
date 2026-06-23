@@ -51,7 +51,7 @@ export function Live({ api }: { api: MatchApi }) {
       <Masthead s={s} onOpenRecord={() => setRecordOpen(true)} />
 
       {/* THE BENCH · THE COURT · THE VERDICT — THE RECORD lives in a popup off the masthead */}
-      <div className="mt-4 grid min-h-0 flex-1 grid-cols-1 gap-px bg-line lg:grid-cols-[248px_1fr_384px]">
+      <div className="mt-4 grid min-h-0 flex-1 grid-cols-1 gap-px bg-line lg:grid-cols-[248px_1fr_420px]">
         <Bench s={s} />
         <Court s={s} advance={api.advance} skipToPresent={api.skipToPresent} />
         <Verdict api={api} />

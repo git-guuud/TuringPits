@@ -7,7 +7,7 @@
  */
 import { BrowserProvider, Contract, JsonRpcProvider, MaxUint256, formatEther, parseEther } from "ethers";
 import { MAFIA_MARKET_ABI, MOCK_BET_TOKEN_ABI } from "./abi.js";
-import type { MarketState, Outcome, Side } from "./types.js";
+import type { MarketState, Outcome, PropSnapshot, Side } from "./types.js";
 
 /**
  * Display symbol for the betting currency. Wagers are denominated in CHIP (MockBetToken), a
@@ -60,7 +60,7 @@ export function storageScanFile(cid: string): string {
  * needs the address up front. Override per-env with VITE_MARKET_ADDRESS.
  */
 export const MARKET_ADDRESS =
-  (import.meta.env.VITE_MARKET_ADDRESS as string | undefined) || "0xe371b4592a74a1Fda217956E52e07C5E821DA44F";
+  (import.meta.env.VITE_MARKET_ADDRESS as string | undefined) || "0xb5bb5394270E0770F62d284eE0bf3802fAD06b41";
 
 /**
  * Turn a raw wallet/ethers error into a single plain-language line for the bettor. Wallet errors
@@ -237,6 +237,140 @@ export async function placeBet(address: string, matchId: number, wallet: Wallet,
   const tx = side === "YES" ? await c.getFunction("betYes")(matchId, value) : await c.getFunction("betNo")(matchId, value);
   const receipt = await tx.wait();
   return receipt?.hash ?? tx.hash;
+}
+
+/**
+ * Place a wager on a per-seat survival side market (propIdx == seat). Mirrors placeBet: ensures the
+ * market is approved to spend CHIP, then stakes on the YES ("survives") or NO ("falls") side via
+ * betPropYes/betPropNo. Returns the bet tx hash.
+ */
+export async function placePropBet(
+  address: string,
+  matchId: number,
+  propIdx: number,
+  wallet: Wallet,
+  side: Side,
+  amount: string,
+): Promise<string> {
+  const value = parseEther(amount);
+  const signer = await wallet.provider.getSigner();
+  const token = new Contract(await betTokenAddress(address), MOCK_BET_TOKEN_ABI, signer);
+  const allowance = (await token.getFunction("allowance")(wallet.account, address)) as bigint;
+  if (allowance < value) {
+    const approveTx = await token.getFunction("approve")(address, MaxUint256);
+    await approveTx.wait();
+  }
+  const c = await writeContract(address, wallet);
+  const tx =
+    side === "YES"
+      ? await c.getFunction("betPropYes")(matchId, propIdx, value)
+      : await c.getFunction("betPropNo")(matchId, propIdx, value);
+  const receipt = await tx.wait();
+  return receipt?.hash ?? tx.hash;
+}
+
+/** Claim a survival side-market payout/returned stake from a SETTLED match (Yes/No pay, Void refunds). */
+export async function claimPropPayout(address: string, matchId: number, propIdx: number, wallet: Wallet): Promise<string> {
+  const c = await writeContract(address, wallet);
+  const tx = await c.getFunction("claimProp")(matchId, propIdx);
+  const receipt = await tx.wait();
+  return receipt?.hash ?? tx.hash;
+}
+
+/** Reclaim a survival side-market stake from a match in RefundMode (host never settled). */
+export async function refundPropStake(address: string, matchId: number, propIdx: number, wallet: Wallet): Promise<string> {
+  const c = await writeContract(address, wallet);
+  const tx = await c.getFunction("refundProp")(matchId, propIdx);
+  const receipt = await tx.wait();
+  return receipt?.hash ?? tx.hash;
+}
+
+export interface MyPropStake {
+  index: number;
+  yes: string; // CHIP decimal string
+  no: string;
+  claimed: boolean;
+}
+
+/** Read the connected wallet's own stake + claimed flag on each survival prop of a match. */
+export async function readMyPropStakes(address: string, matchId: number, propCount: number, wallet: Wallet): Promise<MyPropStake[]> {
+  const c = readContract(address, wallet);
+  return Promise.all(
+    Array.from({ length: propCount }, async (_, i) => {
+      const [yes, no, claimed] = await Promise.all([
+        c.getFunction("propStakeYes")(matchId, i, wallet.account) as Promise<bigint>,
+        c.getFunction("propStakeNo")(matchId, i, wallet.account) as Promise<bigint>,
+        c.getFunction("propClaimed")(matchId, i, wallet.account) as Promise<boolean>,
+      ]);
+      return { index: i, yes: formatEther(yes), no: formatEther(no), claimed };
+    }),
+  );
+}
+
+/** A wallet's position on one survival side market of a past match, with the figures to size a claim. */
+export interface PropPosition {
+  index: number;
+  seat: number;
+  /** Settled outcome (YES survived / NO fell / VOID refunded), or undefined while unresolved. */
+  outcome?: Outcome;
+  netPot: string;
+  winningPool: string;
+  stakeYes: string;
+  stakeNo: string;
+  claimed: boolean;
+}
+
+/**
+ * Read the connected account's positions across every survival side market of a match, via the
+ * public provider (no wallet) — used by the History screen to surface reclaimable survival pots on
+ * past battles. Reads are issued in parallel; only call this for terminal (settled/refund) matches.
+ */
+export async function readPropPositions(address: string, matchId: number, account: string): Promise<PropPosition[]> {
+  const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
+  const count = Number((await c.getFunction("propCount")(matchId)) as bigint);
+  return Promise.all(
+    Array.from({ length: count }, async (_, i) => {
+      const [pr, sy, sn, claimed] = await Promise.all([
+        c.getFunction("getProp")(matchId, i),
+        c.getFunction("propStakeYes")(matchId, i, account) as Promise<bigint>,
+        c.getFunction("propStakeNo")(matchId, i, account) as Promise<bigint>,
+        c.getFunction("propClaimed")(matchId, i, account) as Promise<boolean>,
+      ]);
+      return {
+        index: i,
+        seat: Number(pr.param),
+        outcome: OUTCOME[Number(pr.outcome)],
+        netPot: formatEther(pr.netPot as bigint),
+        winningPool: formatEther(pr.winningPool as bigint),
+        stakeYes: formatEther(sy),
+        stakeNo: formatEther(sn),
+        claimed,
+      };
+    }),
+  );
+}
+
+/**
+ * Read the survival side markets for a match from the contract (no wallet) — a fallback for when the
+ * server isn't pushing `props` over the WebSocket (e.g. the History screen, or a crashed server).
+ */
+export async function readProps(address: string, matchId: number): Promise<PropSnapshot[]> {
+  const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
+  const count = Number((await c.getFunction("propCount")(matchId)) as bigint);
+  return Promise.all(
+    Array.from({ length: count }, async (_, i) => {
+      const pr = await c.getFunction("getProp")(matchId, i);
+      return {
+        index: i,
+        kind: "SURVIVAL" as const,
+        seat: Number(pr.param),
+        yesPool: formatEther(pr.poolYes as bigint),
+        noPool: formatEther(pr.poolNo as bigint),
+        closed: Boolean(pr.closed),
+        outcome: OUTCOME[Number(pr.outcome)],
+      };
+    }),
+  );
 }
 
 /**

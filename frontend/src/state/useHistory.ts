@@ -11,21 +11,34 @@ import {
   MARKET_ADDRESS,
   readMatchSummary,
   readNextMatchId,
+  readPropPositions,
   readStakesPublic,
   type MatchSummary,
+  type PropPosition,
 } from "../lib/contract.js";
 
 export type ReclaimKind = "win" | "return" | "refund" | "enable";
 
+/** A reclaimable survival side pot the viewer holds on a past battle. */
+export interface PropReclaim {
+  index: number;
+  seat: number;
+  /** survival markets never need `enable` — they settle/refund with the parent match. */
+  kind: "win" | "return" | "refund";
+  amount: string;
+}
+
 export interface HistoryRow {
   summary: MatchSummary;
-  /** Present only when the connected wallet actually wagered on this battle. */
+  /** Present when the connected wallet wagered on this battle's faction-win OR any survival market. */
   mine?: {
     stakeYes: number;
     stakeNo: number;
     claimed: boolean;
-    /** Set when there's still something to collect; `enable` means flip to RefundMode first. */
+    /** Set when there's still something to collect on the faction market; `enable` flips to RefundMode first. */
     reclaim?: { kind: ReclaimKind; amount: string };
+    /** Reclaimable survival side pots (per seat). Empty/absent when none are outstanding. */
+    props?: PropReclaim[];
   };
 }
 
@@ -58,8 +71,21 @@ export function useHistory(account: string | null, refreshSignal: unknown): { ro
             const yes = parseFloat(st.yes);
             const no = parseFloat(st.no);
             const stake = yes + no;
-            if (stake > 0) {
-              mine = { stakeYes: yes, stakeNo: no, claimed: st.claimed, reclaim: reclaimOf(summary, yes, no, st.claimed, head) };
+            // Survival side pots only become claimable once the match is terminal; read them only
+            // then to bound the per-row RPC fan-out.
+            const props =
+              summary.state === "SETTLED" || summary.state === "REFUND"
+                ? propReclaimsOf(await readPropPositions(MARKET_ADDRESS, id, account), summary.state)
+                : [];
+            const hasProps = props.length > 0;
+            if (stake > 0 || hasProps) {
+              mine = {
+                stakeYes: yes,
+                stakeNo: no,
+                claimed: st.claimed,
+                reclaim: stake > 0 ? reclaimOf(summary, yes, no, st.claimed, head) : undefined,
+                props: hasProps ? props : undefined,
+              };
             }
           }
           out.push({ summary, mine });
@@ -113,4 +139,36 @@ function reclaimOf(
     return { kind: "enable", amount: stake.toFixed(4) };
   }
   return undefined;
+}
+
+/**
+ * Outstanding survival side pots for the viewer on a terminal match. A SETTLED prop pays the winning
+ * side pro-rata (Yes=survived, No=fell), returns the stake on Void, and a REFUND match returns the
+ * stake in full. Already-claimed or losing positions are omitted.
+ */
+function propReclaimsOf(positions: PropPosition[], state: MatchSummary["state"]): PropReclaim[] {
+  const out: PropReclaim[] = [];
+  for (const p of positions) {
+    if (p.claimed) continue;
+    const yes = parseFloat(p.stakeYes);
+    const no = parseFloat(p.stakeNo);
+    const stake = yes + no;
+    if (stake <= 0) continue;
+
+    if (state === "REFUND") {
+      out.push({ index: p.index, seat: p.seat, kind: "refund", amount: stake.toFixed(4) });
+      continue;
+    }
+    // SETTLED
+    if (p.outcome === "YES" || p.outcome === "NO") {
+      const win = p.outcome === "YES" ? yes : no;
+      if (win <= 0) continue; // backed the wrong side — nothing to collect
+      const wp = parseFloat(p.winningPool);
+      const np = parseFloat(p.netPot);
+      out.push({ index: p.index, seat: p.seat, kind: "win", amount: (wp > 0 ? (np * win) / wp : 0).toFixed(4) });
+    } else if (p.outcome === "VOID") {
+      out.push({ index: p.index, seat: p.seat, kind: "return", amount: stake.toFixed(4) });
+    }
+  }
+  return out;
 }

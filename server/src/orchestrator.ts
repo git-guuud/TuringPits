@@ -18,6 +18,7 @@ import { toPublicState, toPublicTurn } from "./redact.js";
 import { gateTurn, newNightGate } from "./night.js";
 import { buildPersonas, buildProvider, runMatch } from "./match-runner.js";
 import type { Hub } from "./broadcast.js";
+import type { PropSnapshot } from "./wire.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -218,25 +219,46 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
     chainId: cfg.chainId,
   });
 
+  // Read the per-seat survival side markets (one per seat, propIdx == seat) so the UI can show their
+  // live pools + settled outcome alongside the faction-win market. Read in parallel; small N (5–7).
+  const readProps = async (): Promise<PropSnapshot[]> =>
+    Promise.all(
+      Array.from({ length: n }, (_, i) =>
+        rpc(`getProp:${i}`, () => market.getFunction("getProp")(matchId, i)).then((pr) => ({
+          index: i,
+          kind: "SURVIVAL" as const,
+          seat: Number(pr.param),
+          yesPool: formatEther(pr.poolYes as bigint),
+          noPool: formatEther(pr.poolNo as bigint),
+          closed: Boolean(pr.closed),
+          outcome: outcomeOf(Number(pr.outcome)),
+        })),
+      ),
+    );
+
   const readPools = async () => {
-    const m = await rpc("readPools", () => market.getFunction("matches")(matchId));
+    const [m, props] = await Promise.all([
+      rpc("readPools", () => market.getFunction("matches")(matchId)),
+      readProps(),
+    ]);
     return {
       state: marketStateOf(Number(m.state)),
       yesPool: formatEther(m.poolYes as bigint),
       noPool: formatEther(m.poolNo as bigint),
       outcome: Number(m.outcome),
+      props,
     };
   };
 
   const p0 = await readPools();
-  hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: false, yesPool: p0.yesPool, noPool: p0.noPool } });
+  hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: false, yesPool: p0.yesPool, noPool: p0.noPool, props: p0.props } });
 
   // 5a. Pre-open: the chain has NOT yet reached bettingOpenBlock, so bets would revert
   //     "betting not started". Hold the UI in a non-clickable pre-open state until it does.
   console.log(`[orch] sealing — waiting for chain to reach open block ${bettingOpenBlock}`);
   while ((await head()) < bettingOpenBlock) {
     const p = await readPools();
-    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: false, yesPool: p.yesPool, noPool: p.noPool } });
+    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: false, yesPool: p.yesPool, noPool: p.noPool, props: p.props } });
     await sleep(3000);
   }
 
@@ -246,7 +268,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
   console.log(`[orch] betting LIVE — open until settled`);
   {
     const p = await readPools();
-    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, yesPool: p.yesPool, noPool: p.noPool } });
+    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, yesPool: p.yesPool, noPool: p.noPool, props: p.props } });
   }
 
   // Keep pushing live pool sizes (still OPEN) on a background tick while the match plays, so bets
@@ -255,7 +277,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
     void (async () => {
       try {
         const p = await readPools();
-        hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, yesPool: p.yesPool, noPool: p.noPool } });
+        hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, yesPool: p.yesPool, noPool: p.noPool, props: p.props } });
       } catch {
         /* transient RPC read; next tick retries */
       }
@@ -271,6 +293,31 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
   //    public death. Day votes stream normally. Settlement uses result.turns, so this redaction of
   //    the *broadcast* does not affect on-chain verification.
   const gate = newNightGate(personas.map((p) => p.seat));
+
+  // Contract-level "no betting a corpse": the moment a seat's survival is publicly decided (it
+  // fell), freeze its survival market on-chain so nobody can pile onto the already-won NO side for
+  // a riskless profit. closeProp is payout-neutral (settlement still comes from the verified run),
+  // so this only refuses new stakes — it does not touch outcomes. propIdx == seat for Survival.
+  const closedSeats = new Set<number>();
+  const closeFallenProps = async (state: { players: ReadonlyArray<{ id: number; alive: boolean }> }): Promise<void> => {
+    for (const pl of state.players) {
+      if (pl.alive || closedSeats.has(pl.id)) continue;
+      closedSeats.add(pl.id);
+      try {
+        await rpc(`closeProp:${pl.id}`, async () => {
+          const tx = await market.getFunction("closeProp")(matchId, pl.id);
+          return tx.wait();
+        });
+        console.log(`[orch] survival prop seat=${pl.id} closed on-chain (fell) matchId=${matchId}`);
+        // Push refreshed pools so the UI flips this seat to "market closed" from on-chain truth.
+        const p = await readPools();
+        hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, yesPool: p.yesPool, noPool: p.noPool, props: p.props } });
+      } catch (e) {
+        // Non-fatal: the prop still resolves at settle(); a missed close only leaves the frontend gate.
+        console.warn(`[orch] closeProp seat=${pl.id} failed:`, (e as Error).message);
+      }
+    }
+  };
 
   let result;
   try {
@@ -292,6 +339,8 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
           hub.broadcast(m);
           await sleep(cfg.moveIntervalMs);
         }
+        // After the public death beat lands, freeze the fallen seat's survival market on-chain.
+        await closeFallenProps(state);
       },
       // Daytime deliberation streams as-is: it is public day speech (the discussion pass never runs
       // at night), so no role can leak. Paced like a turn so the stage can read it.
@@ -328,7 +377,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
   const pf = await readPools();
   const side = winningSideOf(pf.outcome);
   const outcome = outcomeOf(pf.outcome);
-  hub.broadcast({ type: "market", market: { state: "SETTLED", yesPool: pf.yesPool, noPool: pf.noPool, winningSide: side, outcome } });
+  hub.broadcast({ type: "market", market: { state: "SETTLED", yesPool: pf.yesPool, noPool: pf.noPool, winningSide: side, outcome, props: pf.props } });
   if (outcome) {
     hub.broadcast({
       type: "settled",

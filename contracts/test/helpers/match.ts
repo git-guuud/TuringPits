@@ -16,7 +16,7 @@ const NIGHT_ACTION: Record<string, "kill" | "save" | "investigate" | undefined> 
 
 export async function scriptedMatch(
   seed: string, n: number, nonce: string,
-): Promise<{ decisions: EngineDecision[]; mafiaWins: boolean }> {
+): Promise<{ decisions: EngineDecision[]; mafiaWins: boolean; alive: boolean[] }> {
   const engine = await import("@turingpits/engine");
   let state = engine.initState(seed, n, nonce);
   const decisions: EngineDecision[] = [];
@@ -56,7 +56,13 @@ export async function scriptedMatch(
       if (engine.winner(state) !== null) break;
     }
   }
-  return { decisions, mafiaWins: engine.winner(state) === "MAFIA" };
+  // Final survival truth in seat order — the same thing g.alive holds on-chain after settle().
+  const alive: boolean[] = [];
+  for (let id = 0; id < n; id++) {
+    const p = state.players.find((q: any) => q.id === id);
+    alive.push(!!p?.alive);
+  }
+  return { decisions, mafiaWins: engine.winner(state) === "MAFIA", alive };
 }
 
 // Map an EngineDecision to the Solidity Decision struct tuple.

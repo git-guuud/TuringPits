@@ -104,6 +104,24 @@ export interface MarketSnapshot {
   readonly winningSide?: Side;
   /** Set when SETTLED — the full resolution, incl. DRAW/VOID refund outcomes. */
   readonly outcome?: Outcome;
+  /** Per-seat survival side markets (one per seat). Absent until the server reads them. */
+  readonly props?: readonly PropSnapshot[];
+}
+
+/**
+ * A per-seat survival side market. YES = "this seat survives to the end". Pools are CHIP decimal
+ * strings; `outcome` is set once the match settles (YES = survived, NO = fell, VOID = nobody backed
+ * the winning side → refund). Mirrors MafiaMarket.getProp() / server wire `PropSnapshot`.
+ */
+export interface PropSnapshot {
+  readonly index: number;
+  readonly kind: "SURVIVAL";
+  readonly seat: number;
+  readonly yesPool: string;
+  readonly noPool: string;
+  /** True once the host froze this seat's market on-chain (the seat fell) — no more bets accepted. */
+  readonly closed?: boolean;
+  readonly outcome?: Outcome;
 }
 
 /** The commitment metadata shown in THE RECORD (from openMarket args / getters). */

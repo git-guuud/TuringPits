@@ -52,6 +52,13 @@ export function History({ api }: { api: MatchApi }) {
     else void api.claim(matchId);
   };
 
+  // Survival side pots claim/refund per seat on a past battle.
+  const onReclaimProp = (matchId: number, index: number, kind: "win" | "return" | "refund") => {
+    if (busy) return;
+    if (kind === "refund") void api.refundProp(index, matchId);
+    else void api.claimProp(index, matchId);
+  };
+
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-[920px] flex-col px-6 py-8">
       <div className="flex items-center gap-4">
@@ -115,7 +122,7 @@ export function History({ api }: { api: MatchApi }) {
         ) : (
           <ul className="flex flex-col gap-px bg-line">
             {rows.map((r) => (
-              <Row key={r.summary.matchId} row={r} busy={busy} onReclaim={onReclaim} />
+              <Row key={r.summary.matchId} row={r} busy={busy} onReclaim={onReclaim} onReclaimProp={onReclaimProp} />
             ))}
           </ul>
         )}
@@ -151,49 +158,72 @@ function Row({
   row,
   busy,
   onReclaim,
+  onReclaimProp,
 }: {
   row: HistoryRow;
   busy: boolean;
   onReclaim: (matchId: number, kind: ReclaimKind) => void;
+  onReclaimProp: (matchId: number, index: number, kind: "win" | "return" | "refund") => void;
 }) {
   const { summary: s, mine } = row;
   const v = verdictOf(s);
   const pot = (parseFloat(s.yesPool) + parseFloat(s.noPool)).toFixed(2);
+  const props = mine?.props ?? [];
 
   return (
-    <li className="panel flex items-center gap-4 px-5 py-4">
-      <div className="w-16 flex-none">
-        <div className="font-mono text-[12px] text-cream">#{s.matchId}</div>
-        <div className="font-mono text-[10px] tracking-[0.06em] text-mute">case {s.nonce.slice(-6)}</div>
-      </div>
-
-      <div className="flex-1">
-        <div className={["font-display text-[20px] tracking-[0.08em]", v.cls].join(" ")}>{v.label}</div>
-        <div className="mt-0.5 font-mono text-[11px] tracking-[0.06em] text-mute">
-          {s.playerCount} seats · pot ◈ {pot} ({parseFloat(s.yesPool).toFixed(2)} / {parseFloat(s.noPool).toFixed(2)})
+    <li className="panel flex flex-col gap-3 px-5 py-4">
+      <div className="flex items-center gap-4">
+        <div className="w-16 flex-none">
+          <div className="font-mono text-[12px] text-cream">#{s.matchId}</div>
+          <div className="font-mono text-[10px] tracking-[0.06em] text-mute">case {s.nonce.slice(-6)}</div>
         </div>
+
+        <div className="flex-1">
+          <div className={["font-display text-[20px] tracking-[0.08em]", v.cls].join(" ")}>{v.label}</div>
+          <div className="mt-0.5 font-mono text-[11px] tracking-[0.06em] text-mute">
+            {s.playerCount} seats · pot ◈ {pot} ({parseFloat(s.yesPool).toFixed(2)} / {parseFloat(s.noPool).toFixed(2)})
+          </div>
+        </div>
+
+        {mine && (
+          <div className="flex-none text-right">
+            {mine.reclaim ? (
+              <button
+                type="button"
+                onClick={() => onReclaim(s.matchId, mine.reclaim!.kind)}
+                disabled={busy}
+                className="rounded-sm border border-gilt px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
+              >
+                {busy
+                  ? "…"
+                  : mine.reclaim.kind === "enable"
+                    ? RECLAIM_CTA.enable
+                    : `${RECLAIM_CTA[mine.reclaim.kind]} ◈ ${mine.reclaim.amount}`}
+              </button>
+            ) : (
+              <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">
+                {mine.claimed ? "Collected ✓" : "Wagered"}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
-      {mine && (
-        <div className="flex-none text-right">
-          {mine.reclaim ? (
+      {/* Reclaimable survival side pots on this battle (one per seat the viewer backed correctly). */}
+      {props.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-t hairline pt-3">
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-mute">Survival pots ·</span>
+          {props.map((p) => (
             <button
+              key={p.index}
               type="button"
-              onClick={() => onReclaim(s.matchId, mine.reclaim!.kind)}
+              onClick={() => onReclaimProp(s.matchId, p.index, p.kind)}
               disabled={busy}
-              className="rounded-sm border border-gilt px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
+              className="rounded-sm border border-acquit px-2.5 py-1.5 font-mono text-[10.5px] uppercase tracking-[0.12em] text-acquit transition-colors hover:bg-acquit hover:text-ink disabled:opacity-60"
             >
-              {busy
-                ? "…"
-                : mine.reclaim.kind === "enable"
-                  ? RECLAIM_CTA.enable
-                  : `${RECLAIM_CTA[mine.reclaim.kind]} ◈ ${mine.reclaim.amount}`}
+              {busy ? "…" : `Seat ${p.seat + 1} · ${p.kind === "refund" ? "Refund" : p.kind === "return" ? "Reclaim" : "Claim"} ◈ ${p.amount}`}
             </button>
-          ) : (
-            <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">
-              {mine.claimed ? "Collected ✓" : "Wagered"}
-            </span>
-          )}
+          ))}
         </div>
       )}
     </li>
