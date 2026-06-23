@@ -1,4 +1,13 @@
+import { useEffect, useState } from "react";
 import type { ViewState } from "../../state/matchStore.js";
+import {
+  betTokenAddress,
+  explorerAddress,
+  explorerToken,
+  explorerTx,
+  MARKET_ADDRESS,
+  storageScanFile,
+} from "../../lib/contract.js";
 
 function Line({ done, children }: { done: boolean; children: React.ReactNode }) {
   return (
@@ -8,6 +17,21 @@ function Line({ done, children }: { done: boolean; children: React.ReactNode }) 
       </span>
       <span className="text-cream-dim">{children}</span>
     </div>
+  );
+}
+
+/** A clickable on-chain / 0G-Storage reference, rendered at THE RECORD's mono scale. */
+function Ref({ href, children }: { href: string; children: React.ReactNode }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="font-mono text-gilt-soft underline decoration-dotted decoration-gilt-soft/40 underline-offset-4 transition-colors hover:text-cream hover:decoration-cream/60"
+    >
+      {children}
+      <span aria-hidden className="ml-1">↗</span>
+    </a>
   );
 }
 
@@ -21,6 +45,22 @@ export function Record({ s, onClose }: { s: ViewState; onClose: () => void }) {
   const personaRoot = !isZero(r?.personaPoolRoot) ? r!.personaPoolRoot! : null;
   const transcriptRoot = !isZero(s.transcriptCID ?? undefined) ? s.transcriptCID! : null;
   const hasEvidence = personaRoot || transcriptRoot;
+
+  // The deployed market is known up front (falls back to the canonical address before match_init);
+  // the CHIP token is read from the market on-chain, so resolve it lazily for its explorer link.
+  const marketAddr = s.marketAddress ?? MARKET_ADDRESS;
+  const [tokenAddr, setTokenAddr] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    betTokenAddress(marketAddr)
+      .then((a) => alive && setTokenAddr(a))
+      .catch(() => {
+        /* token link is best-effort; the rest of THE RECORD stands without it */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [marketAddr]);
 
   return (
     <div
@@ -58,23 +98,47 @@ export function Record({ s, onClose }: { s: ViewState; onClose: () => void }) {
       <Line done={!!s.reveal}>
         Roles revealed & verified on-chain{s.reveal ? ` · ${s.reveal.winner} prevails` : ""}
       </Line>
-      <Line done={settled}>Verdict settled on-chain at sentencing</Line>
+      <Line done={settled}>
+        Verdict settled on-chain at sentencing
+        {settled && s.settleTxHash && (
+          <span className="font-mono text-[21px] text-mute"> · <Ref href={explorerTx(s.settleTxHash)}>{short(s.settleTxHash)}</Ref></span>
+        )}
+      </Line>
 
       {hasEvidence && (
         <Line done={!!transcriptRoot}>
           Evidence on 0G Storage
           <span className="font-mono text-[21px] text-mute">
-            {personaRoot ? ` · personas ${short(personaRoot)}` : ""}
-            {transcriptRoot ? ` · transcript ${short(transcriptRoot)}` : ""}
+            {personaRoot && (
+              <>
+                {" "}· personas <Ref href={storageScanFile(personaRoot)}>{short(personaRoot)}</Ref>
+              </>
+            )}
+            {transcriptRoot && (
+              <>
+                {" "}· transcript <Ref href={storageScanFile(transcriptRoot)}>{short(transcriptRoot)}</Ref>
+              </>
+            )}
           </span>
         </Line>
       )}
 
-      {r && (
-        <div className="mt-7 font-mono text-[20px] leading-relaxed text-mute">
-          signer {short(r.teeSigner)} · {r.providerType}/{r.providerIdentity}
-        </div>
-      )}
+      {/* On-chain references: the market everyone bets in, its CHIP token, and the TEE signer. */}
+      <div className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-2.5 border-t hairline pt-6 font-mono text-[19px] text-mute">
+        <span>
+          market <Ref href={explorerAddress(marketAddr)}>{short(marketAddr)}</Ref>
+        </span>
+        {tokenAddr && (
+          <span>
+            CHIP token <Ref href={explorerToken(tokenAddr)}>{short(tokenAddr)}</Ref>
+          </span>
+        )}
+        {r && (
+          <span>
+            signer <Ref href={explorerAddress(r.teeSigner)}>{short(r.teeSigner)}</Ref> · {r.providerType}/{r.providerIdentity}
+          </span>
+        )}
+      </div>
 
       <div className="mt-7 flex gap-3">
         <span className="rounded-sm border border-acquit/40 px-4 py-3 font-mono text-[17px] uppercase tracking-[0.1em] text-acquit">

@@ -354,6 +354,19 @@ export function Verdict({ api }: { api: MatchApi }) {
         </a>
       )}
 
+      {/* The settlement itself — the on-chain tx that verified the transcript and resolved the market. */}
+      {settled && s.settleTxHash && (
+        <a
+          href={explorerTx(s.settleTxHash)}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-2 flex items-center justify-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-mute transition-colors hover:text-cream"
+        >
+          ⚖ Verdict settled on-chain · {s.settleTxHash.slice(0, 6)}…{s.settleTxHash.slice(-4)}
+          <span aria-hidden>↗</span>
+        </a>
+      )}
+
       <div className="mt-2.5 text-center font-mono text-[11px] tracking-[0.06em] text-mute">
         {connected
           ? `${s.wallet.account?.slice(0, 6)}…${s.wallet.account?.slice(-4)}${balance != null ? ` · ${balance.toFixed(3)} 0G` : ""} · 0G Galileo`

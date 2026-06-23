@@ -208,11 +208,21 @@ The persona pool drives the drama. Deeper, more distinct voices = better televis
 - [ ] Keep them Merkle-rooted/committed so persona governance + prompt-injection resistance hold.
 - [ ] Tune prompts per archetype (see [[player-prompt-hallucination-fixes]], [[prompt-probe-fast-loop]]).
 
-### 3. Explorer links in the frontend
+### 3. Explorer links in the frontend ✅
 Make the on-chain reality one click away (`lib/contract.ts` already has `explorerTx`).
-- [ ] Link every bet / claim / settle tx hash to the Galileo explorer.
-- [ ] Link the market + CHIP token addresses, and the settlement tx, from the live + history views.
-- [ ] Surface the 0G Storage transcript CID (and persona pool root) as verifiable evidence links.
+- [x] Link every bet / claim / settle tx hash to the Galileo explorer. (bet/claim via `s.tx.lastHash`
+      pre-existed; settle tx now plumbed `settled.txHash` → `ViewState.settleTxHash` → linked in THE
+      RECORD and the Verdict panel.)
+- [x] Link the market + CHIP token addresses, and the settlement tx, from the live + history views.
+      (`explorerAddress`/`explorerToken` helpers; THE RECORD links market + CHIP + TEE signer; the
+      History footer links the market contract + CHIP token. Per-match settle-tx in History is the
+      one gap — the `matches()` getter doesn't carry it; it lives in the `MatchSettled` event, so a
+      per-row deep link would need event-log queries. Deferred; the market-contract link surfaces all
+      settles meanwhile.)
+- [x] Surface the 0G Storage transcript CID (and persona pool root) as verifiable evidence links.
+      (`storageScanFile(cid)` → `storagescan-galileo.0g.ai/files/info?cid=<root>`, StorageScan's own
+      file-detail route; the committed bytes32 root IS the StorageScan cid. Links render only when the
+      roots are non-zero, i.e. storage is enabled.)
 
 ### 4. SFX / audio
 Lean into the courtroom-drama theme.

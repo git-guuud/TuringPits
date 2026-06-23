@@ -24,12 +24,34 @@ export const GALILEO = {
   name: "0G Galileo Testnet",
   currency: { name: "0G", symbol: "0G", decimals: 18 },
   explorerUrl: "https://chainscan-galileo.0g.ai",
+  // 0G Storage explorer (StorageScan) — file lookup by content root (the bytes32 CID committed
+  // on-chain). Used to surface the transcript / persona-pool evidence as verifiable links.
+  storageScanUrl: "https://storagescan-galileo.0g.ai",
   faucetUrl: "https://faucet.0g.ai",
 };
 
 /** Public block-explorer link for a transaction hash. */
 export function explorerTx(hash: string): string {
   return `${GALILEO.explorerUrl}/tx/${hash}`;
+}
+
+/** Public block-explorer link for a wallet / contract address. */
+export function explorerAddress(address: string): string {
+  return `${GALILEO.explorerUrl}/address/${address}`;
+}
+
+/** Block-explorer token page (holders + transfers) for an ERC20 such as CHIP. */
+export function explorerToken(address: string): string {
+  return `${GALILEO.explorerUrl}/token/${address}`;
+}
+
+/**
+ * 0G Storage (StorageScan) link for a stored file by its content root — the bytes32 `cid` we commit
+ * on-chain for the match transcript and the persona pool. This is the verifiable-evidence deep link
+ * (StorageScan's own file-detail route).
+ */
+export function storageScanFile(cid: string): string {
+  return `${GALILEO.storageScanUrl}/files/info?cid=${cid}`;
 }
 
 /**

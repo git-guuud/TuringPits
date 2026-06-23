@@ -1,7 +1,8 @@
+import { useEffect, useState } from "react";
 import type { MatchApi } from "../../state/matchStore.js";
 import { useHistory, type HistoryRow, type ReclaimKind } from "../../state/useHistory.js";
 import { navigate } from "../../lib/useRoute.js";
-import { explorerTx } from "../../lib/contract.js";
+import { betTokenAddress, explorerAddress, explorerToken, explorerTx, MARKET_ADDRESS } from "../../lib/contract.js";
 import type { MatchSummary } from "../../lib/contract.js";
 
 /** The verdict as the record phrases it (mirrors the Verdict panel's ACQUITTED/CONVICTED framing). */
@@ -29,6 +30,20 @@ export function History({ api }: { api: MatchApi }) {
   const { rows, loading } = useHistory(s.wallet.account, s.tx.lastHash);
   const connected = s.wallet.status === "connected";
   const busy = s.tx.pending;
+
+  // The CHIP token is read from the market on-chain; resolve it for the verifiable-source footer.
+  const [tokenAddr, setTokenAddr] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    betTokenAddress()
+      .then((a) => alive && setTokenAddr(a))
+      .catch(() => {
+        /* token link is best-effort */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const onReclaim = (matchId: number, kind: ReclaimKind) => {
     if (busy) return;
@@ -105,6 +120,29 @@ export function History({ api }: { api: MatchApi }) {
           </ul>
         )}
       </div>
+
+      {/* Verifiable source: the single market every match settles in, and the CHIP stake token. */}
+      <footer className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t hairline pt-4 font-mono text-[11px] tracking-[0.06em] text-mute">
+        <span className="uppercase tracking-[0.12em] text-mute-2">On-chain ·</span>
+        <a
+          href={explorerAddress(MARKET_ADDRESS)}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1 transition-colors hover:text-gilt"
+        >
+          Market contract <span aria-hidden>↗</span>
+        </a>
+        {tokenAddr && (
+          <a
+            href={explorerToken(tokenAddr)}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 transition-colors hover:text-gilt"
+          >
+            CHIP token <span aria-hidden>↗</span>
+          </a>
+        )}
+      </footer>
     </main>
   );
 }
