@@ -25,11 +25,29 @@ const RECLAIM_CTA: Record<ReclaimKind, string> = {
   enable: "Enable refund",
 };
 
+/** A row has money/action outstanding: a faction reclaim and/or any unclaimed side pot. */
+function isClaimable(r: HistoryRow): boolean {
+  return !!r.mine?.reclaim || (r.mine?.props?.length ?? 0) > 0;
+}
+
+/** Total CHIP still reclaimable on a battle (faction reclaim + every outstanding side pot). */
+function reclaimableTotal(r: HistoryRow): number {
+  let a = r.mine?.reclaim ? parseFloat(r.mine.reclaim.amount) : 0;
+  for (const p of r.mine?.props ?? []) a += parseFloat(p.amount);
+  return a;
+}
+
 export function History({ api }: { api: MatchApi }) {
   const s = api.state;
   const { rows, loading } = useHistory(s.wallet.account, s.tx.lastHash);
   const connected = s.wallet.status === "connected";
   const busy = s.tx.pending;
+
+  // Surface money you're owed: never make people scan every row for a reclaim button.
+  const [claimableOnly, setClaimableOnly] = useState(false);
+  const claimableRows = rows.filter(isClaimable);
+  const owed = claimableRows.reduce((acc, r) => acc + reclaimableTotal(r), 0);
+  const visibleRows = claimableOnly ? claimableRows : rows;
 
   // The CHIP token is read from the market on-chain; resolve it for the verifiable-source footer.
   const [tokenAddr, setTokenAddr] = useState<string | null>(null);
@@ -98,6 +116,31 @@ export function History({ api }: { api: MatchApi }) {
         )}
       </header>
 
+      {/* Money you're owed, impossible to miss: total reclaimable across every past battle + a filter. */}
+      {connected && claimableRows.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border border-gilt/40 bg-gilt/[0.05] px-4 py-3">
+          <div>
+            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gilt">You can reclaim</div>
+            <div className="mt-1 font-mono tabular-nums text-cream">
+              <span className="text-[16px]">◈ {owed.toFixed(2)}</span>
+              <span className="ml-2 text-[12px] text-mute">
+                across {claimableRows.length} {claimableRows.length === 1 ? "battle" : "battles"}
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setClaimableOnly((v) => !v)}
+            className={[
+              "rounded-sm border px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] transition-colors",
+              claimableOnly ? "border-gilt bg-gilt text-ink" : "border-gilt text-gilt hover:bg-gilt hover:text-ink",
+            ].join(" ")}
+          >
+            {claimableOnly ? "Show all battles" : "Show claimable only"}
+          </button>
+        </div>
+      )}
+
       {s.tx.error && <div className="mt-3 font-mono text-[11px] text-convict">{s.tx.error}</div>}
       {s.tx.lastHash && !s.tx.pending && (
         <a
@@ -119,10 +162,14 @@ export function History({ api }: { api: MatchApi }) {
           <div className="py-16 text-center font-body text-[16px] italic text-mute">
             No battles on record yet. Be the first to <button type="button" onClick={() => navigate("live")} className="text-gilt underline-offset-2 hover:underline">watch one live</button>.
           </div>
+        ) : visibleRows.length === 0 ? (
+          <div className="py-16 text-center font-body text-[16px] italic text-mute">
+            Nothing left to reclaim. <button type="button" onClick={() => setClaimableOnly(false)} className="text-gilt underline-offset-2 hover:underline">Show all battles</button>.
+          </div>
         ) : (
           <ul className="flex flex-col gap-px bg-line">
-            {rows.map((r) => (
-              <Row key={r.summary.matchId} row={r} busy={busy} onReclaim={onReclaim} onReclaimProp={onReclaimProp} />
+            {visibleRows.map((r) => (
+              <Row key={r.summary.matchId} row={r} busy={busy} claimable={isClaimable(r)} onReclaim={onReclaim} onReclaimProp={onReclaimProp} />
             ))}
           </ul>
         )}
@@ -157,11 +204,13 @@ export function History({ api }: { api: MatchApi }) {
 function Row({
   row,
   busy,
+  claimable,
   onReclaim,
   onReclaimProp,
 }: {
   row: HistoryRow;
   busy: boolean;
+  claimable: boolean;
   onReclaim: (matchId: number, kind: ReclaimKind) => void;
   onReclaimProp: (matchId: number, index: number, kind: "win" | "return" | "refund") => void;
 }) {
@@ -171,7 +220,7 @@ function Row({
   const props = mine?.props ?? [];
 
   return (
-    <li className="panel flex flex-col gap-3 px-5 py-4">
+    <li className={["panel flex flex-col gap-3 px-5 py-4", claimable ? "border-l-2 border-gilt" : ""].join(" ")}>
       <div className="flex items-center gap-4">
         <div className="w-16 flex-none">
           <div className="font-mono text-[12px] text-cream">#{s.matchId}</div>

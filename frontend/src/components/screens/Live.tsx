@@ -64,7 +64,7 @@ export function Live({ api }: { api: MatchApi }) {
           style={{ gridTemplateColumns: PANE_COLUMNS }}
         >
           <Bench s={s} />
-          <Court s={s} advance={api.advance} skipToPresent={api.skipToPresent} />
+          <Court s={s} advance={api.advance} stepBack={api.stepBack} skipToPresent={api.skipToPresent} />
           <Verdict api={api} />
         </div>
 
@@ -87,7 +87,7 @@ export function Live({ api }: { api: MatchApi }) {
       />
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        <Court s={s} advance={api.advance} skipToPresent={api.skipToPresent} />
+        <Court s={s} advance={api.advance} stepBack={api.stepBack} skipToPresent={api.skipToPresent} />
       </div>
 
       <BottomDock s={s} onOpen={() => setWagersOpen(true)} />
@@ -151,6 +151,14 @@ function MobileHeader({
   onOpenRecord: () => void;
 }) {
   const live = liveness(s);
+  // Mid-match the bench is a drawer, so on a phone you can't see who still stands or who holds the
+  // floor without opening it. Surface both in the header: a compact alive count, and the speaker.
+  const aliveCount = s.seats.filter((x) => x.alive).length;
+  const total = s.seats.length;
+  const speaker =
+    s.speakingSeat != null
+      ? s.personas.find((p) => p.seat === s.speakingSeat)?.name ?? `Seat ${s.speakingSeat}`
+      : null;
   return (
     <header className="flex shrink-0 items-center gap-2.5 border-b hairline px-4 py-2.5">
       <button
@@ -172,7 +180,10 @@ function MobileHeader({
             {live.label}
           </span>
         </div>
-        <div className="truncate font-mono text-[10px] uppercase tracking-[0.16em] text-gilt">{phaseTag(s)}</div>
+        <div className="truncate font-mono text-[10px] uppercase tracking-[0.16em] text-gilt">
+          {phaseTag(s)}
+          {speaker && <span className="text-cream"> · {speaker} speaking</span>}
+        </div>
       </button>
 
       <MusicToggle music={music} />
@@ -180,10 +191,18 @@ function MobileHeader({
       <button
         type="button"
         onClick={onOpenBench}
-        aria-label="Open the bench"
+        aria-label={total > 0 ? `Open the bench · ${aliveCount} of ${total} still stand` : "Open the bench"}
+        title={total > 0 ? `${aliveCount} of ${total} still stand` : "Open the bench"}
         className="flex h-9 items-center gap-1.5 rounded-full border border-line-2 px-3 font-mono text-[11px] uppercase tracking-[0.14em] text-mute transition-colors hover:border-gilt hover:text-gilt"
       >
-        <span className="text-[14px] leading-none">☰</span> Bench
+        <span className="text-[14px] leading-none">☰</span>
+        {total > 0 ? (
+          <span className="tabular-nums tracking-normal">
+            <span className="text-cream">{aliveCount}</span>/{total}
+          </span>
+        ) : (
+          "Bench"
+        )}
       </button>
     </header>
   );

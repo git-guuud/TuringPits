@@ -190,6 +190,7 @@ const baseState: ViewState = {
 type Action =
   | { kind: "ws"; msg: WsMessage }
   | { kind: "advance" }
+  | { kind: "stepBack" }
   | { kind: "skip" }
   | { kind: "reset" }
   | { kind: "connection"; status: ConnStatus }
@@ -282,6 +283,15 @@ function reduce(state: ViewState, action: Action): ViewState {
   if (action.kind === "advance") {
     if (state.cursor < state.beats.length - 1) return project({ ...state, cursor: state.cursor + 1 });
     if (!state.playbackComplete && state.rawReveal) return project({ ...state, playbackComplete: true });
+    return state;
+  }
+
+  // Step the cursor BACK one beat so a viewer can re-read a moment they missed. If the post-playback
+  // reveal is showing, the first step drops it (re-showing the final beat) before the cursor retreats.
+  // No-op at the very first beat.
+  if (action.kind === "stepBack") {
+    if (state.playbackComplete) return project({ ...state, playbackComplete: false });
+    if (state.cursor > 0) return project({ ...state, cursor: state.cursor - 1 });
     return state;
   }
 
@@ -385,6 +395,8 @@ export interface MatchApi {
   setGasless: (on: boolean) => void;
   /** Advance the playback cursor to the next beat (called by the Court once a beat finishes). */
   advance: () => void;
+  /** Step the playback cursor back one beat — re-read a moment (pairs with the stage pause control). */
+  stepBack: () => void;
   /** Jump the playback cursor to the newest received beat — skips the replay/catch-up to "now". */
   skipToPresent: () => void;
 }
@@ -673,10 +685,11 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
   }, [refreshStakes, refreshBalance, refreshRelay]);
 
   const advance = useCallback(() => dispatch({ kind: "advance" }), []);
+  const stepBack = useCallback(() => dispatch({ kind: "stepBack" }), []);
   const skipToPresent = useCallback(() => dispatch({ kind: "skip" }), []);
 
   // Let the user opt out of (or back into) the gasless path. "off" forces their own wallet to pay gas.
   const setGasless = useCallback((on: boolean) => dispatch({ kind: "gaslessPref", pref: on ? "auto" : "off" }), []);
 
-  return { state, gasless, connect, placeBet, placePropBet, claimProp, refundProp, getTestTokens, claim, refund, enterRefund, setGasless, advance, skipToPresent };
+  return { state, gasless, connect, placeBet, placePropBet, claimProp, refundProp, getTestTokens, claim, refund, enterRefund, setGasless, advance, stepBack, skipToPresent };
 }

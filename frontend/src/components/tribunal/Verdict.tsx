@@ -25,6 +25,28 @@ function projectWin(a: number, pool: string, total: string): number | null {
   return (a / (p + a)) * (t + a);
 }
 
+/**
+ * Payout on an ALREADY-PLACED stake if its outcome wins: its share of the whole pot. Unlike
+ * `projectWin` (which models a *new* stake added on top), `mine` is already inside `pool`/`total`,
+ * so this must NOT add it again. Used by the per-market / portfolio "to win" figures.
+ */
+function existingWin(mine: number, pool: string, total: string): number {
+  if (!(mine > 0)) return 0;
+  const p = parseFloat(pool);
+  const t = parseFloat(total);
+  return p > 0 ? (t * mine) / p : 0;
+}
+
+// Compact status-pill palettes (text + border), one per market state.
+const PILL = {
+  gilt: "text-gilt border-gilt/40",
+  acquit: "text-acquit border-acquit/50",
+  acquitDim: "text-acquit/70 border-acquit/30",
+  giltDim: "text-gilt/70 border-gilt/30",
+  mute: "text-mute border-line-2",
+  dim: "text-cream-dim border-line-2",
+} as const;
+
 function StateBadge({ s }: { s: ViewState }) {
   const preOpen = s.market.state === "OPEN" && !s.market.bettingLive;
   const settledText =
@@ -144,13 +166,19 @@ interface BetMarket {
   bettable: boolean;
   /** The wallet already holds a stake somewhere in this market. */
   hasWager: boolean;
+  /** Total CHIP the wallet has staked across this market's outcomes. */
+  myStake: number;
+  /** Best-case return if the wallet's backed outcome(s) win, at current pools (the "to win" figure). */
+  myProjWin: number;
+  /** Compact at-a-glance status word for the collapsed row. */
+  pill: { text: string; cls: string };
   /** A claim/refund is available right now. */
   canClaim: boolean;
   claimLabel: string;
   doClaim: () => void;
   /** Place a wager on the chosen outcome (by its Choice.key). */
   place: (key: string) => void;
-  /** Shown in the footer when the market is neither bettable nor claimable. */
+  /** Shown in the expanded body when the market is neither bettable nor claimable. */
   status: string | null;
 }
 
@@ -163,10 +191,271 @@ const FATE_COPY: ReadonlyArray<Pick<Choice, "eyebrow" | "eyebrowClass" | "label"
   { eyebrow: "the long game", eyebrowClass: "text-convict", label: "OUT · R4+", sub: "holds on, then falls late", accent: "text-convict", bar: "bg-convict" },
 ];
 
+// ── a single market in the at-a-glance list: collapsed header + (when open) inline outcomes+action ──
+function MarketRow({
+  m,
+  open,
+  onToggle,
+  picked,
+  setPicked,
+  busy,
+  connected,
+  connecting,
+  connect,
+  amount,
+  setAmount,
+  stepStake,
+  chips,
+  balance,
+  gasless,
+  getTestTokens,
+  minting,
+}: {
+  m: BetMarket;
+  open: boolean;
+  onToggle: () => void;
+  picked: string | null;
+  setPicked: (k: string) => void;
+  busy: boolean;
+  connected: boolean;
+  connecting: boolean;
+  connect: () => void;
+  amount: string;
+  setAmount: (a: string) => void;
+  stepStake: (dir: number) => void;
+  chips: { label: string; value: string }[];
+  balance: number | null;
+  gasless: boolean;
+  getTestTokens: () => void;
+  minting: boolean;
+}) {
+  // Collapsed-row peek: the crowd favorite (largest pool) + pot, or the winning outcome once settled.
+  const fav = m.choices.length ? m.choices.reduce((a, b) => (parseFloat(b.pool) > parseFloat(a.pool) ? b : a)) : null;
+  const winner = m.choices.find((c) => c.winner) ?? null;
+  const potTotal = m.choices.length ? m.choices[0]!.total : "0";
+
+  // Projected payout for the staged pick (a NEW stake) — only meaningful while this row is open.
+  const stakeNum = parseFloat(amount);
+  const pickedChoice = open && picked ? (m.choices.find((c) => c.key === picked) ?? null) : null;
+  const projWin = pickedChoice ? projectWin(stakeNum, pickedChoice.pool, pickedChoice.total) : null;
+  // Guard the wager before it costs a tx: the stepper clamps to balance but the text input doesn't, so
+  // a typed stake can outrun the wallet. Only judge once we actually know the balance (null = unread).
+  const exceedsBalance = connected && balance != null && stakeNum > balance;
+  const canWager = !!picked && !busy && stakeNum > 0 && !exceedsBalance;
+
+  return (
+    <div className={["border transition-colors", open ? "border-line-2 bg-ink-2/40" : "border-line hover:border-line-2"].join(" ")}>
+      {/* ── Collapsed header — title, status, odds peek, your position. Tap to expand. ── */}
+      <button type="button" onClick={onToggle} className="flex w-full items-start justify-between gap-2 px-3.5 py-2.5 text-left">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-cream">
+            <span className="truncate">{m.title}</span>
+            {m.hasWager && <span className="shrink-0 text-gilt" title="You hold a wager here">●</span>}
+          </div>
+          <div className="mt-1 truncate font-mono text-[10.5px] tracking-[0.06em] text-mute">
+            {winner ? (
+              <span className="text-cream-dim">● {winner.label}</span>
+            ) : fav ? (
+              <>
+                pot ◈{parseFloat(potTotal).toFixed(2)} · fav <span className="text-cream-dim">{fav.label}</span> {mult(fav.pool, fav.total)}
+              </>
+            ) : (
+              "—"
+            )}
+            {m.myStake > 0 && <span className="text-gilt"> · ◈{m.myStake.toFixed(2)} in</span>}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2 pt-0.5">
+          <span className={["rounded-sm border px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.12em]", m.pill.cls].join(" ")}>{m.pill.text}</span>
+          <span className="w-3 text-center font-mono text-[12px] leading-none text-mute">{open ? "▾" : "▸"}</span>
+        </div>
+      </button>
+
+      {/* ── Expanded body — the question, its outcomes, and the stake+confirm RIGHT HERE. ── */}
+      {open && (
+        <div className="border-t hairline px-3.5 pb-3.5 pt-3">
+          <div className="mb-3 font-display text-[18px] leading-tight text-cream">{m.question}</div>
+          <div className="flex flex-col gap-2.5">
+            {m.choices.map((c) => (
+              <ChoiceCard
+                key={c.key}
+                c={c}
+                selected={picked === c.key}
+                selectable={m.bettable && !busy}
+                dimmed={!m.bettable && !c.winner}
+                onSelect={() => setPicked(c.key)}
+              />
+            ))}
+          </div>
+
+          {/* Inline action zone — stake + the one wager/claim action, next to the cards. */}
+          <div className="mt-3.5 border-t hairline pt-3.5">
+            {m.bettable ? (
+              <>
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="eyebrow">Stake</span>
+                  <div className="flex items-center gap-2">
+                    {gasless && (
+                      <span className="rounded-sm border border-gilt/50 px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.12em] text-gilt">
+                        ⛽ gasless
+                      </span>
+                    )}
+                    {connected && balance != null && (
+                      <span className="font-mono text-[11px] tracking-[0.06em] text-mute">bal {balance.toFixed(3)} CHIP</span>
+                    )}
+                    {connected && (
+                      <button
+                        type="button"
+                        onClick={getTestTokens}
+                        disabled={busy}
+                        className="rounded-sm border border-line px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.12em] text-mute transition-colors hover:border-gilt hover:text-gilt disabled:opacity-50"
+                      >
+                        {minting ? "minting…" : "+ CHIP"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Stepper: big −/+ tap targets flanking the amount. */}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    aria-label="Decrease stake"
+                    onClick={() => stepStake(-1)}
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border border-line font-mono text-[20px] leading-none text-mute transition-colors hover:border-line-2 hover:text-cream"
+                  >
+                    −
+                  </button>
+                  <div className="flex flex-1 items-center gap-1.5 border border-line bg-ink-2 px-2.5 py-1.5 focus-within:border-gilt">
+                    <span className="font-mono text-[12px] text-mute">◈</span>
+                    <input
+                      inputMode="decimal"
+                      value={amount}
+                      onChange={(e) => setAmount(e.target.value)}
+                      className="w-full bg-transparent font-mono text-[15px] tabular-nums text-cream outline-none"
+                    />
+                    <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-mute">CHIP</span>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="Increase stake"
+                    onClick={() => stepStake(1)}
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border border-line font-mono text-[20px] leading-none text-mute transition-colors hover:border-line-2 hover:text-cream"
+                  >
+                    +
+                  </button>
+                </div>
+
+                {/* Quick chips — full-width tap targets. */}
+                <div className="mt-2 flex gap-1.5">
+                  {chips.map((c) => (
+                    <button
+                      key={c.label}
+                      type="button"
+                      onClick={() => setAmount(c.value)}
+                      className={[
+                        "flex-1 rounded-sm border px-2 py-1.5 font-mono text-[11.5px] tracking-[0.06em] transition-colors",
+                        amount === c.value ? "border-gilt text-gilt" : "border-line text-mute hover:border-line-2 hover:text-cream-dim",
+                      ].join(" ")}
+                    >
+                      {c.label}
+                    </button>
+                  ))}
+                </div>
+
+                {!connected ? (
+                  <button
+                    type="button"
+                    onClick={() => void connect()}
+                    disabled={busy}
+                    className="mt-3 w-full rounded-sm border border-gilt px-3 py-3 font-mono text-[12.5px] uppercase tracking-[0.16em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
+                  >
+                    {connecting ? "Connecting…" : "Connect wallet to wager"}
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      disabled={!canWager}
+                      onClick={() => picked && m.place(picked)}
+                      className={[
+                        "mt-3 w-full rounded-sm border px-3 py-3 font-mono text-[12.5px] uppercase tracking-[0.16em] transition-colors",
+                        canWager
+                          ? "border-gilt text-gilt hover:bg-gilt hover:text-ink"
+                          : "border-line text-mute cursor-default",
+                      ].join(" ")}
+                    >
+                      {busy
+                        ? "Confirming on-chain…"
+                        : !picked
+                          ? "Pick an outcome above to wager"
+                          : !(stakeNum > 0)
+                            ? "Enter a stake amount"
+                            : exceedsBalance
+                              ? "Stake exceeds balance"
+                              : projWin != null
+                                ? `Wager ◈${stakeNum.toFixed(3)} → win ◈${projWin.toFixed(3)}`
+                                : "Enter a stake amount"}
+                    </button>
+                    {/* The faucet lives only on the Menu, but you bet here — so when the stake outruns the
+                        wallet, surface the remedy inline instead of a dead-end "exceeds balance" error. */}
+                    {(exceedsBalance || minting) && (
+                      <button
+                        type="button"
+                        onClick={getTestTokens}
+                        disabled={busy}
+                        className="mt-2 w-full rounded-sm border border-gilt/50 bg-gilt/[0.04] px-3 py-2.5 font-mono text-[11.5px] uppercase tracking-[0.14em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
+                      >
+                        {minting ? "Minting CHIP…" : "Get test CHIP — free mock money"}
+                      </button>
+                    )}
+                  </>
+                )}
+                {picked && !busy && pickedChoice && (
+                  <div className="mt-1.5 text-center font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">
+                    on {pickedChoice.label}
+                    {m.hasWager ? " · adds to your wager" : ""}
+                  </div>
+                )}
+                {connected && gasless && (
+                  <div className="mt-1.5 text-center font-mono text-[10px] tracking-[0.1em] text-gilt/70">
+                    Gas sponsored — just sign, no 0G needed.
+                  </div>
+                )}
+              </>
+            ) : m.canClaim ? (
+              <button
+                type="button"
+                onClick={m.doClaim}
+                disabled={busy}
+                className="w-full rounded-sm border border-acquit px-3 py-3 font-mono text-[12.5px] uppercase tracking-[0.16em] text-acquit transition-colors hover:bg-acquit hover:text-ink disabled:opacity-60"
+              >
+                {busy ? "Confirming on-chain…" : m.claimLabel}
+              </button>
+            ) : (
+              <div className="rounded-sm border border-line px-3 py-3 text-center font-mono text-[12px] uppercase tracking-[0.14em] text-mute">
+                {m.status ?? "—"}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Verdict({ api }: { api: MatchApi }) {
   const { state: s, connect, placeBet, placePropBet, claim, claimProp, refund, refundProp } = api;
   const [amount, setAmount] = useState("0.01");
-  const [index, setIndex] = useState(0);
+  // Faucet mint kicked off from the Wagers panel (the Menu's "Get test CHIP" isn't reachable mid-match).
+  // Local flag only drives the button copy; `api.getTestTokens` owns the actual tx/pending state.
+  const [minting, setMinting] = useState(false);
+  const mint = () => {
+    setMinting(true);
+    void api.getTestTokens().finally(() => setMinting(false));
+  };
+  // Which market is expanded. null = use the sensible default; "__none__" = explicitly all-collapsed.
+  const [openKey, setOpenKey] = useState<string | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
 
   const live = s.market.state === "OPEN" && s.market.bettingLive === true;
@@ -195,6 +484,7 @@ export function Verdict({ api }: { api: MatchApi }) {
     const won = isWin && myWinStake > 0 && !claimed;
     const canClaimRefund = isRefundOutcome && myStake > 0 && !claimed;
     const canRefundLiveness = refundMode && myStake > 0 && !claimed;
+    const canClaim = won || canClaimRefund || canRefundLiveness;
     const total = (parseFloat(s.market.yesPool) + parseFloat(s.market.noPool)).toString();
 
     const projected = (() => {
@@ -231,13 +521,33 @@ export function Verdict({ api }: { api: MatchApi }) {
                   ? "Match abandoned · no wager placed"
                   : null;
 
+    const myProjWin = existingWin(myYes, s.market.yesPool, total) + existingWin(myNo, s.market.noPool, total);
+    const pill = open
+      ? { text: "open", cls: PILL.gilt }
+      : preOpen
+        ? { text: "soon", cls: PILL.dim }
+        : s.market.state === "LOCKED"
+          ? { text: "sealed", cls: PILL.mute }
+          : canClaim
+            ? { text: "claim", cls: PILL.acquit }
+            : (isRefundOutcome || refundMode) && myStake > 0
+              ? { text: "returned", cls: PILL.giltDim }
+              : isWin && myWinStake > 0
+                ? { text: "collected", cls: PILL.acquitDim }
+                : settled && myStake > 0
+                  ? { text: "missed", cls: PILL.mute }
+                  : { text: "settled", cls: PILL.mute };
+
     return {
       key: "faction",
       title: "Faction verdict",
       question: "Will the hidden hand walk free?",
       bettable: open,
       hasWager: myStake > 0,
-      canClaim: won || canClaimRefund || canRefundLiveness,
+      myStake,
+      myProjWin,
+      pill,
+      canClaim,
       claimLabel: won ? `Claim ◈ ${projected ?? "…"}` : `Reclaim stake ◈ ${refundAmount}`,
       doClaim: () => void (canRefundLiveness ? refund() : claim()),
       place: (key) => void (open && !busy && placeBet(key as Side, amount)),
@@ -280,7 +590,7 @@ export function Verdict({ api }: { api: MatchApi }) {
 
   // "Voted out" is a RECURRING market — one per round. Show only the ACTIVE one live: the highest round
   // still open for bets (`closed` is on-chain truth, so this follows what's actually wagerable, not the
-  // lagging playback round). Resolved past-round markets drop off the pager and stay claimable in
+  // lagging playback round). Resolved past-round markets drop off the list and stay claimable in
   // History. PlayerFate markets always show. Once every round market is closed/settled, none show.
   const activeVoRound = Math.max(0, ...props.filter((p) => p.kind === "ROUND_VOTED_OUT" && !p.closed).map((p) => p.param));
   const liveProps = props.filter((p) => p.kind !== "ROUND_VOTED_OUT" || p.param === activeVoRound);
@@ -385,12 +695,32 @@ export function Verdict({ api }: { api: MatchApi }) {
             ? "Wagers open shortly"
             : "🔒 Market sealed";
 
+    const myProjWin = choices.reduce((acc, c) => acc + existingWin(c.mine, c.pool, c.total), 0);
+    const pill = bettable
+      ? { text: "open", cls: PILL.gilt }
+      : canClaim
+        ? { text: "claim", cls: PILL.acquit }
+        : preOpen
+          ? { text: "soon", cls: PILL.dim }
+          : (isVoid || refundMode) && myTotalStake > 0
+            ? { text: "returned", cls: PILL.giltDim }
+            : myWin
+              ? { text: "collected", cls: PILL.acquitDim }
+              : (settled || refundMode) && myTotalStake > 0
+                ? { text: "missed", cls: PILL.mute }
+                : settled
+                  ? { text: "settled", cls: PILL.mute }
+                  : { text: "sealed", cls: PILL.mute };
+
     return {
       key: `prop-${prop.index}`,
       title,
       question,
       bettable,
       hasWager: myTotalStake > 0,
+      myStake: myTotalStake,
+      myProjWin,
+      pill,
       canClaim,
       claimLabel: isVoid || refundMode ? "Reclaim stake" : "Claim winnings",
       doClaim: () => void (refundMode ? refundProp(prop.index) : claimProp(prop.index)),
@@ -401,14 +731,17 @@ export function Verdict({ api }: { api: MatchApi }) {
   };
 
   const markets: BetMarket[] = [factionMarket(), ...liveProps.map(propMarket)];
-  const total = markets.length;
-  const safeIndex = Math.min(index, total - 1);
-  const m = markets[safeIndex]!;
 
-  // Reset the staged pick whenever the visible market changes (paging, or the index gets clamped).
-  useEffect(() => setPicked(null), [safeIndex]);
+  // Which market is expanded. Default to the one that wants attention (a claim), else the first that
+  // takes bets, else the first market. Follows the data if the open market drops off the list; the
+  // "__none__" sentinel lets the user collapse everything.
+  const defaultKey = (markets.find((mk) => mk.canClaim) ?? markets.find((mk) => mk.bettable) ?? markets[0])?.key ?? null;
+  const effectiveOpen =
+    openKey === "__none__" ? null : openKey && markets.some((mk) => mk.key === openKey) ? openKey : defaultKey;
+  const toggle = (key: string) => setOpenKey(key === effectiveOpen ? "__none__" : key);
 
-  const go = (delta: number) => setIndex((i) => Math.max(0, Math.min(total - 1, Math.min(i, total - 1) + delta)));
+  // Clear the staged pick whenever the open market changes.
+  useEffect(() => setPicked(null), [effectiveOpen]);
 
   const balance = s.wallet.balance != null ? parseFloat(s.wallet.balance) : null;
   const maxStake = balance != null ? Math.max(0, balance) : null;
@@ -419,12 +752,22 @@ export function Verdict({ api }: { api: MatchApi }) {
     ...(maxStake != null && maxStake > 0 ? [{ label: "Max", value: maxStake.toFixed(3) }] : []),
   ];
 
+  // Stepper: nudge the stake by a magnitude-scaled increment, clamped to [0, balance].
+  const stepStake = (dir: number) => {
+    const v = parseFloat(amount) || 0;
+    const inc = v < 0.1 ? 0.01 : v < 1 ? 0.1 : 1;
+    let next = v + dir * inc;
+    if (next < 0) next = 0;
+    if (maxStake != null && next > maxStake) next = maxStake;
+    setAmount(String(Number(next.toFixed(3))));
+  };
+
   const isRefundOutcome = settled && (s.market.outcome === "DRAW" || s.market.outcome === "VOID");
 
-  // The projected payout for the staged pick, shown right on the wager button.
-  const stakeNum = parseFloat(amount);
-  const pickedChoice = picked ? m.choices.find((c) => c.key === picked) : null;
-  const projWin = pickedChoice ? projectWin(stakeNum, pickedChoice.pool, pickedChoice.total) : null;
+  // Portfolio roll-up across every market the wallet holds a position in.
+  const myPositions = markets.filter((mk) => mk.myStake > 0);
+  const portfolioStaked = myPositions.reduce((acc, mk) => acc + mk.myStake, 0);
+  const portfolioWin = myPositions.reduce((acc, mk) => acc + mk.myProjWin, 0);
 
   return (
     <aside className="panel flex h-full min-h-0 flex-col overflow-hidden px-5 py-5">
@@ -463,176 +806,58 @@ export function Verdict({ api }: { api: MatchApi }) {
         </div>
       )}
 
-      {/* ── Pager: one market at a time. Lit arrows + a dot per market make it obvious there is more
-            than one bet on the table, and let you jump straight to any of them. ── */}
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <button
-          type="button"
-          aria-label="Previous market"
-          disabled={safeIndex === 0}
-          onClick={() => go(-1)}
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border border-gilt/60 font-mono text-[20px] leading-none text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:border-line disabled:text-mute-2 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-mute-2"
-        >
-          ‹
-        </button>
-        <div className="min-w-0 text-center">
-          <div className="flex items-center justify-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.16em] text-cream">
-            <span className="truncate">{m.title}</span>
-            {m.hasWager && <span className="shrink-0 text-gilt" title="You hold a wager here">●</span>}
+      {/* ── Portfolio strip: where your money is, at a glance, across every market. ── */}
+      {connected && myPositions.length > 0 && (
+        <div className="mb-3 border border-gilt/30 bg-gilt/[0.04] px-3 py-2.5">
+          <div className="flex items-baseline justify-between">
+            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-gilt">Your book</span>
+            <span className="font-mono text-[10px] tracking-[0.06em] text-mute">
+              in {myPositions.length} {myPositions.length === 1 ? "market" : "markets"}
+            </span>
           </div>
-          <div className="font-mono text-[10px] tracking-[0.1em] text-mute">
-            Market {safeIndex + 1} of {total} · swipe through
+          <div className="mt-1.5 flex items-baseline justify-between font-mono tabular-nums">
+            <div>
+              <span className="text-[10px] uppercase tracking-[0.1em] text-mute">staked </span>
+              <span className="text-[15px] text-cream">◈{portfolioStaked.toFixed(2)}</span>
+            </div>
+            <div className="text-right">
+              <span className="text-[10px] uppercase tracking-[0.1em] text-mute">to win </span>
+              <span className="text-[15px] text-acquit">◈{portfolioWin.toFixed(2)}</span>
+            </div>
           </div>
-        </div>
-        <button
-          type="button"
-          aria-label="Next market"
-          disabled={safeIndex === total - 1}
-          onClick={() => go(1)}
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border border-gilt/60 font-mono text-[20px] leading-none text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:border-line disabled:text-mute-2 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-mute-2"
-        >
-          ›
-        </button>
-      </div>
-
-      {/* Dot rail — one tap-target per market; current is a wider gilt pill, wagered ones carry a ring. */}
-      {total > 1 && (
-        <div className="mb-3 flex flex-wrap items-center justify-center gap-1.5">
-          {markets.map((mk, i) => (
-            <button
-              key={mk.key}
-              type="button"
-              aria-label={`Go to ${mk.title}`}
-              aria-current={i === safeIndex}
-              onClick={() => setIndex(i)}
-              className={[
-                "h-1.5 rounded-full transition-all",
-                i === safeIndex ? "w-5 bg-gilt" : "w-1.5 hover:bg-cream-dim",
-                i === safeIndex ? "" : mk.hasWager ? "bg-gilt/50" : "bg-line-2",
-              ].join(" ")}
-            />
-          ))}
+          <div className="mt-0.5 text-right font-mono text-[9.5px] italic tracking-[0.04em] text-mute">if your picks land</div>
         </div>
       )}
 
-      {/* Scrollable card area — only the question + its outcomes live here. */}
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mb-3 font-display text-[20px] leading-tight text-cream">{m.question}</div>
-        <div className="flex flex-col gap-2.5">
-          {m.choices.map((c) => (
-            <ChoiceCard
-              key={c.key}
-              c={c}
-              selected={picked === c.key}
-              selectable={m.bettable && !busy}
-              dimmed={open && !m.bettable && !c.winner}
-              onSelect={() => setPicked(c.key)}
-            />
-          ))}
-        </div>
+      {/* ── The market list — every bet on the table, scannable. Tap a row to expand one. ── */}
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
+        {markets.map((mk) => (
+          <MarketRow
+            key={mk.key}
+            m={mk}
+            open={mk.key === effectiveOpen}
+            onToggle={() => toggle(mk.key)}
+            picked={picked}
+            setPicked={setPicked}
+            busy={busy}
+            connected={connected}
+            connecting={s.wallet.status === "connecting"}
+            connect={connect}
+            amount={amount}
+            setAmount={setAmount}
+            stepStake={stepStake}
+            chips={chips}
+            balance={balance}
+            gasless={api.gasless}
+            getTestTokens={mint}
+            minting={minting}
+          />
+        ))}
       </div>
 
-      {/* ── Persistent footer: stake + the one wager/claim action, fixed across all markets ── */}
-      <div className="mt-4 border-t hairline pt-4">
-        {m.bettable ? (
-          <>
-            <div className="mb-2 flex items-center justify-between">
-              <span className="eyebrow">Stake</span>
-              <div className="flex items-center gap-2">
-                {api.gasless && (
-                  <span className="rounded-sm border border-gilt/50 px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.12em] text-gilt">
-                    ⛽ gasless
-                  </span>
-                )}
-                {connected && balance != null ? (
-                  <span className="font-mono text-[11px] tracking-[0.06em] text-mute">bal {balance.toFixed(3)} CHIP</span>
-                ) : null}
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-[12px] text-mute">◈</span>
-              <input
-                inputMode="decimal"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                className="w-20 border border-line bg-ink-2 px-2 py-1.5 font-mono text-[14px] text-cream outline-none focus:border-gilt"
-              />
-              <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-mute">CHIP</span>
-              <div className="ml-auto flex gap-1.5">
-                {chips.map((c) => (
-                  <button
-                    key={c.label}
-                    type="button"
-                    onClick={() => setAmount(c.value)}
-                    className={[
-                      "rounded-sm border px-2 py-1.5 font-mono text-[11.5px] tracking-[0.06em] transition-colors",
-                      amount === c.value ? "border-gilt text-gilt" : "border-line text-mute hover:border-line-2 hover:text-cream-dim",
-                    ].join(" ")}
-                  >
-                    {c.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {!connected ? (
-              <button
-                type="button"
-                onClick={() => void connect()}
-                disabled={busy}
-                className="mt-3 w-full rounded-sm border border-gilt px-3 py-3 font-mono text-[12.5px] uppercase tracking-[0.16em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
-              >
-                {s.wallet.status === "connecting" ? "Connecting…" : "Connect wallet to wager"}
-              </button>
-            ) : (
-              <button
-                type="button"
-                disabled={!picked || busy || !(stakeNum > 0)}
-                onClick={() => picked && m.place(picked)}
-                className={[
-                  "mt-3 w-full rounded-sm border px-3 py-3 font-mono text-[12.5px] uppercase tracking-[0.16em] transition-colors",
-                  picked && !busy && stakeNum > 0
-                    ? "border-gilt text-gilt hover:bg-gilt hover:text-ink"
-                    : "border-line text-mute cursor-default",
-                ].join(" ")}
-              >
-                {busy
-                  ? "Confirming on-chain…"
-                  : !picked
-                    ? "Pick an outcome above to wager"
-                    : projWin != null
-                      ? `Wager ◈${stakeNum.toFixed(3)} → win ◈${projWin.toFixed(3)}`
-                      : "Enter a stake amount"}
-              </button>
-            )}
-            {picked && !busy && pickedChoice && (
-              <div className="mt-1.5 text-center font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">
-                on {pickedChoice.label}
-                {m.hasWager ? " · adds to your wager" : ""}
-              </div>
-            )}
-            {connected && api.gasless && (
-              <div className="mt-1.5 text-center font-mono text-[10px] tracking-[0.1em] text-gilt/70">
-                Gas sponsored — just sign, no 0G needed.
-              </div>
-            )}
-          </>
-        ) : m.canClaim ? (
-          <button
-            type="button"
-            onClick={m.doClaim}
-            disabled={busy}
-            className="w-full rounded-sm border border-acquit px-3 py-3 font-mono text-[12.5px] uppercase tracking-[0.16em] text-acquit transition-colors hover:bg-acquit hover:text-ink disabled:opacity-60"
-          >
-            {busy ? "Confirming on-chain…" : m.claimLabel}
-          </button>
-        ) : (
-          <div className="rounded-sm border border-line px-3 py-3 text-center font-mono text-[12px] uppercase tracking-[0.14em] text-mute">
-            {m.status ?? "—"}
-          </div>
-        )}
-
-        {s.tx.error && <div className="mt-2 text-center font-mono text-[11px] leading-snug text-convict">{s.tx.error}</div>}
+      {/* ── Slim global footer: cross-market wallet identity + on-chain receipts. ── */}
+      <div className="mt-4 border-t hairline pt-3">
+        {s.tx.error && <div className="mb-2 text-center font-mono text-[11px] leading-snug text-convict">{s.tx.error}</div>}
 
         {/* Receipt: on-chain proof of the last wager/claim. */}
         {s.tx.lastHash && !s.tx.pending && (
@@ -640,7 +865,7 @@ export function Verdict({ api }: { api: MatchApi }) {
             href={explorerTx(s.tx.lastHash)}
             target="_blank"
             rel="noreferrer"
-            className="mt-2 flex items-center justify-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-acquit transition-colors hover:text-cream"
+            className="flex items-center justify-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-acquit transition-colors hover:text-cream"
           >
             ✓ Confirmed on-chain · {s.tx.lastHash.slice(0, 6)}…{s.tx.lastHash.slice(-4)}
             <span aria-hidden>↗</span>

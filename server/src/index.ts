@@ -74,10 +74,19 @@ async function main() {
     marketAddress: cfg.marketAddress,
   });
 
-  // One HTTP server shared by the WS hub (upgrade) and the relay routes (/relay, /relay/info). Other
-  // paths get a 200 health response (Railway health check).
+  // One HTTP server shared by the WS hub (upgrade), the relay routes (/relay, /relay/info), and a
+  // read-only /status route. `hub` is assigned just below; the handler only dereferences it at
+  // request time, by which point it is set. Other paths get a 200 health response (Railway check).
+  let hub: Hub | undefined;
   const httpServer = createServer((req, res) => {
     void (async () => {
+      // Lobby status: "is court in session, what round, how big the pot" — derived from the hub's
+      // in-memory buffer (no chain read, no socket), so polling it can never start a match.
+      if (hub && (req.url ?? "").split("?")[0] === "/status" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify(hub.snapshot()));
+        return;
+      }
       if (relayer && (await relayer.handle(req, res))) return;
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("TuringPits sequencer OK");
@@ -85,7 +94,7 @@ async function main() {
   });
   httpServer.listen(PORT);
 
-  const hub = new Hub(httpServer);
+  hub = new Hub(httpServer);
   console.log(`[server] HTTP + WebSocket listening on :${PORT}`);
   console.log(`[server] gas relayer: ${relayer ? `ENABLED (${relayer.relayerAddress})` : "disabled"}`);
   console.log(`[server] market=${cfg.marketAddress} chain=${cfg.chainId} seats=${cfg.playerCount}`);

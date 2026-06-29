@@ -16,6 +16,9 @@ export default defineConfig({
       // The optional gas-relayer HTTP endpoint (/relay, /relay/info) — proxied like /ws so a single
       // tunnel carries the gasless betting path too. See src/lib/contract.ts resolveRelayUrl.
       "/relay": { target: "http://localhost:8080", changeOrigin: true },
+      // Read-only lobby status (is court in session, what round, how big the pot). Proxied like the
+      // others so one tunnel carries it. See src/lib/useLiveStatus.ts / contract.ts fetchMatchStatus.
+      "/status": { target: "http://localhost:8080", changeOrigin: true },
     },
   },
 });

@@ -4,6 +4,7 @@ import { Menu } from "./components/screens/Menu.js";
 import { Live } from "./components/screens/Live.js";
 import { History } from "./components/screens/History.js";
 import { HowItWorks } from "./components/tribunal/HowItWorks.js";
+import { TxToaster } from "./components/TxToaster.js";
 
 export function App() {
   const route = useRoute();
@@ -19,6 +20,9 @@ export function App() {
 
       {/* The "?" primer is available everywhere (bottom-right). */}
       <HowItWorks />
+
+      {/* App-wide confirmation/receipt toasts for every on-chain wager/claim, on every route. */}
+      <TxToaster api={api} />
     </>
   );
 }

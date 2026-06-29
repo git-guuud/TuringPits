@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { CATCHUP_THRESHOLD, type ViewState } from "../../state/matchStore.js";
 import { useTypewriter } from "../../lib/useTypewriter.js";
@@ -186,7 +186,17 @@ function sceneFor(s: ViewState): Scene {
   };
 }
 
-export function Court({ s, advance, skipToPresent }: { s: ViewState; advance: () => void; skipToPresent: () => void }) {
+export function Court({
+  s,
+  advance,
+  stepBack,
+  skipToPresent,
+}: {
+  s: ViewState;
+  advance: () => void;
+  stepBack: () => void;
+  skipToPresent: () => void;
+}) {
   const scene = sceneFor(s);
   // The stage paces each beat (seconds on screen) while the server emits them ~1/s, so the viewer
   // steadily falls behind "live" — and a late joiner replays from the very start. When the backlog
@@ -208,17 +218,53 @@ export function Court({ s, advance, skipToPresent }: { s: ViewState; advance: ()
   const att = s.currentBeat?.kind === "turn" ? s.currentBeat.turn.attestation : null;
   const [showLog, setShowLog] = useState(false);
   const [muted, setMutedState] = useState(getMuted);
+  // Playback transport: when paused, the auto-advance below stands down so the current beat holds on
+  // the stage. Stepping a beat at a time (back/forward) pauses too, so the show never runs off while
+  // a spectator re-reads. Controls show whenever a beat is on stage (cursor ≥ 0).
+  const [paused, setPaused] = useState(false);
+  const canBack = s.playbackComplete || s.cursor > 0;
+  const canForward = s.cursor < s.beats.length - 1 || (!s.playbackComplete && !!s.rawReveal);
+  const stepTo = (move: () => void) => {
+    setPaused(true);
+    move();
+  };
 
   // Playback pacing: once a beat finishes typing, hold a moment, then advance the cursor to the
   // next beat — so nothing is ever cut off, even when the server (or a buffer replay) delivers
-  // beats faster than they can be read. Only runs while a beat is actually on the stage.
+  // beats faster than they can be read. Only runs while a beat is actually on the stage, and never
+  // while paused (the viewer is holding to re-read).
   useEffect(() => {
-    if (!done || !s.currentBeat || s.reveal) return;
+    if (paused || !done || !s.currentBeat || s.reveal) return;
     const atLast = s.cursor >= s.beats.length - 1;
     if (atLast && !s.rawReveal) return; // last shown beat, match still going → wait for the next
     const t = setTimeout(advance, 4000);
     return () => clearTimeout(t);
-  }, [done, s.currentBeat, s.reveal, s.rawReveal, s.cursor, s.beats.length, advance]);
+  }, [paused, done, s.currentBeat, s.reveal, s.rawReveal, s.cursor, s.beats.length, advance]);
+
+  // The aggregate day-vote drama for the stage: how full the count is, who the floor is closing on,
+  // and whether the plurality is already locked. Each ALIVE seat casts one vote and the seat with the
+  // most is eliminated — a tie at the top spares everyone (engine/src/moderator.ts). Only while a day
+  // vote is actually underway (votes cast, match still playing).
+  const voteMeter = (() => {
+    if (s.phase !== "day" || s.reveal || s.playbackComplete) return null;
+    const cast = Object.values(s.votes).reduce((a, b) => a + b, 0);
+    if (cast === 0) return null;
+    const alive = s.seats.filter((x) => x.alive).length;
+    const remaining = Math.max(0, alive - cast);
+    const ranked = Object.entries(s.votes)
+      .map(([seat, n]) => ({ seat: Number(seat), n }))
+      .sort((a, b) => b.n - a.n);
+    const lead = ranked[0]!;
+    const second = ranked[1]?.n ?? 0;
+    const leadName = (s.personas.find((p) => p.seat === lead.seat)?.name ?? `Seat ${lead.seat}`).toUpperCase();
+    const tied = ranked.filter((r) => r.n === lead.n).length > 1;
+    // Plurality is locked once no rival can catch the leader: their count beats the best any other
+    // seat could still reach (current runner-up + every vote not yet cast).
+    const condemned = !tied && lead.n > second + remaining;
+    // Votes the leader still needs before they can't be caught — the margin to the gallows.
+    const toLock = Math.max(0, second + remaining - lead.n + 1);
+    return { cast, alive, remaining, leadName, leadVotes: lead.n, tied, condemned, toLock };
+  })();
 
   // Transcript counts day speech — deliberation + votes (night/dawn carry no speech) up to cursor.
   let shownTurns = 0;
@@ -241,6 +287,45 @@ export function Court({ s, advance, skipToPresent }: { s: ViewState; advance: ()
           Replaying · {s.pendingBeats} behind
           <span className="text-[15px] tracking-normal">⏭ Skip to present</span>
         </button>
+      )}
+      {/* The vote board — the aggregate climax of a day vote, so the tensest moment lands on the stage
+          itself and not only in the bench's per-seat bars. */}
+      {voteMeter && (
+        <div className="absolute left-3 top-3 z-30 w-[clamp(150px,42vw,196px)] rounded-sm border border-line-2 bg-[#131009]/90 px-3 py-2.5 backdrop-blur-sm">
+          <div className="flex items-baseline justify-between font-mono text-[10px] uppercase tracking-[0.16em] text-mute">
+            <span>The vote · R{s.round}</span>
+            <span className="tabular-nums text-gilt-soft">
+              {voteMeter.cast}/{voteMeter.alive}
+            </span>
+          </div>
+          <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-line-2">
+            <div
+              className={["h-full transition-[width] duration-500", voteMeter.condemned ? "bg-convict" : "bg-gilt"].join(" ")}
+              style={{ width: `${(voteMeter.cast / Math.max(1, voteMeter.alive)) * 100}%` }}
+            />
+          </div>
+          <div className="mt-2 font-display text-[14px] tracking-[0.07em]">
+            {voteMeter.tied ? (
+              <span className="text-gilt">Deadlocked — no one falls</span>
+            ) : voteMeter.condemned ? (
+              <span className="text-convict">{voteMeter.leadName} — condemned</span>
+            ) : (
+              <span className="text-cream">
+                {voteMeter.leadName}
+                <span className="ml-1 font-mono text-[12px] text-gilt">·{voteMeter.leadVotes}</span>
+              </span>
+            )}
+          </div>
+          {!voteMeter.tied && !voteMeter.condemned && (
+            <div className="mt-0.5 font-body text-[11.5px] italic leading-tight text-mute">
+              {voteMeter.toLock === 1
+                ? "one vote from the gallows"
+                : voteMeter.remaining > 0
+                  ? `${voteMeter.remaining} still to vote`
+                  : "the count holds"}
+            </div>
+          )}
+        </div>
       )}
       {/* Stage controls — mute the typewriter, and open the testimony log over the stage. */}
       <div className="absolute right-3 top-3 z-30 flex items-center gap-2">
@@ -323,7 +408,7 @@ export function Court({ s, advance, skipToPresent }: { s: ViewState; advance: ()
       )}
 
       {att && (
-        <span className="absolute bottom-5 left-1/2 z-20 inline-flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-sm border border-line-2 bg-[#131009] px-3 py-1.5 font-mono text-[11.5px] uppercase tracking-[0.14em] text-mute">
+        <span className="absolute bottom-[4.25rem] left-1/2 z-20 inline-flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-sm border border-line-2 bg-[#131009] px-3 py-1.5 font-mono text-[11.5px] uppercase tracking-[0.14em] text-mute">
           <span
             className={[
               "h-1.5 w-1.5 rounded-full",
@@ -333,6 +418,61 @@ export function Court({ s, advance, skipToPresent }: { s: ViewState; advance: ()
           {att.source === "0g-tee" ? "Sworn & witnessed · 0G attested" : "Local key · MOCK-local"} · {att.signerAddress.slice(0, 6)}…{att.signerAddress.slice(-4)}
         </span>
       )}
+
+      {/* Playback transport — pause the auto-advance, or step a beat at a time to re-read a moment
+          that scrolled past. Manual steps pause, so the show never runs off while you read. */}
+      {s.cursor >= 0 && (
+        <div className="absolute bottom-3 left-1/2 z-30 flex -translate-x-1/2 items-center gap-1 rounded-full border border-line-2 bg-[#131009]/90 px-1.5 py-1 backdrop-blur-sm">
+          <TransportBtn label="Step back a beat" disabled={!canBack} onClick={() => stepTo(stepBack)}>
+            ◀
+          </TransportBtn>
+          <button
+            type="button"
+            aria-label={paused ? "Resume playback" : "Pause playback"}
+            aria-pressed={paused}
+            title={paused ? "Play" : "Pause"}
+            onClick={() => setPaused((p) => !p)}
+            className={[
+              "flex h-7 w-9 items-center justify-center rounded-full border font-mono text-[12px] leading-none transition-colors",
+              paused ? "border-gilt bg-gilt/15 text-gilt" : "border-line-2 text-mute hover:border-gilt hover:text-gilt",
+            ].join(" ")}
+          >
+            {paused ? "▶" : "❚❚"}
+          </button>
+          <TransportBtn label="Step forward a beat" disabled={!canForward} onClick={() => stepTo(advance)}>
+            ▶
+          </TransportBtn>
+        </div>
+      )}
     </section>
+  );
+}
+
+/** One small step/skip button in the stage transport. */
+function TransportBtn({
+  children,
+  label,
+  onClick,
+  disabled,
+}: {
+  children: ReactNode;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      disabled={disabled}
+      className={[
+        "flex h-7 w-7 items-center justify-center rounded-full font-mono text-[11px] leading-none transition-colors",
+        disabled ? "cursor-not-allowed text-mute-2 opacity-40" : "text-mute hover:text-gilt",
+      ].join(" ")}
+    >
+      {children}
+    </button>
   );
 }

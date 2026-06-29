@@ -108,6 +108,29 @@ export function relayInfo(force = false): Promise<RelayInfo | null> {
   return relayInfoCache;
 }
 
+/**
+ * Read-only lobby status, mirrored from the server's `GET /status` (derived from its in-memory match
+ * buffer). Lets the Menu show "is court in session, what round, how big the pot" WITHOUT opening the
+ * live WebSocket — opening one would start a match. See server/src/broadcast.ts `MatchStatus`.
+ */
+export interface MatchStatus {
+  live: boolean;
+  matchId: number | null;
+  round: number;
+  state: string;
+  bettingLive: boolean;
+  yesPool: string;
+  noPool: string;
+  isMock: boolean;
+}
+
+/** Fetch the current match status. Returns null on any failure — it is display-only. */
+export function fetchMatchStatus(): Promise<MatchStatus | null> {
+  return fetch(`${resolveRelayBase()}/status`)
+    .then((r) => (r.ok ? (r.json() as Promise<MatchStatus>) : null))
+    .catch(() => null);
+}
+
 /** Thrown when the gasless path can't be used (no relayer, or it's out of gas) — callers fall back. */
 export class RelayUnavailable extends Error {}
 
@@ -194,7 +217,7 @@ export function humanizeTxError(e: unknown): string {
     return "Wager cancelled.";
   }
   if (raw.includes("insufficient balance") || raw.includes("below min bet")) {
-    return "Not enough CHIP — tap “Get test tokens” to mint more, then try again.";
+    return "Not enough CHIP — tap “Get test CHIP” to mint more, then try again.";
   }
   if (raw.includes("insufficient allowance")) {
     return "Approval needed — confirm the token approval, then place your wager again.";

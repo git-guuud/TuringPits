@@ -5,7 +5,26 @@
  */
 import type { Server as HttpServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
-import type { WsMessage } from "./wire.js";
+import type { MarketState, WsMessage } from "./wire.js";
+
+/**
+ * A read-only snapshot of the current match, derived from the replay buffer alone (no chain reads,
+ * no WS client). Served over `GET /status` so the lobby can show "is court in session, what round,
+ * how big the pot" WITHOUT opening a socket — opening one would trip `waitForFirstClient` and start
+ * a match. `live` is true while a match is in progress (a `match_init` has landed and no `settled`
+ * has yet); it falls back to idle the moment the match settles or before any has begun.
+ */
+export interface MatchStatus {
+  live: boolean;
+  matchId: number | null;
+  /** 1-based round in play; 0 before the first night/day beat (or when idle). */
+  round: number;
+  state: MarketState;
+  bettingLive: boolean;
+  yesPool: string;
+  noPool: string;
+  isMock: boolean;
+}
 
 export class Hub {
   private readonly wss: WebSocketServer;
@@ -49,5 +68,50 @@ export class Hub {
 
   get clientCount(): number {
     return this.wss.clients.size;
+  }
+
+  /**
+   * Derive the current match status from the replay buffer. Pure read — never touches the socket or
+   * the chain, so it can be polled freely (e.g. by the lobby) without starting a match. The buffer
+   * is reset at each match start (orchestrator), so a stale match never leaks past the next one.
+   */
+  snapshot(): MatchStatus {
+    let hasInit = false;
+    let hasSettled = false;
+    let matchId: number | null = null;
+    let isMock = false;
+    let round = 0;
+    let state: MarketState = "OPEN";
+    let bettingLive = false;
+    let yesPool = "0";
+    let noPool = "0";
+    for (const m of this.buffer) {
+      switch (m.type) {
+        case "match_init":
+          hasInit = true;
+          matchId = m.matchId;
+          isMock = m.isMock;
+          break;
+        case "market":
+          state = m.market.state;
+          bettingLive = !!m.market.bettingLive;
+          yesPool = m.market.yesPool;
+          noPool = m.market.noPool;
+          break;
+        case "night":
+        case "dawn":
+        case "discussion":
+          round = Math.max(round, m.round);
+          break;
+        case "turn":
+          round = Math.max(round, m.state.round);
+          break;
+        case "settled":
+          hasSettled = true;
+          state = "SETTLED";
+          break;
+      }
+    }
+    return { live: hasInit && !hasSettled, matchId, round, state, bettingLive, yesPool, noPool, isMock };
   }
 }

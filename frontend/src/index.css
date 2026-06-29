@@ -7,6 +7,10 @@
 @layer base {
   :root { color-scheme: dark; }
   html, body, #root { height: 100%; }
+  /* Keyboard-focus visibility floor: a gilt ring on any control reached by keyboard. Mouse clicks
+     don't trigger :focus-visible, so this never shows on pointer interaction. Inputs that opt out
+     with Tailwind's `outline-none` still signal focus via their `focus:border-gilt` border. */
+  :focus-visible { outline: 2px solid #c9a23f; outline-offset: 2px; border-radius: 1px; }
   body {
     margin: 0;
     background:
