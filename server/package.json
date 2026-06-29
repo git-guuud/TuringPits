@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
+    "bots": "tsx scripts/liquidity-bots.ts",
     "test": "vitest run"
   },
   "dependencies": {

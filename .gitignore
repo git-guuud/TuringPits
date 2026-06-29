@@ -32,5 +32,8 @@ npm-debug.log*
 deployments.local.json
 .0g/
 
+# liquidity-bot generated wallets (test keys — never commit)
+.liquidity-bots.json
+
 
 handover.md

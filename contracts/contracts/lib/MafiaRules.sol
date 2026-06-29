@@ -19,6 +19,17 @@ library MafiaRules {
         bool[] acted;
         bool over;
         bool mafiaWins;
+        // The per-round "voted out" market resolves from this: votedOutRound[seat] is the 1-based
+        // round whose DAY VOTE eliminated that seat, or 0 if the seat was never voted out (it
+        // survived, or fell to a night kill). A seat is voted out at most once, so each entry is
+        // written at most once. A VotedOut prop for round R pays YES iff votedOutRound[seat] == R;
+        // a tied/absent day vote in round R leaves every seat at 0 for that round → all NO.
+        uint8[] votedOutRound;
+        // The "round of death" market resolves from this: deathRound[seat] is the 1-based round in
+        // which that seat was eliminated (the night kill or the day vote), or 0 if the seat is still
+        // alive when the transcript ends. Rounds are 1-based, so 0 is an unambiguous "survived"
+        // sentinel. A seat dies at most once, so each entry is written at most once.
+        uint8[] deathRound;
     }
 
     function init(Role[] memory roles) internal pure returns (Game memory g) {
@@ -32,6 +43,8 @@ library MafiaRules {
         g.pendingAction = new Action[](n);
         g.pendingTarget = new uint8[](n);
         g.acted = new bool[](n);
+        g.deathRound = new uint8[](n);
+        g.votedOutRound = new uint8[](n);
     }
 
     function applyDecision(Game memory g, Decision memory d) internal pure {
@@ -85,6 +98,9 @@ library MafiaRules {
         (bool hasSave, uint8 saveTarget) = _firstByAction(g, Action.Save);
         if (hasKill && !(hasSave && saveTarget == killTarget)) {
             g.alive[killTarget] = false;
+            // The night kill happens in the current round (round only advances after the day phase),
+            // so g.round is this death's round — the "round of death" outcome for that seat.
+            g.deathRound[killTarget] = uint8(g.round);
         }
         // Investigations are win-neutral; skipped on-chain.
         g.phase = Phase.Day;
@@ -94,7 +110,14 @@ library MafiaRules {
 
     function _resolveDay(Game memory g) private pure {
         (bool hasElim, uint8 elim) = _pluralityAll(g);
-        if (hasElim) g.alive[elim] = false;
+        if (hasElim) {
+            g.alive[elim] = false;
+            // Record BEFORE the round++ below, so the day-vote death is attributed to the current
+            // round — both its "round of death" and its per-round "voted out" outcome.
+            g.deathRound[elim] = uint8(g.round);
+            // This seat was voted out by THIS round's day vote — the per-round VotedOut outcome.
+            g.votedOutRound[elim] = uint8(g.round);
+        }
         g.phase = Phase.Night;
         g.round += 1;
         _clearPending(g);

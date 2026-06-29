@@ -13,6 +13,13 @@ export interface SettlementFixture {
   mafiaWins: boolean;
   /** Final survival truth in seat order (== g.alive on-chain after settle). */
   alive: boolean[];
+  /** Seat the round-1 day vote eliminates (the round-1 "voted out" truth), or null if it tied/never ran. */
+  firstVotedOut: number | null;
+  /** Per seat, the 1-based round whose DAY VOTE eliminated it (0 = never voted out) — the per-round
+   *  "voted out" truth (== g.votedOutRound). A VotedOut prop for round R pays YES iff this == R. */
+  votedOutRound: number[];
+  /** Per seat, the 1-based round it died in (0 = survived) — the "round of death" truth (== g.deathRound). */
+  deathRound: number[];
   teeSigner: Wallet;
 }
 
@@ -48,7 +55,7 @@ export async function buildSettlement(
   seed: string, n: number, nonce: string, signer: Wallet,
 ): Promise<SettlementFixture> {
   const engine = await import("@turingpits/engine");
-  const { decisions, mafiaWins, alive } = await scriptedMatch(seed, n, nonce);
+  const { decisions, mafiaWins, alive, firstVotedOut, votedOutRound, deathRound } = await scriptedMatch(seed, n, nonce);
   const roleNames = engine.assignRoles(seed, n) as string[];
   const roles = roleNames.map((r) => ROLE_ENUM[r]);
   const salt = engine.generateSalt();
@@ -60,7 +67,7 @@ export async function buildSettlement(
     const env = await buildEnvelope(signer, decisionStr);
     moves.push({ decision: toSol(d), ...env });
   }
-  return { moves, roles, salt, commit, nonce, playerCount: n, mafiaWins, alive, teeSigner: signer };
+  return { moves, roles, salt, commit, nonce, playerCount: n, mafiaWins, alive, firstVotedOut, votedOutRound, deathRound, teeSigner: signer };
 }
 
 /** Valid block schedule relative to the current chain head. */

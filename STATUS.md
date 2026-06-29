@@ -1,12 +1,12 @@
 # Status
 
-_Updated: 2026-06-22_
+_Updated: 2026-06-29_
 
 > **Betting currency → CHIP (mock ERC20):** wagers now settle in `MockBetToken` (CHIP), not native
 > 0G — `betYes/betNo(matchId, amount)` pull via approve+transferFrom; payouts/refunds/fees pay CHIP.
 > The menu shows the CHIP balance + a "Get test tokens" faucet button. **Betting also stays open
 > until settle()** (no block-based close/lock). Redeployed to Galileo: market
-> `0xb5bb5394270E0770F62d284eE0bf3802fAD06b41` (now also hosts per-seat **survival side markets** —
+> `0xBCB635Bb7a9454F665288Ed9c6E99214C284D240` (now also hosts per-seat **survival side markets** —
 > see DEPLOYMENT.md / TODO.md Post-MVP #1), token `0xC983771bee3Acea4AB72045F6E6D0D22b6E1b1a6`
 > (see DEPLOYMENT.md). Contract suite 49 green; frontend + server type-check clean.
 
@@ -117,7 +117,30 @@ from native 0G to the `MockBetToken` (CHIP) ERC20 with an in-app faucet, the mar
       skipped by default. Uploads paid by the funded `COMPUTE_PRIVATE_KEY` wallet.
 
 ## In progress
-- (none — frontend + betting UI shipped; CHIP currency migration + redeploy complete.)
+- **Side markets — Survival + Round-of-death + RECURRING per-round "Voted out" (code-complete; redeploy pending).**
+  `MafiaMarket` auto-creates three prop kinds, all resolved inside the SAME verified `settle()` from the
+  same TEE-checked run (no new trust, no extra settlement tx). At creation `propCount == 3 * playerCount`,
+  laid out as contiguous seat-ordered blocks:
+  - `PropKind.Survival` (`propIdx == seat`): YES = the seat is alive at the end (`g.alive[param]`).
+  - `PropKind.RoundOfDeath` (`propIdx == n + seat`): over/under fixed at the opening round
+    (`ROUND_OF_DEATH_LINE == 1`). YES = the seat is out in round 1 (the night-1 kill **or** the day-1
+    vote), from `g.deathRound[seat]` (1-based; 0 = survived).
+  - `PropKind.VotedOut` — now a **recurring per-round market** instead of a one-shot first-vote bet.
+    `Prop.round` tags the day-vote round a band targets; round 1 is created up front at `propIdx
+    2n + seat`, and the host floats later rounds via the new `openVotedOutRound(matchId)` (onlyOwner) as
+    the match advances, appending a fresh n-seat band contiguously at `voIdx(round, seat) ==
+    (round+1)*n + seat`. `MafiaRules.Game` now records `votedOutRound[seat]` (the 1-based round whose day
+    vote eliminated it, 0 = never), and `_settleProps` resolves each band by `g.votedOutRound[param] ==
+    pr.round`. `votedOutRoundsOpened[matchId]` tracks the highest opened round (createMatch seeds 1).
+  betProp/claimProp/refundProp/closeProp are kind/idx-agnostic so they're reused as-is. The server's
+  orchestrator reads props dynamically (count grows as bands open), opens each round's band as the match
+  reaches it, and freezes a band once its vote resolves (`syncVotedOutMarkets`); the round-of-death band
+  freezes one-shot once round 1 resolves. The live `Verdict.tsx` shows only the **active** "voted out"
+  band (the round bettable now) — resolved past rounds drop to History, which lists/claims every band per
+  round. Hardhat suite **81 green** (`MafiaMarket.votedout.test.ts` now covers `openVotedOutRound` +
+  per-round settlement at n=6; roundofdeath/props updated for the reorder; `MafiaRules` cross-checks
+  `votedOutRounds()` across multiple rounds); server + frontend type-check + build clean. **Not yet
+  deployed** — the new bytecode needs a Galileo redeploy (see `myTasks.md`).
 
 ## Pending
 - Polish / demo-day hardening per `TODO.md` (Day 7). Optional follow-ups: verify contract source on

@@ -13,7 +13,7 @@ import { Contract, JsonRpcProvider, Wallet, ZeroHash, formatEther } from "ethers
 import { assignRoles, commitRoles, generateSalt } from "@turingpits/engine";
 import { toSettlementMove } from "@turingpits/players/dist/match.js";
 import { withRetry, isTransientError } from "@turingpits/players/dist/retry.js";
-import { MAFIA_MARKET_ABI, ROLE_ENUM, marketStateOf, outcomeOf, winningSideOf } from "./abi.js";
+import { MAFIA_MARKET_ABI, ROLE_ENUM, marketStateOf, outcomeOf, propStateOf, winningSideOf } from "./abi.js";
 import { toPublicState, toPublicTurn } from "./redact.js";
 import { gateTurn, newNightGate } from "./night.js";
 import { buildPersonas, buildProvider, runMatch } from "./match-runner.js";
@@ -219,22 +219,32 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
     chainId: cfg.chainId,
   });
 
-  // Read the per-seat survival side markets (one per seat, propIdx == seat) so the UI can show their
-  // live pools + settled outcome alongside the faction-win market. Read in parallel; small N (5–7).
-  const readProps = async (): Promise<PropSnapshot[]> =>
-    Promise.all(
-      Array.from({ length: n }, (_, i) =>
-        rpc(`getProp:${i}`, () => market.getFunction("getProp")(matchId, i)).then((pr) => ({
-          index: i,
-          kind: "SURVIVAL" as const,
-          seat: Number(pr.param),
-          yesPool: formatEther(pr.poolYes as bigint),
-          noPool: formatEther(pr.poolNo as bigint),
-          closed: Boolean(pr.closed),
-          outcome: outcomeOf(Number(pr.outcome)),
-        })),
+  // Read the categorical side markets so the UI can show their live per-outcome pools + settled winner
+  // alongside the faction-win market. createMatch makes n+1 props — PlayerFate (propIdx 0..n-1) + the
+  // round-1 RoundVotedOut market (propIdx n) — and openVotedOutRound appends a fresh RoundVotedOut
+  // market per later round, so the count GROWS during the match: read propCount each pass. The on-chain
+  // `kind` byte is the label authority (0 PlayerFate / 1 RoundVotedOut); `param` is the seat or round.
+  const PROP_KIND = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT" } as const;
+  const readProps = async (): Promise<PropSnapshot[]> => {
+    const count = Number(await rpc("propCount", () => market.getFunction("propCount")(matchId)));
+    return Promise.all(
+      Array.from({ length: count }, (_, i) =>
+        rpc(`getProp:${i}`, () => market.getFunction("getProp")(matchId, i)).then((pr) => {
+          const state = propStateOf(Number(pr.state));
+          return {
+            index: i,
+            kind: PROP_KIND[Number(pr.kind) as 0 | 1] ?? "PLAYER_FATE",
+            param: Number(pr.param),
+            numOutcomes: Number(pr.numOutcomes),
+            pools: (pr.pools as bigint[]).map((p) => formatEther(p)),
+            closed: Boolean(pr.closed),
+            state,
+            winningOutcome: state === "RESOLVED" ? Number(pr.winningOutcome) : undefined,
+          };
+        }),
       ),
     );
+  };
 
   const readPools = async () => {
     const [m, props] = await Promise.all([
@@ -294,29 +304,83 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
   //    the *broadcast* does not affect on-chain verification.
   const gate = newNightGate(personas.map((p) => p.seat));
 
-  // Contract-level "no betting a corpse": the moment a seat's survival is publicly decided (it
-  // fell), freeze its survival market on-chain so nobody can pile onto the already-won NO side for
-  // a riskless profit. closeProp is payout-neutral (settlement still comes from the verified run),
-  // so this only refuses new stakes — it does not touch outcomes. propIdx == seat for Survival.
-  const closedSeats = new Set<number>();
+  // Contract-level "no betting a decided market": the moment an outcome becomes public, freeze that
+  // prop on-chain so nobody can pile onto an already-won side for a riskless profit. closeProp is
+  // payout-neutral (settlement still comes from the verified run), so this only refuses NEW stakes —
+  // it never touches outcomes. One shared `frozen` set (keyed by propIdx) covers all three kinds;
+  // `freeze` is idempotent and returns whether it actually closed (so callers can debounce pool pushes).
+  const frozen = new Set<number>();
+  const freeze = async (propIdx: number, label: string): Promise<boolean> => {
+    if (frozen.has(propIdx)) return false;
+    frozen.add(propIdx);
+    try {
+      await rpc(`closeProp:${label}:${propIdx}`, async () => {
+        const tx = await market.getFunction("closeProp")(matchId, propIdx);
+        return tx.wait();
+      });
+      return true;
+    } catch (e) {
+      // Non-fatal: the prop still resolves at settle(); a missed close only leaves the frontend gate.
+      console.warn(`[orch] closeProp ${label} idx=${propIdx} failed:`, (e as Error).message);
+      return false;
+    }
+  };
+  const pushPools = async (): Promise<void> => {
+    const p = await readPools();
+    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, yesPool: p.yesPool, noPool: p.noPool, props: p.props } });
+  };
+
+  // PlayerFate: freeze a fallen seat's market the moment its death is public (propIdx == seat). Once a
+  // seat dies, its fate (which death-round bucket) is fully decided, so no more bets on it.
   const closeFallenProps = async (state: { players: ReadonlyArray<{ id: number; alive: boolean }> }): Promise<void> => {
+    let changed = false;
     for (const pl of state.players) {
-      if (pl.alive || closedSeats.has(pl.id)) continue;
-      closedSeats.add(pl.id);
-      try {
-        await rpc(`closeProp:${pl.id}`, async () => {
-          const tx = await market.getFunction("closeProp")(matchId, pl.id);
-          return tx.wait();
-        });
-        console.log(`[orch] survival prop seat=${pl.id} closed on-chain (fell) matchId=${matchId}`);
-        // Push refreshed pools so the UI flips this seat to "market closed" from on-chain truth.
-        const p = await readPools();
-        hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, yesPool: p.yesPool, noPool: p.noPool, props: p.props } });
-      } catch (e) {
-        // Non-fatal: the prop still resolves at settle(); a missed close only leaves the frontend gate.
-        console.warn(`[orch] closeProp seat=${pl.id} failed:`, (e as Error).message);
+      if (pl.alive) continue;
+      if (await freeze(pl.id, "player-fate")) {
+        console.log(`[orch] player-fate prop seat=${pl.id} closed on-chain (fell) matchId=${matchId}`);
+        changed = true;
       }
     }
+    if (changed) await pushPools();
+  };
+
+  // The RECURRING "voted out" market: ONE market per day-vote round. createMatch floats round 1; as the
+  // match advances we open the NEXT round's market (so it's bettable while that round plays) and freeze
+  // a round's market once ITS day vote has resolved. The market for round R lives at propIdx voIdx(R).
+  const voIdx = (round: number) => n + (round - 1);
+  let votedOutOpened = 1; // round-1 market created in createMatch
+  const syncVotedOutMarkets = async (state: { round: number; winner: unknown }): Promise<void> => {
+    const over = state.winner != null;
+    const cur = state.round; // 1-based current round
+    let changed = false;
+    // 1. Open each round's market as the match reaches it — but never ahead of play, and never once the
+    //    match is over (a round with no day vote needs no market). Sequential; retries on a later turn.
+    if (!over) {
+      while (votedOutOpened < cur) {
+        const next = votedOutOpened + 1;
+        try {
+          await rpc(`openVotedOutRound:${next}`, async () => {
+            const tx = await market.getFunction("openVotedOutRound")(matchId);
+            return tx.wait();
+          });
+          votedOutOpened = next;
+          changed = true;
+          console.log(`[orch] 'voted out' round ${next} market opened on-chain matchId=${matchId}`);
+        } catch (e) {
+          console.warn(`[orch] openVotedOutRound ${next} failed:`, (e as Error).message);
+          break;
+        }
+      }
+    }
+    // 2. Freeze each round's market once its day vote has resolved (round < current) or the match ended.
+    //    A single market per round, so the whole market closes at once (a night kill mid-round doesn't
+    //    decide the day vote, so the still-live round stays open for the survivors).
+    for (let r = 1; r <= votedOutOpened; r++) {
+      if (over || r < cur) {
+        if (await freeze(voIdx(r), `voted-out:r${r}`)) changed = true;
+      }
+    }
+    if (changed) await pushPools();
   };
 
   let result;
@@ -339,8 +403,11 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
           hub.broadcast(m);
           await sleep(cfg.moveIntervalMs);
         }
-        // After the public death beat lands, freeze the fallen seat's survival market on-chain.
+        // After the public death beat lands, freeze the fallen seat's player-fate market on-chain.
         await closeFallenProps(state);
+        // The recurring "voted out" market opens the new round's market and freezes already-resolved
+        // ones as the match advances round by round.
+        await syncVotedOutMarkets(state);
       },
       // Daytime deliberation streams as-is: it is public day speech (the discussion pass never runs
       // at night), so no role can leak. Paced like a turn so the stage can read it.

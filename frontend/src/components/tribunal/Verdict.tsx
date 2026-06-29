@@ -1,28 +1,28 @@
 import { useEffect, useState } from "react";
 import type { MatchApi, ViewState } from "../../state/matchStore.js";
-import type { Outcome, Side } from "../../lib/types.js";
+import type { PropSnapshot, Side } from "../../lib/types.js";
 import { explorerTx } from "../../lib/contract.js";
 import { useCountdown } from "../../lib/useCountdown.js";
 
-function pct(pool: string, other: string): number {
+function pct(pool: string, total: string): number {
   const a = parseFloat(pool);
-  const t = a + parseFloat(other);
+  const t = parseFloat(total);
   return t > 0 ? Math.round((a / t) * 100) : 0;
 }
 
-/** Parimutuel return multiple if this side wins: (total pool) / (side pool). From real pools. */
-function mult(side: string, other: string): string {
-  const a = parseFloat(side);
-  const t = a + parseFloat(other);
+/** Parimutuel return multiple if this choice wins: (whole pot) / (this choice's pool). From real pools. */
+function mult(pool: string, total: string): string {
+  const a = parseFloat(pool);
+  const t = parseFloat(total);
   return a > 0 ? `×${(t / a).toFixed(2)}` : "—";
 }
 
-/** Parimutuel payout for staking `a` on a side: its share of the whole pot if it wins. */
-function projectWin(a: number, sidePool: string, otherPool: string): number | null {
+/** Parimutuel payout for staking `a` on a choice: its share of the whole pot if it wins. */
+function projectWin(a: number, pool: string, total: string): number | null {
   if (!(a > 0)) return null;
-  const s = parseFloat(sidePool);
-  const o = parseFloat(otherPool);
-  return (a / (s + a)) * (s + o + a);
+  const p = parseFloat(pool);
+  const t = parseFloat(total);
+  return (a / (p + a)) * (t + a);
 }
 
 function StateBadge({ s }: { s: ViewState }) {
@@ -50,10 +50,11 @@ function StateBadge({ s }: { s: ViewState }) {
   );
 }
 
-// ── one side of a market ──────────────────────────────────────────────────────
+// ── one outcome of a market ─────────────────────────────────────────────────────
 interface Choice {
-  side: Side;
-  /** Small label above the verdict word — the faction or survival framing. */
+  /** Stable, unique within the market. Faction: "YES"/"NO". Props: "o<outcome>". */
+  key: string;
+  /** Small label above the verdict word — the faction / bucket framing. */
   eyebrow: string;
   eyebrowClass: string;
   /** The big display word for this outcome. */
@@ -62,9 +63,11 @@ interface Choice {
   sub: string;
   accent: string;
   bar: string;
+  /** This choice's pool. */
   pool: string;
-  other: string;
-  /** The connected wallet's stake already on this side. */
+  /** Sum of every choice's pool in the market (for pct / multiplier / projection). */
+  total: string;
+  /** The connected wallet's stake already on this choice. */
   mine: number;
   /** This outcome is how the market resolved. */
   winner: boolean;
@@ -113,16 +116,16 @@ function ChoiceCard({
       )}
       <div className="flex items-center justify-between">
         <span className={["font-mono text-[10px] uppercase tracking-[0.14em]", c.eyebrowClass].join(" ")}>{c.eyebrow}</span>
-        <span className="font-mono text-[15px] tabular-nums text-cream">{mult(c.pool, c.other)}</span>
+        <span className="font-mono text-[15px] tabular-nums text-cream">{mult(c.pool, c.total)}</span>
       </div>
       <div className={["mt-1.5 font-display text-[21px] tracking-[0.1em]", c.accent].join(" ")}>{c.label}</div>
       <div className="mt-0.5 text-[13px] italic text-mute">{c.sub}</div>
       <div className="mt-2.5 flex items-baseline justify-between font-mono text-[10.5px] tracking-[0.06em] text-mute">
-        <span>{pct(c.pool, c.other)}% of the pot backs this</span>
+        <span>{pct(c.pool, c.total)}% of the pot backs this</span>
         <span>◈ {parseFloat(c.pool).toFixed(2)}</span>
       </div>
       <div className="mt-1.5 h-0.5 bg-line">
-        <div className={["h-full", c.bar].join(" ")} style={{ width: `${pct(c.pool, c.other)}%` }} />
+        <div className={["h-full", c.bar].join(" ")} style={{ width: `${pct(c.pool, c.total)}%` }} />
       </div>
       {c.mine > 0 && (
         <div className="mt-2 font-mono text-[10.5px] tracking-[0.06em] text-gilt">● your wager · ◈ {c.mine.toFixed(3)}</div>
@@ -131,13 +134,13 @@ function ChoiceCard({
   );
 }
 
-// ── normalized market view-model (faction verdict + one per seat) ──────────────
+// ── normalized market view-model (faction verdict + one per side market) ───────
 interface BetMarket {
   key: string;
   title: string;
   question: string;
-  choices: [Choice, Choice];
-  /** Open and accepting bets (the seat hasn't fallen / been frozen). */
+  choices: Choice[];
+  /** Open and accepting bets (the market hasn't been frozen / decided). */
   bettable: boolean;
   /** The wallet already holds a stake somewhere in this market. */
   hasWager: boolean;
@@ -145,16 +148,26 @@ interface BetMarket {
   canClaim: boolean;
   claimLabel: string;
   doClaim: () => void;
-  place: (side: Side) => void;
+  /** Place a wager on the chosen outcome (by its Choice.key). */
+  place: (key: string) => void;
   /** Shown in the footer when the market is neither bettable nor claimable. */
   status: string | null;
 }
+
+// PlayerFate death-round buckets (MafiaMarket.FATE_BUCKETS == 5), in outcome order.
+const FATE_COPY: ReadonlyArray<Pick<Choice, "eyebrow" | "eyebrowClass" | "label" | "sub" | "accent" | "bar">> = [
+  { eyebrow: "to the final bell", eyebrowClass: "text-acquit", label: "SURVIVES", sub: "still standing when the court rises", accent: "text-acquit", bar: "bg-acquit" },
+  { eyebrow: "first to fall", eyebrowClass: "text-convict", label: "OUT · R1", sub: "taken in the night or the opening vote", accent: "text-convict", bar: "bg-convict" },
+  { eyebrow: "second round", eyebrowClass: "text-convict", label: "OUT · R2", sub: "falls in the second round", accent: "text-convict", bar: "bg-convict" },
+  { eyebrow: "third round", eyebrowClass: "text-convict", label: "OUT · R3", sub: "falls in the third round", accent: "text-convict", bar: "bg-convict" },
+  { eyebrow: "the long game", eyebrowClass: "text-convict", label: "OUT · R4+", sub: "holds on, then falls late", accent: "text-convict", bar: "bg-convict" },
+];
 
 export function Verdict({ api }: { api: MatchApi }) {
   const { state: s, connect, placeBet, placePropBet, claim, claimProp, refund, refundProp } = api;
   const [amount, setAmount] = useState("0.01");
   const [index, setIndex] = useState(0);
-  const [picked, setPicked] = useState<Side | null>(null);
+  const [picked, setPicked] = useState<string | null>(null);
 
   const live = s.market.state === "OPEN" && s.market.bettingLive === true;
   const preOpen = s.market.state === "OPEN" && !s.market.bettingLive;
@@ -182,12 +195,13 @@ export function Verdict({ api }: { api: MatchApi }) {
     const won = isWin && myWinStake > 0 && !claimed;
     const canClaimRefund = isRefundOutcome && myStake > 0 && !claimed;
     const canRefundLiveness = refundMode && myStake > 0 && !claimed;
+    const total = (parseFloat(s.market.yesPool) + parseFloat(s.market.noPool)).toString();
 
     const projected = (() => {
       if (!won || !winSide) return null;
-      const total = parseFloat(s.market.yesPool) + parseFloat(s.market.noPool);
+      const t = parseFloat(s.market.yesPool) + parseFloat(s.market.noPool);
       const wp = winSide === "YES" ? parseFloat(s.market.yesPool) : parseFloat(s.market.noPool);
-      return wp > 0 ? ((total * myWinStake) / wp).toFixed(4) : null;
+      return wp > 0 ? ((t * myWinStake) / wp).toFixed(4) : null;
     })();
     const refundAmount = (() => {
       if (outcome === "DRAW") return (myStake * (10000 - (s.feeBpsDraw ?? 0))) / 10000;
@@ -226,11 +240,11 @@ export function Verdict({ api }: { api: MatchApi }) {
       canClaim: won || canClaimRefund || canRefundLiveness,
       claimLabel: won ? `Claim ◈ ${projected ?? "…"}` : `Reclaim stake ◈ ${refundAmount}`,
       doClaim: () => void (canRefundLiveness ? refund() : claim()),
-      place: (side) => void (open && !busy && placeBet(side, amount)),
+      place: (key) => void (open && !busy && placeBet(key as Side, amount)),
       status,
       choices: [
         {
-          side: "YES",
+          key: "YES",
           eyebrow: "Mafia faction",
           eyebrowClass: "text-[#d98a55]",
           label: "ACQUITTED",
@@ -238,12 +252,12 @@ export function Verdict({ api }: { api: MatchApi }) {
           accent: "text-[#d98a55]",
           bar: "bg-[#d98a55]",
           pool: s.market.yesPool,
-          other: s.market.noPool,
+          total,
           mine: myYes,
           winner: settled && winSide === "YES",
         },
         {
-          side: "NO",
+          key: "NO",
           eyebrow: "Town faction",
           eyebrowClass: "text-acquit",
           label: "CONVICTED",
@@ -251,7 +265,7 @@ export function Verdict({ api }: { api: MatchApi }) {
           accent: "text-acquit",
           bar: "bg-acquit",
           pool: s.market.noPool,
-          other: s.market.yesPool,
+          total,
           mine: myNo,
           winner: settled && winSide === "NO",
         },
@@ -259,91 +273,134 @@ export function Verdict({ api }: { api: MatchApi }) {
     };
   };
 
-  // ── per-seat survival markets ──
+  // ── categorical side markets (PlayerFate per seat + the active per-round RoundVotedOut market) ──
   const aliveBySeat = new Map(s.seats.map((seat) => [seat.id, seat.alive]));
   const stakeByIdx = new Map(s.propStakes.map((ps) => [ps.index, ps]));
   const props = s.market.props ?? [];
 
-  const seatMarket = (prop: (typeof props)[number]): BetMarket => {
-    const name = seatName(prop.seat);
-    const o: Outcome | undefined = prop.outcome;
-    const survived = o === "YES";
-    const fell = o === "NO";
-    const isVoid = o === "VOID";
-    const mine = stakeByIdx.get(prop.index);
-    const myYes = mine ? parseFloat(mine.yes) : 0;
-    const myNo = mine ? parseFloat(mine.no) : 0;
-    const myStake = myYes + myNo;
-    const claimed = mine?.claimed ?? false;
-    const alive = aliveBySeat.get(prop.seat) ?? true;
-    // A fallen/frozen seat's survival outcome is already decided — no more bets even while the match
-    // (and faction market) stays open. The on-chain `closed` flag is authority; alive is the fallback.
-    const decided = prop.closed === true || !alive;
-    const bettable = open && !decided;
-    const myWin = (survived && myYes > 0) || (fell && myNo > 0);
-    const canClaim = !claimed && ((settled && (myWin || isVoid)) || (refundMode && myStake > 0));
+  // "Voted out" is a RECURRING market — one per round. Show only the ACTIVE one live: the highest round
+  // still open for bets (`closed` is on-chain truth, so this follows what's actually wagerable, not the
+  // lagging playback round). Resolved past-round markets drop off the pager and stay claimable in
+  // History. PlayerFate markets always show. Once every round market is closed/settled, none show.
+  const activeVoRound = Math.max(0, ...props.filter((p) => p.kind === "ROUND_VOTED_OUT" && !p.closed).map((p) => p.param));
+  const liveProps = props.filter((p) => p.kind !== "ROUND_VOTED_OUT" || p.param === activeVoRound);
 
+  const propMarket = (prop: PropSnapshot): BetMarket => {
+    const total = prop.pools.reduce((acc, p) => acc + parseFloat(p), 0).toString();
+    const mine = stakeByIdx.get(prop.index);
+    const myStakeFor = (o: number) => (mine ? parseFloat(mine.stakes[o] ?? "0") : 0);
+    const myTotalStake = mine ? mine.stakes.reduce((acc, v) => acc + parseFloat(v), 0) : 0;
+    const claimed = mine?.claimed ?? false;
+    const win = prop.state === "RESOLVED" ? prop.winningOutcome : undefined;
+    const isVoid = prop.state === "VOID";
+    // A decided market takes no more bets even while the match (and faction market) stays open. The
+    // on-chain `closed` flag is authority; for PlayerFate a dead seat is the fallback (its fate is then
+    // public). A single RoundVotedOut market resolves only when the host closes it (the vote is in).
+    const decided = prop.closed === true || (prop.kind === "PLAYER_FATE" && !(aliveBySeat.get(prop.param) ?? true));
+    const bettable = open && !decided;
+    const myWin = win != null && myStakeFor(win) > 0;
+    const canClaim = !claimed && ((settled && (myWin || isVoid)) || (refundMode && myTotalStake > 0));
+
+    let title: string;
+    let question: string;
+    let choices: Choice[];
+    if (prop.kind === "PLAYER_FATE") {
+      const name = seatName(prop.param);
+      title = `${name} · fate`;
+      question = `What becomes of ${name}?`;
+      choices = FATE_COPY.map((copy, o) => ({
+        key: `o${o}`,
+        ...copy,
+        pool: prop.pools[o] ?? "0",
+        total,
+        mine: myStakeFor(o),
+        winner: win === o,
+      }));
+    } else {
+      const r = prop.param; // the day-vote round this market predicts (recurring)
+      const noOne = prop.numOutcomes - 1; // the last outcome — a hung vote
+      title = `Round ${r} vote`;
+      question = `Who hangs in the round ${r} vote?`;
+      choices = [];
+      for (let seat = 0; seat < noOne; seat++) {
+        const aliveNow = aliveBySeat.get(seat) ?? true;
+        const seatPool = parseFloat(prop.pools[seat] ?? "0");
+        // Live: only living seats are realistic targets. Settled/past: also surface the winner and any
+        // seat that drew a wager, so the resolved card and reclaimable pots are always visible.
+        if (!aliveNow && win !== seat && seatPool === 0 && myStakeFor(seat) === 0) continue;
+        choices.push({
+          key: `o${seat}`,
+          eyebrow: `seat ${seat + 1}`,
+          eyebrowClass: "text-convict",
+          label: seatName(seat),
+          sub: "to the gallows this round",
+          accent: "text-convict",
+          bar: "bg-convict",
+          pool: prop.pools[seat] ?? "0",
+          total,
+          mine: myStakeFor(seat),
+          winner: win === seat,
+        });
+      }
+      choices.push({
+        key: `o${noOne}`,
+        eyebrow: "a hung vote",
+        eyebrowClass: "text-acquit",
+        label: "NO ONE",
+        sub: "the vote ties — nobody hangs",
+        accent: "text-acquit",
+        bar: "bg-acquit",
+        pool: prop.pools[noOne] ?? "0",
+        total,
+        mine: myStakeFor(noOne),
+        winner: win === noOne,
+      });
+    }
+
+    const awaiting = myTotalStake > 0 ? " · awaiting settlement" : "";
+    const closedText =
+      prop.kind === "ROUND_VOTED_OUT"
+        ? `the round ${prop.param} vote is in · market closed${awaiting}`
+        : `${seatName(prop.param)} fell · market closed${awaiting}`;
+    const wonStatus = isVoid
+      ? "Void · stakes returned"
+      : win == null
+        ? "Settled"
+        : prop.kind === "ROUND_VOTED_OUT"
+          ? win === prop.numOutcomes - 1
+            ? "Hung vote · no one fell"
+            : `${seatName(win)} was voted out`
+          : `Fate · ${FATE_COPY[win]?.label ?? "settled"}`;
     const status = bettable
       ? null
       : settled || refundMode
         ? claimed
-          ? myWin || isVoid ? "Collected ✓" : "Settled · your wager missed"
-          : survived
-            ? "Survived to the end"
-            : fell
-              ? "Fell before the end"
-              : isVoid
-                ? "Void · stakes returned"
-                : "Settled"
+          ? myWin || isVoid
+            ? "Collected ✓"
+            : "Settled · your wager missed"
+          : wonStatus
         : decided && open
-          ? `${name} fell · market closed${myNo > 0 ? " · awaiting settlement" : ""}`
+          ? closedText
           : preOpen
             ? "Wagers open shortly"
             : "🔒 Market sealed";
 
     return {
-      key: `seat-${prop.index}`,
-      title: name,
-      question: `Does ${name} survive to the end?`,
+      key: `prop-${prop.index}`,
+      title,
+      question,
       bettable,
-      hasWager: myStake > 0,
+      hasWager: myTotalStake > 0,
       canClaim,
       claimLabel: isVoid || refundMode ? "Reclaim stake" : "Claim winnings",
       doClaim: () => void (refundMode ? refundProp(prop.index) : claimProp(prop.index)),
-      place: (side) => void (bettable && !busy && placePropBet(prop.index, side, amount)),
+      place: (key) => void (bettable && !busy && placePropBet(prop.index, Number(key.slice(1)), amount)),
       status,
-      choices: [
-        {
-          side: "YES",
-          eyebrow: "to the final bell",
-          eyebrowClass: "text-acquit",
-          label: "SURVIVES",
-          sub: "still standing when the court rises",
-          accent: "text-acquit",
-          bar: "bg-acquit",
-          pool: prop.yesPool,
-          other: prop.noPool,
-          mine: myYes,
-          winner: survived,
-        },
-        {
-          side: "NO",
-          eyebrow: "before the end",
-          eyebrowClass: "text-convict",
-          label: "FALLS",
-          sub: "voted out or taken in the night",
-          accent: "text-convict",
-          bar: "bg-convict",
-          pool: prop.noPool,
-          other: prop.yesPool,
-          mine: myNo,
-          winner: fell,
-        },
-      ],
+      choices,
     };
   };
 
-  const markets: BetMarket[] = [factionMarket(), ...props.map(seatMarket)];
+  const markets: BetMarket[] = [factionMarket(), ...liveProps.map(propMarket)];
   const total = markets.length;
   const safeIndex = Math.min(index, total - 1);
   const m = markets[safeIndex]!;
@@ -366,8 +423,8 @@ export function Verdict({ api }: { api: MatchApi }) {
 
   // The projected payout for the staged pick, shown right on the wager button.
   const stakeNum = parseFloat(amount);
-  const pickedChoice = picked ? m.choices.find((c) => c.side === picked) : null;
-  const projWin = pickedChoice ? projectWin(stakeNum, pickedChoice.pool, pickedChoice.other) : null;
+  const pickedChoice = picked ? m.choices.find((c) => c.key === picked) : null;
+  const projWin = pickedChoice ? projectWin(stakeNum, pickedChoice.pool, pickedChoice.total) : null;
 
   return (
     <aside className="panel flex min-h-0 flex-col overflow-hidden px-5 py-5">
@@ -458,18 +515,18 @@ export function Verdict({ api }: { api: MatchApi }) {
         </div>
       )}
 
-      {/* Scrollable card area — only the question + its two choices live here. */}
+      {/* Scrollable card area — only the question + its outcomes live here. */}
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mb-3 font-display text-[20px] leading-tight text-cream">{m.question}</div>
         <div className="flex flex-col gap-2.5">
           {m.choices.map((c) => (
             <ChoiceCard
-              key={c.side}
+              key={c.key}
               c={c}
-              selected={picked === c.side}
+              selected={picked === c.key}
               selectable={m.bettable && !busy}
               dimmed={open && !m.bettable && !c.winner}
-              onSelect={() => setPicked(c.side)}
+              onSelect={() => setPicked(c.key)}
             />
           ))}
         </div>
@@ -535,15 +592,15 @@ export function Verdict({ api }: { api: MatchApi }) {
                 {busy
                   ? "Confirming on-chain…"
                   : !picked
-                    ? "Pick a side above to wager"
+                    ? "Pick an outcome above to wager"
                     : projWin != null
                       ? `Wager ◈${stakeNum.toFixed(3)} → win ◈${projWin.toFixed(3)}`
                       : "Enter a stake amount"}
               </button>
             )}
-            {picked && !busy && (
+            {picked && !busy && pickedChoice && (
               <div className="mt-1.5 text-center font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">
-                on {m.choices.find((c) => c.side === picked)!.label}
+                on {pickedChoice.label}
                 {m.hasWager ? " · adds to your wager" : ""}
               </div>
             )}

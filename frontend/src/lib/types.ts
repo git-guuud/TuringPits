@@ -104,24 +104,35 @@ export interface MarketSnapshot {
   readonly winningSide?: Side;
   /** Set when SETTLED — the full resolution, incl. DRAW/VOID refund outcomes. */
   readonly outcome?: Outcome;
-  /** Per-seat survival side markets (one per seat). Absent until the server reads them. */
+  /** Per-match categorical side markets (one PlayerFate per seat + one RoundVotedOut per opened round). Absent until the server reads them. */
   readonly props?: readonly PropSnapshot[];
 }
 
 /**
- * A per-seat survival side market. YES = "this seat survives to the end". Pools are CHIP decimal
- * strings; `outcome` is set once the match settles (YES = survived, NO = fell, VOID = nobody backed
- * the winning side → refund). Mirrors MafiaMarket.getProp() / server wire `PropSnapshot`.
+ * A per-match CATEGORICAL side market. Bettors stake on ONE of `numOutcomes` outcomes; `pools[o]` is
+ * outcome o's pool (CHIP decimal string). Once SETTLED, `state` is RESOLVED (a single `winningOutcome`
+ * won — its backers split the pot) or VOID (nobody backed the winner → every stake refunded). Kinds:
+ *   - PLAYER_FATE     : "what happens to seat `param`?" Outcomes are death-round buckets —
+ *                       0 survives, 1 out R1, 2 out R2, 3 out R3, 4 out R4+ (numOutcomes == 5).
+ *   - ROUND_VOTED_OUT : "who is voted out in round `param`'s day vote?" Outcomes 0..n-1 are the seats,
+ *                       the last (numOutcomes-1) is "no one (tie / no elimination)" — a recurring
+ *                       per-round market, one per round, floated as the match advances.
+ * Mirrors MafiaMarket.getProp() / server wire `PropSnapshot`.
  */
 export interface PropSnapshot {
   readonly index: number;
-  readonly kind: "SURVIVAL";
-  readonly seat: number;
-  readonly yesPool: string;
-  readonly noPool: string;
-  /** True once the host froze this seat's market on-chain (the seat fell) — no more bets accepted. */
+  readonly kind: "PLAYER_FATE" | "ROUND_VOTED_OUT";
+  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT: the 1-based day-vote round. */
+  readonly param: number;
+  readonly numOutcomes: number;
+  /** Per-outcome pools (CHIP decimal strings), length == numOutcomes. */
+  readonly pools: readonly string[];
+  /** True once the host froze this market on-chain (its outcome became public) — no more bets accepted. */
   readonly closed?: boolean;
-  readonly outcome?: Outcome;
+  /** Set once SETTLED: RESOLVED (winningOutcome won) or VOID (refund all). Absent while unresolved. */
+  readonly state?: "RESOLVED" | "VOID";
+  /** The winning outcome index, set when state == RESOLVED. */
+  readonly winningOutcome?: number;
 }
 
 /** The commitment metadata shown in THE RECORD (from openMarket args / getters). */

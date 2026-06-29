@@ -19,11 +19,14 @@ import {
 
 export type ReclaimKind = "win" | "return" | "refund" | "enable";
 
-/** A reclaimable survival side pot the viewer holds on a past battle. */
+/** A reclaimable side pot (PlayerFate or RoundVotedOut) the viewer holds on a past battle. */
 export interface PropReclaim {
   index: number;
-  seat: number;
-  /** survival markets never need `enable` — they settle/refund with the parent match. */
+  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT: the 1-based day-vote round (for the label). */
+  param: number;
+  /** Which side market this pot is — drives the History label ("seat N · fate" vs "round R vote"). */
+  market: "PLAYER_FATE" | "ROUND_VOTED_OUT";
+  /** side markets never need `enable` — they settle/refund with the parent match. */
   kind: "win" | "return" | "refund";
   amount: string;
 }
@@ -37,7 +40,7 @@ export interface HistoryRow {
     claimed: boolean;
     /** Set when there's still something to collect on the faction market; `enable` flips to RefundMode first. */
     reclaim?: { kind: ReclaimKind; amount: string };
-    /** Reclaimable survival side pots (per seat). Empty/absent when none are outstanding. */
+    /** Reclaimable side pots (player-fate + per-round voted-out). Empty/absent when none are outstanding. */
     props?: PropReclaim[];
   };
 }
@@ -142,32 +145,30 @@ function reclaimOf(
 }
 
 /**
- * Outstanding survival side pots for the viewer on a terminal match. A SETTLED prop pays the winning
- * side pro-rata (Yes=survived, No=fell), returns the stake on Void, and a REFUND match returns the
- * stake in full. Already-claimed or losing positions are omitted.
+ * Outstanding categorical side pots for the viewer on a terminal match. A SETTLED prop pays the winning
+ * outcome's backers pro-rata, returns the stake on Void, and a REFUND match returns the stake in full.
+ * Already-claimed or losing positions are omitted.
  */
 function propReclaimsOf(positions: PropPosition[], state: MatchSummary["state"]): PropReclaim[] {
   const out: PropReclaim[] = [];
   for (const p of positions) {
     if (p.claimed) continue;
-    const yes = parseFloat(p.stakeYes);
-    const no = parseFloat(p.stakeNo);
-    const stake = yes + no;
-    if (stake <= 0) continue;
+    const total = p.stakes.reduce((s, v) => s + parseFloat(v), 0);
+    if (total <= 0) continue;
 
     if (state === "REFUND") {
-      out.push({ index: p.index, seat: p.seat, kind: "refund", amount: stake.toFixed(4) });
+      out.push({ index: p.index, param: p.param, market: p.kind, kind: "refund", amount: total.toFixed(4) });
       continue;
     }
     // SETTLED
-    if (p.outcome === "YES" || p.outcome === "NO") {
-      const win = p.outcome === "YES" ? yes : no;
-      if (win <= 0) continue; // backed the wrong side — nothing to collect
+    if (p.state === "RESOLVED") {
+      const win = p.winningOutcome != null ? parseFloat(p.stakes[p.winningOutcome] ?? "0") : 0;
+      if (win <= 0) continue; // backed a losing outcome — nothing to collect
       const wp = parseFloat(p.winningPool);
       const np = parseFloat(p.netPot);
-      out.push({ index: p.index, seat: p.seat, kind: "win", amount: (wp > 0 ? (np * win) / wp : 0).toFixed(4) });
-    } else if (p.outcome === "VOID") {
-      out.push({ index: p.index, seat: p.seat, kind: "return", amount: stake.toFixed(4) });
+      out.push({ index: p.index, param: p.param, market: p.kind, kind: "win", amount: (wp > 0 ? (np * win) / wp : 0).toFixed(4) });
+    } else if (p.state === "VOID") {
+      out.push({ index: p.index, param: p.param, market: p.kind, kind: "return", amount: total.toFixed(4) });
     }
   }
   return out;

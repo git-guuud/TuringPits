@@ -24,9 +24,23 @@ interface IERC20 {
 contract MafiaMarket {
     enum MatchState { None, Created, Locked, Settled, RefundMode }
     enum Outcome { Unset, Yes, No, Draw, Void }
-    /// @dev Side-market ("prop") variety. Only Survival ships now; the enum leaves room for
-    ///      round-of-death / voted-out-next to slot in later with no storage migration.
-    enum PropKind { Survival }
+    /// @dev Side-market ("prop") variety — CATEGORICAL (multi-outcome) parimutuel markets, all resolved
+    ///      from the SAME verified run as the faction market:
+    ///      - PlayerFate    — "what happens to seat N?" Bucketed by death round: outcome 0 = survives,
+    ///        outcome k = out in round k (1..FATE_BUCKETS-2), and the last bucket (FATE_BUCKETS-1)
+    ///        catches death in round >= FATE_BUCKETS-1 ("out in round 4+"). Subsumes the old Survival +
+    ///        RoundOfDeath YES/NO markets. FATE_BUCKETS outcomes.
+    ///      - RoundVotedOut — "who is voted out in round R's day vote?" A RECURRING per-round market:
+    ///        one market (Prop.param == R) is created up front for round 1 and the host opens a fresh
+    ///        one per later round via openVotedOutRound() as the match advances. Outcomes: one per seat
+    ///        (0..playerCount-1) plus a final "no one (tie / no elimination)" outcome — playerCount + 1
+    ///        in total. Each market settles against THAT round's day-vote elimination.
+    ///      The enum can grow further with no storage migration.
+    enum PropKind { PlayerFate, RoundVotedOut }
+    /// @dev A categorical prop's resolution state. Props don't use the YES/NO `Outcome`: at settle a
+    ///      single `winningOutcome` is chosen (Resolved), or the market Voids when nobody backed the
+    ///      winning outcome → every stake is refunded. Never Draw.
+    enum PropState { Unset, Resolved, Void }
 
     struct Move {
         Decision decision;
@@ -79,18 +93,21 @@ contract MafiaMarket {
         uint16 feeBpsDraw;
     }
 
-    /// @notice A per-match side market resolved from the SAME TEE-verified MafiaRules run as the
-    ///         faction-win market — no new trust assumption. Survival: YES = "seat `param` is still
-    ///         alive when the transcript ends". Parimutuel, exactly like the main YES/NO market.
+    /// @notice A per-match CATEGORICAL side market resolved from the SAME TEE-verified MafiaRules run as
+    ///         the faction-win market — no new trust assumption. Bettors stake on ONE of `numOutcomes`
+    ///         outcomes; at settle exactly one outcome wins (or the market Voids) and its backers split
+    ///         the net pot pro-rata. PlayerFate: outcomes are death-round buckets of seat `param`.
+    ///         RoundVotedOut: outcomes are the seats + a "no one" outcome for round `param`'s day vote.
     struct Prop {
         PropKind kind;
-        uint8 param;        // Survival: the seat this market is about (index == seat)
-        bool closed;        // betting frozen mid-match (e.g. the seat fell); see closeProp(). Payout-neutral.
-        uint128 poolYes;    // YES backers ("survives")
-        uint128 poolNo;     // NO backers ("falls")
-        Outcome outcome;    // Unset until settle; Yes/No/Void (Survival never Draws)
-        uint128 netPot;
-        uint128 winningPool;
+        uint8 param;          // PlayerFate: the seat. RoundVotedOut: the 1-based day-vote round.
+        uint8 numOutcomes;    // PlayerFate: FATE_BUCKETS. RoundVotedOut: playerCount + 1.
+        bool closed;          // betting frozen mid-match (the outcome became public); see closeProp(). Payout-neutral.
+        PropState state;      // Unset until settle; Resolved (winningOutcome valid) or Void (refund all).
+        uint8 winningOutcome; // the outcome that won — valid iff state == Resolved.
+        uint128 netPot;       // gross pot (Σ pools) minus fee; split among winningOutcome backers pro-rata.
+        uint128 winningPool;  // pools[winningOutcome] — the denominator of the pro-rata split.
+        uint128[] pools;      // stake per outcome, length == numOutcomes.
     }
 
     uint256 public constant MIN_BET = 0.01 ether;
@@ -99,6 +116,10 @@ contract MafiaMarket {
     uint64 public constant LOCK_BUFFER = 5;
     uint64 public constant MIN_MATCH_DURATION = 25;
     uint16 public constant MAX_FEE_BPS = 500;
+    /// @notice Number of outcome buckets in a PlayerFate market: outcome 0 = survives, then one bucket
+    ///         per death round 1..FATE_BUCKETS-2, and the last bucket (FATE_BUCKETS-1) catches death in
+    ///         round >= FATE_BUCKETS-1 ("out in round 4+"). Fixed; the resolver caps deathRound to it.
+    uint8 public constant FATE_BUCKETS = 5;
 
     address public owner;
     address public protocolTreasury;
@@ -116,16 +137,23 @@ contract MafiaMarket {
     // Per-match side markets ("props"), e.g. one Survival market per seat. Created alongside the
     // match and settled from the same verified run; keyed matchId => propIdx => user.
     mapping(uint256 => Prop[]) internal _props;
-    mapping(uint256 => mapping(uint256 => mapping(address => uint128))) public propStakeYes;
-    mapping(uint256 => mapping(uint256 => mapping(address => uint128))) public propStakeNo;
+    /// @notice Per-outcome stake: matchId => propIdx => outcome => user => amount. (Replaces the old
+    ///         YES/NO stake pair — a categorical market has one pool/stake per outcome.)
+    mapping(uint256 => mapping(uint256 => mapping(uint8 => mapping(address => uint128)))) public propStake;
     mapping(uint256 => mapping(uint256 => mapping(address => bool))) public propClaimed;
+    /// @notice Highest "voted out" round that has a band of props on this match. createMatch opens
+    ///         round 1 (so this starts at 1 once a match exists); openVotedOutRound bumps it as the
+    ///         match advances. The per-round VotedOut market re-opens by appending the next band.
+    mapping(uint256 => uint8) public votedOutRoundsOpened;
 
     event MatchCreated(
         uint256 indexed matchId, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot,
         address teeSigner, uint8 playerCount,
         uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock
     );
-    /// @notice One Survival side market per seat is auto-created with the match; `count` == playerCount.
+    /// @notice Side markets auto-created with the match: one PlayerFate market per seat plus the round-1
+    ///         RoundVotedOut market, so `count` == playerCount + 1 at creation. Later RoundVotedOut
+    ///         rounds are appended on demand (see openVotedOutRound / VotedOutRoundOpened).
     event PropsCreated(uint256 indexed matchId, uint256 count);
 
     modifier onlyOwner() { require(msg.sender == owner, "not owner"); _; }
@@ -184,16 +212,42 @@ contract MafiaMarket {
             p.bettingOpenBlock, p.bettingCloseBlock, p.matchStartBlock, p.settlementDeadlineBlock
         );
 
-        // Auto-create one Survival side market per seat (propIdx == seat == param). Each resolves
-        // from the same verified run at settle(), so propCount(matchId) == playerCount.
+        // Auto-create the side markets, all resolved from the same verified run at settle():
+        //   props[0 .. n-1]  PlayerFate,    one per seat (propIdx == seat == param; FATE_BUCKETS outcomes)
+        //   props[n]         RoundVotedOut, round 1 (param == 1; playerCount + 1 outcomes)
+        // so propCount(matchId) == playerCount + 1 at creation. RoundVotedOut is the LAST market so the
+        // recurring per-round markets openVotedOutRound() appends stay contiguous after it:
+        //   voIdx(round) == n + (round - 1).
+        // Markets are seat/round-ordered, so the server/UI maps propIdx ⇄ (kind, param) by reading each
+        // Prop's fields without extra index math.
         Prop[] storage props = _props[matchId];
         for (uint8 seat = 0; seat < p.playerCount; seat++) {
-            props.push(Prop({
-                kind: PropKind.Survival, param: seat, closed: false,
-                poolYes: 0, poolNo: 0, outcome: Outcome.Unset, netPot: 0, winningPool: 0
-            }));
+            props.push(_newProp(PropKind.PlayerFate, seat, FATE_BUCKETS));
         }
-        emit PropsCreated(matchId, p.playerCount);
+        props.push(_newProp(PropKind.RoundVotedOut, 1, p.playerCount + 1));
+        votedOutRoundsOpened[matchId] = 1; // round-1 "voted out" market created up front
+        emit PropsCreated(matchId, props.length);
+    }
+
+    /// @dev Construct a fresh, empty categorical prop with a zero-initialized per-outcome pool array.
+    function _newProp(PropKind kind, uint8 param, uint8 numOutcomes) private pure returns (Prop memory) {
+        return Prop({
+            kind: kind, param: param, numOutcomes: numOutcomes, closed: false,
+            state: PropState.Unset, winningOutcome: 0, netPot: 0, winningPool: 0,
+            pools: new uint128[](numOutcomes)
+        });
+    }
+
+    /// @dev Sum of every outcome's pool — the gross pot of a categorical prop.
+    function _poolSum(uint128[] storage pools) private view returns (uint128 sum) {
+        for (uint256 o = 0; o < pools.length; o++) sum += pools[o];
+    }
+
+    /// @dev A user's total stake across every outcome of a prop — the refund base on a Void/abandoned prop.
+    function _userPropTotal(uint256 matchId, uint256 propIdx, address user, uint8 numOutcomes)
+        private view returns (uint256 s)
+    {
+        for (uint8 o = 0; o < numOutcomes; o++) s += propStake[matchId][propIdx][o][user];
     }
 
     /// @dev The match nonce is embedded (JSON-string-escaped) inside every signed body and
@@ -244,15 +298,14 @@ contract MafiaMarket {
 
     event PropBetPlaced(
         uint256 indexed matchId, uint256 indexed propIdx, address indexed user,
-        bool isYes, uint128 amount, uint128 newPoolYes, uint128 newPoolNo
+        uint8 outcome, uint128 amount, uint128 newPool
     );
 
-    // Wager on a side market (e.g. "does seat N survive?"). Same CHIP approve+transferFrom flow and
-    // open window as the main market. `propIdx` indexes the match's props (Survival: propIdx == seat).
-    function betPropYes(uint256 matchId, uint256 propIdx, uint128 amount) external { _betProp(matchId, propIdx, true, amount); }
-    function betPropNo(uint256 matchId, uint256 propIdx, uint128 amount) external { _betProp(matchId, propIdx, false, amount); }
-
-    function _betProp(uint256 matchId, uint256 propIdx, bool isYes, uint128 amount) private {
+    /// @notice Wager on a categorical side market by staking on one `outcome` (e.g. PlayerFate: outcome
+    ///         2 = "out in round 2"; RoundVotedOut: outcome == a seat, or the last outcome = "no one").
+    ///         Same CHIP approve+transferFrom flow and open window as the faction market. `propIdx`
+    ///         indexes the match's props (PlayerFate: propIdx == seat); `outcome` must be < numOutcomes.
+    function betProp(uint256 matchId, uint256 propIdx, uint8 outcome, uint128 amount) external {
         Match storage m = matches[matchId];
         // Identical window to the faction-win market: open from bettingOpenBlock until the match
         // leaves Created (settle/lock) and only while the settlement deadline hasn't lapsed.
@@ -262,19 +315,15 @@ contract MafiaMarket {
         require(amount >= MIN_BET, "below min bet");
         require(amount <= MAX_BET_PER_TX, "above max bet");
         Prop storage pr = _props[matchId][propIdx]; // reverts on out-of-range propIdx
-        // Once a seat's survival is publicly decided (it fell), the host closes its market so nobody
-        // can pile onto the already-won NO side for a riskless profit. Closing is payout-neutral
-        // (see closeProp), so this is the on-chain enforcement of "no betting a corpse".
+        // Once a market's outcome is publicly decided (the seat fell / the round's vote is in), the host
+        // closes it so nobody can pile onto an already-won outcome for a riskless profit. Closing is
+        // payout-neutral (see closeProp), so this is the on-chain enforcement of "no betting a decided market".
         require(!pr.closed, "prop closed");
+        require(outcome < pr.numOutcomes, "bad outcome");
         require(betToken.transferFrom(msg.sender, address(this), amount), "token transfer failed");
-        if (isYes) {
-            pr.poolYes += amount;
-            propStakeYes[matchId][propIdx][msg.sender] += amount;
-        } else {
-            pr.poolNo += amount;
-            propStakeNo[matchId][propIdx][msg.sender] += amount;
-        }
-        emit PropBetPlaced(matchId, propIdx, msg.sender, isYes, amount, pr.poolYes, pr.poolNo);
+        pr.pools[outcome] += amount;
+        propStake[matchId][propIdx][outcome][msg.sender] += amount;
+        emit PropBetPlaced(matchId, propIdx, msg.sender, outcome, amount, pr.pools[outcome]);
     }
 
     event PropClosed(uint256 indexed matchId, uint256 indexed propIdx);
@@ -293,6 +342,31 @@ contract MafiaMarket {
         if (pr.closed) return; // re-closing is a no-op
         pr.closed = true;
         emit PropClosed(matchId, propIdx);
+    }
+
+    event VotedOutRoundOpened(uint256 indexed matchId, uint8 round, uint256 startIdx);
+
+    /// @notice Open the NEXT round's "voted out" market — one RoundVotedOut prop (playerCount + 1
+    ///         outcomes), tagged with the new round. This is how the per-round market re-opens: as the
+    ///         match advances past each day vote, the host calls this to float a fresh market for the
+    ///         upcoming vote. onlyOwner and only while betting is open (state == Created). Sequential by
+    ///         construction — it always opens `votedOutRoundsOpened + 1` (createMatch seeds round 1), so
+    ///         the markets stay contiguous after the round-1 market at propIdx n + (round - 1).
+    /// @dev    Adds NO settlement trust: the new market still resolves from the SAME TEE-verified run at
+    ///         settle() (`g.votedOutRound[seat] == round`). It only creates the wagering surface.
+    /// @return round   the round the new market targets (1-based).
+    /// @return startIdx the propIdx of the new market.
+    function openVotedOutRound(uint256 matchId) external onlyOwner returns (uint8 round, uint256 startIdx) {
+        Match storage m = matches[matchId];
+        require(m.state == MatchState.Created, "not open");
+        uint8 prev = votedOutRoundsOpened[matchId];
+        require(prev > 0, "no match"); // createMatch sets it to 1; 0 means the match doesn't exist
+        round = prev + 1;
+        Prop[] storage props = _props[matchId];
+        startIdx = props.length;
+        props.push(_newProp(PropKind.RoundVotedOut, round, m.playerCount + 1));
+        votedOutRoundsOpened[matchId] = round;
+        emit VotedOutRoundOpened(matchId, round, startIdx);
     }
 
     // Optional, owner-only manual close. Betting otherwise stays open until settle(); the host can
@@ -337,30 +411,45 @@ contract MafiaMarket {
         _settleProps(matchId, m, g);
     }
 
-    event PropSettled(uint256 indexed matchId, uint256 indexed propIdx, Outcome outcome, uint128 netPot);
+    event PropSettled(uint256 indexed matchId, uint256 indexed propIdx, PropState state, uint8 winningOutcome, uint128 netPot);
 
-    /// @dev Resolve each side market from the already-verified final game state `g`. Survival: YES
-    ///      wins iff the seat is alive when the transcript ends (`g.alive[param]`). An empty winning
-    ///      pool → Void (full refund of both sides). Winners pay the match's standard feeBps; Void is
-    ///      fee-free. Survival never Draws — a seat is unambiguously alive or dead at the end.
+    /// @dev Resolve each categorical side market from the already-verified final game state `g`.
+    ///      PlayerFate: the winning outcome is the seat's death-round bucket — 0 if it survived
+    ///      (g.deathRound == 0), else min(deathRound, FATE_BUCKETS-1) so round >= the last bucket falls
+    ///      in it. RoundVotedOut: the winning outcome is the seat eliminated by THIS market's round day
+    ///      vote (g.votedOutRound[seat] == param); if that round took no one (a tie, or the match ended
+    ///      before the vote) the last outcome ("no one") wins. votedOutRound is 1-based (0 = never
+    ///      day-voted) and param >= 1, so the equality skips un-voted seats without a sentinel check.
+    ///      An empty winning pool → Void (full refund of every outcome). Winners pay the match's standard
+    ///      feeBps; Void is fee-free. Props never Draw — each outcome is unambiguous from the verified run.
     function _settleProps(uint256 matchId, Match storage m, MafiaRules.Game memory g) private {
         Prop[] storage props = _props[matchId];
         uint16 feeBps = m.feeBps;
         for (uint256 i = 0; i < props.length; i++) {
             Prop storage pr = props[i];
-            bool yesWins;
-            if (pr.kind == PropKind.Survival) {
-                yesWins = g.alive[pr.param];
+            uint8 win;
+            if (pr.kind == PropKind.PlayerFate) {
+                uint8 dr = g.deathRound[pr.param];
+                uint8 last = FATE_BUCKETS - 1;
+                win = dr >= last ? last : dr; // 0 survives; 1..last-1 the death round; last = round >= last
+            } else {
+                // RoundVotedOut: outcomes 0..seats-1 are the seats, the last (== seats) is "no one".
+                uint8 seats = pr.numOutcomes - 1;
+                win = seats; // default "no one"; overwritten if a seat fell to this round's vote
+                for (uint8 seat = 0; seat < seats; seat++) {
+                    if (g.votedOutRound[seat] == pr.param) { win = seat; break; }
+                }
             }
-            uint128 winPool = yesWins ? pr.poolYes : pr.poolNo;
-            Outcome o = winPool == 0 ? Outcome.Void : (yesWins ? Outcome.Yes : Outcome.No);
-            uint128 gross = pr.poolYes + pr.poolNo;
-            uint128 fee = o == Outcome.Void ? 0 : uint128((uint256(gross) * feeBps) / 10000);
-            pr.outcome = o;
+            uint128 winPool = pr.pools[win];
+            uint128 gross = _poolSum(pr.pools);
+            PropState st = winPool == 0 ? PropState.Void : PropState.Resolved;
+            uint128 fee = st == PropState.Void ? 0 : uint128((uint256(gross) * feeBps) / 10000);
+            pr.state = st;
+            pr.winningOutcome = win;
             pr.winningPool = winPool;
             pr.netPot = gross - fee;
             protocolFeeAccrued += fee;
-            emit PropSettled(matchId, i, o, pr.netPot);
+            emit PropSettled(matchId, i, st, win, pr.netPot);
         }
     }
 
@@ -560,25 +649,21 @@ contract MafiaMarket {
 
     event PropClaimed(uint256 indexed matchId, uint256 indexed propIdx, address indexed user, uint256 payout);
 
-    /// @notice Claim a side-market payout from a SETTLED match. Mirrors claim(): Yes/No pay the
-    ///         winning side pro-rata of the net pot; Void returns the full stake.
+    /// @notice Claim a side-market payout from a SETTLED match. Mirrors claim(): Resolved pays the
+    ///         winning outcome's backers pro-rata of the net pot; Void returns the full stake (summed
+    ///         across every outcome the caller backed).
     function claimProp(uint256 matchId, uint256 propIdx) external {
         require(matches[matchId].state == MatchState.Settled, "not settled");
         require(!propClaimed[matchId][propIdx][msg.sender], "already claimed");
         Prop storage pr = _props[matchId][propIdx];
 
         uint256 payout;
-        Outcome o = pr.outcome;
-        if (o == Outcome.Yes) {
-            uint256 s = propStakeYes[matchId][propIdx][msg.sender];
+        if (pr.state == PropState.Resolved) {
+            uint256 s = propStake[matchId][propIdx][pr.winningOutcome][msg.sender];
             require(s > 0, "no winning stake");
             payout = (uint256(pr.netPot) * s) / pr.winningPool;
-        } else if (o == Outcome.No) {
-            uint256 s = propStakeNo[matchId][propIdx][msg.sender];
-            require(s > 0, "no winning stake");
-            payout = (uint256(pr.netPot) * s) / pr.winningPool;
-        } else if (o == Outcome.Void) {
-            uint256 s = uint256(propStakeYes[matchId][propIdx][msg.sender]) + propStakeNo[matchId][propIdx][msg.sender];
+        } else if (pr.state == PropState.Void) {
+            uint256 s = _userPropTotal(matchId, propIdx, msg.sender, pr.numOutcomes);
             require(s > 0, "no stake");
             payout = s;
         } else {
@@ -592,23 +677,26 @@ contract MafiaMarket {
 
     event PropRefunded(uint256 indexed matchId, uint256 indexed propIdx, address indexed user, uint256 payout);
 
-    /// @notice Reclaim a side-market stake when the match was abandoned (RefundMode). Mirrors refund().
+    /// @notice Reclaim a side-market stake when the match was abandoned (RefundMode). Mirrors refund() —
+    ///         returns the caller's total stake across every outcome of the prop.
     function refundProp(uint256 matchId, uint256 propIdx) external {
         require(matches[matchId].state == MatchState.RefundMode, "not refund mode");
         require(!propClaimed[matchId][propIdx][msg.sender], "already refunded");
-        uint256 s = uint256(propStakeYes[matchId][propIdx][msg.sender]) + propStakeNo[matchId][propIdx][msg.sender];
+        Prop storage pr = _props[matchId][propIdx];
+        uint256 s = _userPropTotal(matchId, propIdx, msg.sender, pr.numOutcomes);
         require(s > 0, "no stake");
         propClaimed[matchId][propIdx][msg.sender] = true;
         require(betToken.transfer(msg.sender, s), "transfer failed");
         emit PropRefunded(matchId, propIdx, msg.sender, s);
     }
 
-    /// @notice Number of side markets attached to a match (Survival: one per seat).
+    /// @notice Number of side markets attached to a match (one PlayerFate per seat + one RoundVotedOut
+    ///         per opened round — i.e. playerCount + votedOutRoundsOpened at any time).
     function propCount(uint256 matchId) external view returns (uint256) {
         return _props[matchId].length;
     }
 
-    /// @notice Read one side market's full state (kind, seat, pools, settled outcome).
+    /// @notice Read one side market's full state (kind, param, per-outcome pools, settled outcome).
     function getProp(uint256 matchId, uint256 propIdx) external view returns (Prop memory) {
         return _props[matchId][propIdx];
     }

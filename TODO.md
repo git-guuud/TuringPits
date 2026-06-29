@@ -203,8 +203,35 @@ markets keyed to the same `matchId`, settled from the same verified transcript:
       trust, no extra tx. 10 Hardhat tests (survival outcomes cross-checked vs the engine's `alive`
       set; Yes/No/Void/claim/refund). Server reads + pushes prop pools; frontend `SideBets.tsx` lists
       each seat's market in the Verdict rail. Redeployed to Galileo `0xb5bb5394270E0770F62d284eE0bf3802fAD06b41`.
-- [ ] **Round-of-death** — over/under or bucketed market on which round a given seat is eliminated.
-- [ ] **"Who is voted out next"** — short-horizon market that opens/closes around each day vote.
+- [x] **Round-of-death** — per-seat over/under on the round a seat is eliminated. Shipped (code-complete;
+      **redeploy pending** — batched with per-round "voted out" before the next Galileo deploy). `MafiaMarket`
+      auto-creates one `RoundOfDeath` prop per seat (`PropKind.RoundOfDeath`, the second upfront block right after
+      Survival: `propIdx == n + seat`, `param == seat`; VotedOut bands follow it), so `propCount == 3 * playerCount`
+      at creation. The line is fixed at the opening
+      round (`ROUND_OF_DEATH_LINE == 1`): YES = the seat is eliminated in round 1 (the night-1 kill **OR** the day-1
+      vote — strictly wider than VotedOut), NO = it lasts past round 1. `MafiaRules` records `deathRound[seat]` (the
+      1-based round each seat dies; 0 = survived) in both resolve paths, and `_settleProps` resolves each prop from it
+      (`deathRound[seat] != 0 && deathRound[seat] <= line`) inside the SAME verified `settle()` — no new trust, no extra
+      tx. betProp/claimProp/refundProp are kind-agnostic so they're reused as-is. The server reads + pushes the third
+      prop kind and freezes the RoundOfDeath markets on-chain alongside VotedOut the moment round 1 resolves
+      (short-horizon close). Frontend `Verdict.tsx` (per-kind copy) + History list/place/claim each RoundOfDeath market.
+      Tests: `MafiaMarket.roundofdeath.test.ts` (creation/betting/settlement/claim/void/close, cross-checked vs the
+      engine's per-seat death round) + a `MafiaRules` unit test; full Hardhat suite **79 green**.
+- [x] **"Voted out" — recurring per-round market** (was: a one-shot first-vote bet; generalized to re-open
+      for EVERY day vote). Shipped (code-complete; **redeploy pending** before the next Galileo deploy).
+      `Prop.round` tags the day-vote round a band targets; round 1 is auto-created up front (`PropKind.VotedOut`,
+      last upfront block: `propIdx == 2n + seat`, `param == seat`, `round == 1`), and the host floats later
+      rounds via the new `openVotedOutRound(matchId)` (onlyOwner) as the match advances, appending an n-seat band
+      contiguously at `voIdx(round, seat) == (round+1)*n + seat`. `votedOutRoundsOpened[matchId]` tracks the
+      highest opened round (createMatch seeds 1) — so `propCount` GROWS during the match. `MafiaRules.Game`
+      records `votedOutRound[seat]` (1-based day-vote round that eliminated it, 0 = never; replaced the old
+      `firstVoteElim`/`firstVoteSeat`); `_settleProps` resolves each band by `g.votedOutRound[param] == pr.round`
+      inside the SAME verified `settle()` — no new trust, no extra settlement tx. betProp/claimProp/refundProp/
+      closeProp are kind/idx-agnostic so they're reused as-is. The server's `syncVotedOutMarkets` opens each
+      round's band as the match reaches it and freezes a band once its vote resolves; the live `Verdict.tsx`
+      shows only the ACTIVE band (resolved rounds drop to History, which lists/claims every band per round).
+      Tests: `MafiaMarket.votedout.test.ts` (creation/`openVotedOutRound`/per-round settlement at n=6/claim/void/
+      close) + a multi-round `MafiaRules.votedOutRounds()` cross-check; full Hardhat suite **81 green**.
 - Each needs: a market-type tag in `MafiaMarket`, a settle path that derives the outcome from the
   already-verified `MafiaRules` run (no new trust assumptions), and UI to list/place/claim them.
 

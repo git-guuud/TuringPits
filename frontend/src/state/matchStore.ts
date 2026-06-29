@@ -93,7 +93,7 @@ export interface ViewState {
   feeBpsDraw: number | null;
   wallet: WalletState;
   stakes: MyStakes;
-  /** The connected wallet's own stake + claimed flag on each survival side market (by propIdx). */
+  /** The connected wallet's own stake + claimed flag on each side market (survival + voted-out, by propIdx). */
   propStakes: MyPropStake[];
   tx: TxState;
 
@@ -347,11 +347,11 @@ export interface MatchApi {
   state: ViewState;
   connect: () => Promise<void>;
   placeBet: (side: Side, amount: string) => Promise<void>;
-  /** Wager on a per-seat survival side market (propIdx == seat). */
-  placePropBet: (propIdx: number, side: Side, amount: string) => Promise<void>;
-  /** Claim a SETTLED survival side-market payout/return. Defaults to the live match; pass a matchId for a prior round. */
+  /** Wager on a categorical side market by staking on one `outcome`, identified by propIdx. */
+  placePropBet: (propIdx: number, outcome: number, amount: string) => Promise<void>;
+  /** Claim a SETTLED side-market payout/return. Defaults to the live match; pass a matchId for a prior round. */
   claimProp: (propIdx: number, matchId?: number) => Promise<void>;
-  /** Reclaim a survival side-market stake from a RefundMode match. Defaults to the live match; pass a matchId for a prior round. */
+  /** Reclaim a side-market stake from a RefundMode match. Defaults to the live match; pass a matchId for a prior round. */
   refundProp: (propIdx: number, matchId?: number) => Promise<void>;
   /** Mint free test CHIP to the connected wallet (the demo faucet), then refresh the balance. */
   getTestTokens: () => Promise<void>;
@@ -378,10 +378,12 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
   addrRef.current = state.marketAddress ?? MARKET_ADDRESS;
   const matchIdRef = useRef<number | null>(null);
   matchIdRef.current = state.matchId;
-  // Number of survival side markets == seat count. Prefer the pushed props length; fall back to the
-  // persona roster (set at match_init) so prop-stake reads work before the first market push lands.
+  // Number of side markets. It GROWS during the match as each round's "voted out" market opens, so prefer
+  // the pushed props length (the live count). Fall back to the persona roster + 1 — the at-creation count
+  // (one PlayerFate per seat + the round-1 RoundVotedOut market) — so prop-stake reads cover the upfront
+  // markets before the first market push lands.
   const propCountRef = useRef(0);
-  propCountRef.current = state.market.props?.length ?? state.personas.length;
+  propCountRef.current = state.market.props?.length ?? state.personas.length + 1;
 
   const refreshStakes = useCallback(async () => {
     if (!walletRef.current || !addrRef.current || matchIdRef.current == null) return;
@@ -506,9 +508,9 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
     [connect, refreshStakes, refreshBalance],
   );
 
-  // Wager on a per-seat survival side market (propIdx == seat). Mirrors placeBet.
+  // Wager on a categorical side market by staking on one `outcome` (propIdx identifies the market). Mirrors placeBet.
   const placePropBet = useCallback(
-    async (propIdx: number, side: Side, amount: string) => {
+    async (propIdx: number, outcome: number, amount: string) => {
       if (!walletRef.current) {
         await connect();
         if (!walletRef.current) return;
@@ -521,7 +523,7 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
       }
       dispatch({ kind: "tx", tx: { pending: true } });
       try {
-        const hash = await placePropBetTx(address, matchId, propIdx, walletRef.current, side, amount);
+        const hash = await placePropBetTx(address, matchId, propIdx, walletRef.current, outcome, amount);
         dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
         await Promise.all([refreshPropStakes(), refreshBalance()]);
       } catch (e) {

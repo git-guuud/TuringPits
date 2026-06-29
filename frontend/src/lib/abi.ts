@@ -28,16 +28,16 @@ export const MAFIA_MARKET_ABI = [
   "function stakeYes(uint256 matchId, address user) view returns (uint128)",
   "function stakeNo(uint256 matchId, address user) view returns (uint128)",
   "function claimed(uint256 matchId, address user) view returns (bool)",
-  // survival side markets ("props"): one Survival market per seat (propIdx == seat), auto-created
-  // with the match and resolved from the same verified run at settle(). YES = "seat survives".
-  "function betPropYes(uint256 matchId, uint256 propIdx, uint128 amount)",
-  "function betPropNo(uint256 matchId, uint256 propIdx, uint128 amount)",
+  // categorical side markets ("props"): PlayerFate (propIdx == seat) + the per-round RoundVotedOut
+  // markets, resolved from the same verified run at settle(). The wallet bets on ONE outcome and
+  // claims by propIdx (the kind/param/winner are read off getProp); the server is the only caller of
+  // openVotedOutRound.
+  "function betProp(uint256 matchId, uint256 propIdx, uint8 outcome, uint128 amount)",
   "function claimProp(uint256 matchId, uint256 propIdx)",
   "function refundProp(uint256 matchId, uint256 propIdx)",
   "function propCount(uint256 matchId) view returns (uint256)",
-  "function getProp(uint256 matchId, uint256 propIdx) view returns (tuple(uint8 kind, uint8 param, bool closed, uint128 poolYes, uint128 poolNo, uint8 outcome, uint128 netPot, uint128 winningPool))",
-  "function propStakeYes(uint256 matchId, uint256 propIdx, address user) view returns (uint128)",
-  "function propStakeNo(uint256 matchId, uint256 propIdx, address user) view returns (uint128)",
+  "function getProp(uint256 matchId, uint256 propIdx) view returns (tuple(uint8 kind, uint8 param, uint8 numOutcomes, bool closed, uint8 state, uint8 winningOutcome, uint128 netPot, uint128 winningPool, uint128[] pools))",
+  "function propStake(uint256 matchId, uint256 propIdx, uint8 outcome, address user) view returns (uint128)",
   "function propClaimed(uint256 matchId, uint256 propIdx, address user) view returns (bool)",
   "function MIN_BET() view returns (uint256)",
   // total matches ever created — the History screen walks [0, nextMatchId) to list past battles.
