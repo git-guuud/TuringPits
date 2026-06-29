@@ -21,10 +21,11 @@ describe("MafiaMarket factory — createMatch", () => {
   it("constructor reverts on zero treasury / zero token", async () => {
     const [owner] = await ethers.getSigners();
     const Token = await ethers.getContractFactory("MockBetToken");
-    const token = await Token.connect(owner).deploy();
+    const token = await Token.connect(owner).deploy(ethers.ZeroAddress); // no forwarder needed for this check
     const Market = await ethers.getContractFactory("MafiaMarket");
-    await expect(Market.connect(owner).deploy(ethers.ZeroAddress, await token.getAddress())).to.be.revertedWith("zero treasury");
-    await expect(Market.connect(owner).deploy(owner.address, ethers.ZeroAddress)).to.be.revertedWith("zero token");
+    const fwd = ethers.ZeroAddress;
+    await expect(Market.connect(owner).deploy(ethers.ZeroAddress, await token.getAddress(), fwd)).to.be.revertedWith("zero treasury");
+    await expect(Market.connect(owner).deploy(owner.address, ethers.ZeroAddress, fwd)).to.be.revertedWith("zero token");
   });
 
   it("creates a match, stores fields, emits MatchCreated, increments id", async () => {

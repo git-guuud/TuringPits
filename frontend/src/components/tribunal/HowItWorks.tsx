@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { useRoute } from "../../lib/useRoute.js";
+import { useMediaQuery } from "../../lib/useMediaQuery.js";
 
 const SEEN_KEY = "turingpits.howitworks.seen";
 
@@ -10,6 +12,10 @@ const SEEN_KEY = "turingpits.howitworks.seen";
  */
 export function HowItWorks() {
   const [open, setOpen] = useState(false);
+  // On the narrow live arena the bottom bet dock owns the lower edge — lift the primer clear of it.
+  const route = useRoute();
+  const wide = useMediaQuery("(min-width: 1024px)");
+  const lifted = route === "live" && !wide;
 
   // Auto-open on the first visit only.
   useEffect(() => {
@@ -35,7 +41,9 @@ export function HowItWorks() {
         type="button"
         aria-label="How it works"
         onClick={() => setOpen(true)}
-        className="fixed bottom-4 right-4 z-40 flex h-9 w-9 items-center justify-center rounded-full border border-line-2 bg-ink-2 font-display text-[16px] text-gilt transition-colors hover:border-gilt hover:text-cream"
+        className={`fixed ${
+          lifted ? "bottom-[88px]" : "bottom-4"
+        } right-4 z-40 flex h-9 w-9 items-center justify-center rounded-full border border-line-2 bg-ink-2 font-display text-[16px] text-gilt transition-colors hover:border-gilt hover:text-cream`}
       >
         ?
       </button>

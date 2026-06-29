@@ -34,6 +34,7 @@ import {
   readMyStakes,
   refundPropStake,
   refundStake,
+  relayInfo,
 } from "../lib/contract.js";
 import type { MyPropStake, Wallet } from "../lib/contract.js";
 import type {
@@ -92,6 +93,15 @@ export interface ViewState {
   /** Draw-outcome fee (basis points), from the settled message — for the refund estimate. */
   feeBpsDraw: number | null;
   wallet: WalletState;
+  /**
+   * Optional gas-relayer state (the "gasless" path). `null` until checked / when no relayer is
+   * configured. `enabled` = the server runs a relayer; `funded` = its wallet still has 0G to sponsor
+   * txs. When a relayer is live and funded, wallet actions default to gasless (the user signs, the
+   * relayer pays) unless the user opts out — see `gaslessPref` / the derived `gasless` in the API.
+   */
+  relay: { enabled: boolean; funded: boolean } | null;
+  /** User preference: "auto" = gasless whenever the relayer can sponsor; "off" = always pay own gas. */
+  gaslessPref: "auto" | "off";
   stakes: MyStakes;
   /** The connected wallet's own stake + claimed flag on each side market (survival + voted-out, by propIdx). */
   propStakes: MyPropStake[];
@@ -154,6 +164,8 @@ const baseState: ViewState = {
   settleTxHash: null,
   feeBpsDraw: null,
   wallet: { account: null, status: "idle" },
+  relay: null,
+  gaslessPref: "auto",
   stakes: { yes: "0", no: "0", claimed: false },
   propStakes: [],
   tx: { pending: false },
@@ -184,6 +196,8 @@ type Action =
   | { kind: "wallet"; wallet: WalletState }
   | { kind: "stakes"; stakes: MyStakes }
   | { kind: "propStakes"; propStakes: MyPropStake[] }
+  | { kind: "relay"; relay: { enabled: boolean; funded: boolean } | null }
+  | { kind: "gaslessPref"; pref: "auto" | "off" }
   | { kind: "tx"; tx: TxState };
 
 /** All-alive seats from the persona roster (the state before any beat). */
@@ -256,12 +270,14 @@ function reduce(state: ViewState, action: Action): ViewState {
   if (action.kind === "wallet") return { ...state, wallet: action.wallet };
   if (action.kind === "stakes") return { ...state, stakes: action.stakes };
   if (action.kind === "propStakes") return { ...state, propStakes: action.propStakes };
+  if (action.kind === "relay") return { ...state, relay: action.relay };
+  if (action.kind === "gaslessPref") return { ...state, gaslessPref: action.pref };
   if (action.kind === "tx") return { ...state, tx: action.tx };
   if (action.kind === "connection") return { ...state, connection: action.status };
 
   // Leaving and re-entering the live screen tears down the feed; reset to a clean slate (keeping the
-  // wallet connection) so a returning viewer doesn't see the previous match until the next match_init.
-  if (action.kind === "reset") return project({ ...baseState, wallet: state.wallet });
+  // wallet connection + relay/gasless preference) so a returning viewer doesn't see the previous match.
+  if (action.kind === "reset") return project({ ...baseState, wallet: state.wallet, relay: state.relay, gaslessPref: state.gaslessPref });
 
   if (action.kind === "advance") {
     if (state.cursor < state.beats.length - 1) return project({ ...state, cursor: state.cursor + 1 });
@@ -283,8 +299,10 @@ function reduce(state: ViewState, action: Action): ViewState {
     case "match_init":
       return project({
         ...baseState,
-        // preserve a live wallet connection across a new match
+        // preserve a live wallet connection + gasless preference across a new match
         wallet: state.wallet,
+        relay: state.relay,
+        gaslessPref: state.gaslessPref,
         isMock: msg.isMock,
         nonce: msg.nonce,
         personas: msg.personas,
@@ -345,6 +363,8 @@ function reduce(state: ViewState, action: Action): ViewState {
 
 export interface MatchApi {
   state: ViewState;
+  /** True when wallet actions currently route through the gas relayer (user signs, relayer pays gas). */
+  gasless: boolean;
   connect: () => Promise<void>;
   placeBet: (side: Side, amount: string) => Promise<void>;
   /** Wager on a categorical side market by staking on one `outcome`, identified by propIdx. */
@@ -361,6 +381,8 @@ export interface MatchApi {
   refund: (matchId?: number) => Promise<void>;
   /** Flip an abandoned, past-deadline match into RefundMode so its stake becomes refundable. */
   enterRefund: (matchId: number) => Promise<void>;
+  /** Opt the gasless path on/off ("off" = always pay your own gas). No-op when no relayer is live. */
+  setGasless: (on: boolean) => void;
   /** Advance the playback cursor to the next beat (called by the Court once a beat finishes). */
   advance: () => void;
   /** Jump the playback cursor to the newest received beat — skips the replay/catch-up to "now". */
@@ -384,6 +406,15 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
   // markets before the first market push lands.
   const propCountRef = useRef(0);
   propCountRef.current = state.market.props?.length ?? state.personas.length + 1;
+
+  // Gasless is the DEFAULT whenever the server's relayer is live AND still funded — the user signs
+  // and the relayer pays. We never gate this on the USER's own 0G balance (a fresh wallet with zero
+  // 0G is exactly who this is for); we fall back to the direct path only when the relayer is
+  // absent/broke, or when the user has explicitly opted out (gaslessPref === "off"). The write
+  // callbacks read `gaslessRef` so they don't need to re-subscribe when it flips.
+  const gasless = !!(state.relay?.enabled && state.relay?.funded && state.gaslessPref !== "off");
+  const gaslessRef = useRef(gasless);
+  gaslessRef.current = gasless;
 
   const refreshStakes = useCallback(async () => {
     if (!walletRef.current || !addrRef.current || matchIdRef.current == null) return;
@@ -412,6 +443,17 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
       dispatch({ kind: "wallet", wallet: { account: walletRef.current.account, status: "connected", balance } });
     } catch {
       /* balance is display-only; ignore read failures */
+    }
+  }, []);
+
+  // Re-poll the relayer's status (enabled + still funded). `force` re-fetches /relay/info (used after
+  // each wager so `funded` flips off promptly once the relayer drains); the initial mount check is cached.
+  const refreshRelay = useCallback(async (force = false) => {
+    try {
+      const info = await relayInfo(force);
+      dispatch({ kind: "relay", relay: info ? { enabled: info.enabled, funded: info.funded } : null });
+    } catch {
+      /* the relayer is optional; a failed probe just leaves the direct path */
     }
   }, []);
 
@@ -472,17 +514,22 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
     };
   }, [state.market.state, state.marketAddress, state.matchId, refreshStakes, refreshPropStakes]);
 
+  // Probe the relayer once on mount so the gasless affordance reflects reality before the user connects.
+  useEffect(() => {
+    void refreshRelay();
+  }, [refreshRelay]);
+
   const connect = useCallback(async () => {
     dispatch({ kind: "wallet", wallet: { account: null, status: "connecting" } });
     try {
       const w = await connectWallet();
       walletRef.current = w;
       dispatch({ kind: "wallet", wallet: { account: w.account, status: "connected" } });
-      await Promise.all([refreshStakes(), refreshPropStakes(), refreshBalance()]);
+      await Promise.all([refreshStakes(), refreshPropStakes(), refreshBalance(), refreshRelay(true)]);
     } catch (e) {
       dispatch({ kind: "wallet", wallet: { account: null, status: "error", error: humanizeTxError(e) } });
     }
-  }, [refreshStakes, refreshPropStakes, refreshBalance]);
+  }, [refreshStakes, refreshPropStakes, refreshBalance, refreshRelay]);
 
   const placeBet = useCallback(
     async (side: Side, amount: string) => {
@@ -498,14 +545,14 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
       }
       dispatch({ kind: "tx", tx: { pending: true } });
       try {
-        const hash = await placeBetTx(address, matchId, walletRef.current, side, amount);
+        const hash = await placeBetTx(address, matchId, walletRef.current, side, amount, gaslessRef.current);
         dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
-        await Promise.all([refreshStakes(), refreshBalance()]);
+        await Promise.all([refreshStakes(), refreshBalance(), refreshRelay(true)]);
       } catch (e) {
         dispatch({ kind: "tx", tx: { pending: false, error: humanizeTxError(e) } });
       }
     },
-    [connect, refreshStakes, refreshBalance],
+    [connect, refreshStakes, refreshBalance, refreshRelay],
   );
 
   // Wager on a categorical side market by staking on one `outcome` (propIdx identifies the market). Mirrors placeBet.
@@ -523,14 +570,14 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
       }
       dispatch({ kind: "tx", tx: { pending: true } });
       try {
-        const hash = await placePropBetTx(address, matchId, propIdx, walletRef.current, outcome, amount);
+        const hash = await placePropBetTx(address, matchId, propIdx, walletRef.current, outcome, amount, gaslessRef.current);
         dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
-        await Promise.all([refreshPropStakes(), refreshBalance()]);
+        await Promise.all([refreshPropStakes(), refreshBalance(), refreshRelay(true)]);
       } catch (e) {
         dispatch({ kind: "tx", tx: { pending: false, error: humanizeTxError(e) } });
       }
     },
-    [connect, refreshPropStakes, refreshBalance],
+    [connect, refreshPropStakes, refreshBalance, refreshRelay],
   );
 
   // Claim a SETTLED survival side-market payout (Yes/No) or returned stake (Void). Defaults to the
@@ -541,14 +588,14 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
       if (!walletRef.current || !addrRef.current || id == null) return;
       dispatch({ kind: "tx", tx: { pending: true } });
       try {
-        const hash = await claimPropPayout(addrRef.current, id, propIdx, walletRef.current);
+        const hash = await claimPropPayout(addrRef.current, id, propIdx, walletRef.current, gaslessRef.current);
         dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
-        await Promise.all([refreshPropStakes(), refreshBalance()]);
+        await Promise.all([refreshPropStakes(), refreshBalance(), refreshRelay(true)]);
       } catch (e) {
         dispatch({ kind: "tx", tx: { pending: false, error: humanizeTxError(e) } });
       }
     },
-    [refreshPropStakes, refreshBalance],
+    [refreshPropStakes, refreshBalance, refreshRelay],
   );
 
   // Reclaim a survival side-market stake from a match in RefundMode (host never settled). Defaults to
@@ -559,14 +606,14 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
       if (!walletRef.current || !addrRef.current || id == null) return;
       dispatch({ kind: "tx", tx: { pending: true } });
       try {
-        const hash = await refundPropStake(addrRef.current, id, propIdx, walletRef.current);
+        const hash = await refundPropStake(addrRef.current, id, propIdx, walletRef.current, gaslessRef.current);
         dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
-        await Promise.all([refreshPropStakes(), refreshBalance()]);
+        await Promise.all([refreshPropStakes(), refreshBalance(), refreshRelay(true)]);
       } catch (e) {
         dispatch({ kind: "tx", tx: { pending: false, error: humanizeTxError(e) } });
       }
     },
-    [refreshPropStakes, refreshBalance],
+    [refreshPropStakes, refreshBalance, refreshRelay],
   );
 
   const getTestTokens = useCallback(async () => {
@@ -576,13 +623,13 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
     }
     dispatch({ kind: "tx", tx: { pending: true } });
     try {
-      const hash = await getTestTokensTx(walletRef.current, addrRef.current ?? undefined);
+      const hash = await getTestTokensTx(walletRef.current, addrRef.current ?? undefined, gaslessRef.current);
       dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
-      await refreshBalance();
+      await Promise.all([refreshBalance(), refreshRelay(true)]);
     } catch (e) {
       dispatch({ kind: "tx", tx: { pending: false, error: humanizeTxError(e) } });
     }
-  }, [connect, refreshBalance]);
+  }, [connect, refreshBalance, refreshRelay]);
 
   // claim/refund/enterRefund default to the live match but accept an explicit matchId, so the
   // prior-positions panel can act on past rounds. refreshStakes only re-reads the live match (it
@@ -592,41 +639,44 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
     if (!walletRef.current || !addrRef.current || id == null) return;
     dispatch({ kind: "tx", tx: { pending: true } });
     try {
-      const hash = await claimPayout(addrRef.current, id, walletRef.current);
+      const hash = await claimPayout(addrRef.current, id, walletRef.current, gaslessRef.current);
       dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
-      await Promise.all([refreshStakes(), refreshBalance()]);
+      await Promise.all([refreshStakes(), refreshBalance(), refreshRelay(true)]);
     } catch (e) {
       dispatch({ kind: "tx", tx: { pending: false, error: humanizeTxError(e) } });
     }
-  }, [refreshStakes, refreshBalance]);
+  }, [refreshStakes, refreshBalance, refreshRelay]);
 
   const refund = useCallback(async (matchId?: number) => {
     const id = matchId ?? matchIdRef.current;
     if (!walletRef.current || !addrRef.current || id == null) return;
     dispatch({ kind: "tx", tx: { pending: true } });
     try {
-      const hash = await refundStake(addrRef.current, id, walletRef.current);
+      const hash = await refundStake(addrRef.current, id, walletRef.current, gaslessRef.current);
       dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
-      await Promise.all([refreshStakes(), refreshBalance()]);
+      await Promise.all([refreshStakes(), refreshBalance(), refreshRelay(true)]);
     } catch (e) {
       dispatch({ kind: "tx", tx: { pending: false, error: humanizeTxError(e) } });
     }
-  }, [refreshStakes, refreshBalance]);
+  }, [refreshStakes, refreshBalance, refreshRelay]);
 
   const enterRefund = useCallback(async (matchId: number) => {
     if (!walletRef.current || !addrRef.current) return;
     dispatch({ kind: "tx", tx: { pending: true } });
     try {
-      const hash = await enterRefundMode(addrRef.current, matchId, walletRef.current);
+      const hash = await enterRefundMode(addrRef.current, matchId, walletRef.current, gaslessRef.current);
       dispatch({ kind: "tx", tx: { pending: false, lastHash: hash } });
-      await Promise.all([refreshStakes(), refreshBalance()]);
+      await Promise.all([refreshStakes(), refreshBalance(), refreshRelay(true)]);
     } catch (e) {
       dispatch({ kind: "tx", tx: { pending: false, error: humanizeTxError(e) } });
     }
-  }, [refreshStakes, refreshBalance]);
+  }, [refreshStakes, refreshBalance, refreshRelay]);
 
   const advance = useCallback(() => dispatch({ kind: "advance" }), []);
   const skipToPresent = useCallback(() => dispatch({ kind: "skip" }), []);
 
-  return { state, connect, placeBet, placePropBet, claimProp, refundProp, getTestTokens, claim, refund, enterRefund, advance, skipToPresent };
+  // Let the user opt out of (or back into) the gasless path. "off" forces their own wallet to pay gas.
+  const setGasless = useCallback((on: boolean) => dispatch({ kind: "gaslessPref", pref: on ? "auto" : "off" }), []);
+
+  return { state, gasless, connect, placeBet, placePropBet, claimProp, refundProp, getTestTokens, claim, refund, enterRefund, setGasless, advance, skipToPresent };
 }

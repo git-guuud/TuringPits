@@ -228,7 +228,7 @@ export function Court({ s, advance, skipToPresent }: { s: ViewState; advance: ()
   }
 
   return (
-    <section className="panel relative flex min-h-0 flex-col items-center justify-center overflow-y-auto px-8 pb-8 pt-3.5">
+    <section className="panel relative flex h-full min-h-0 flex-col items-center justify-center overflow-y-auto px-5 pb-8 pt-3.5 sm:px-8">
       {/* Replaying banner — make it unmistakable the stage is behind live, with one big jump to now. */}
       {behindLive && (
         <button
@@ -273,7 +273,7 @@ export function Court({ s, advance, skipToPresent }: { s: ViewState; advance: ()
         aria-hidden
         animate={{ opacity: scene.lamp === "night" ? 0.5 : 1 }}
         transition={{ duration: 1.1 }}
-        className="pointer-events-none absolute -top-10 left-1/2 h-[420px] w-[560px] -translate-x-1/2 blur-[2px]"
+        className="pointer-events-none absolute -top-10 left-1/2 h-[clamp(260px,42vh,420px)] w-[clamp(320px,90vw,560px)] -translate-x-1/2 blur-[2px]"
         style={{
           background:
             "radial-gradient(closest-side, rgba(240,197,82,.20), rgba(240,197,82,.06) 45%, transparent 72%)",
@@ -298,7 +298,7 @@ export function Court({ s, advance, skipToPresent }: { s: ViewState; advance: ()
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5 }}
-        className="relative z-10 text-center font-display text-[46px] font-bold leading-none tracking-[0.2em] text-cream"
+        className="relative z-10 text-center font-display text-[clamp(2rem,7vw,2.875rem)] font-bold leading-none tracking-[0.16em] text-cream sm:tracking-[0.2em]"
         style={{ textShadow: "0 2px 30px rgba(240,197,82,.18)" }}
       >
         {scene.name}
@@ -309,7 +309,7 @@ export function Court({ s, advance, skipToPresent }: { s: ViewState; advance: ()
         <span className="mx-2 text-mute-2">—</span>
       </div>
 
-      <blockquote className="relative z-10 min-h-[150px] w-[560px] max-w-full text-center font-body text-[32px] italic leading-[1.62] text-cream">
+      <blockquote className="relative z-10 min-h-[120px] w-full max-w-[34.5rem] text-center font-body text-[clamp(1.25rem,4.6vw,2rem)] italic leading-[1.55] text-cream sm:leading-[1.62]">
         {/* Full text is laid out from the start; characters only fade in — so centered lines
             never slide while typing. */}
         <RevealedSpeech full={scene.body} count={shown.length} done={done} />

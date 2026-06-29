@@ -3,7 +3,7 @@ import { CATCHUP_THRESHOLD, type ViewState } from "../../state/matchStore.js";
 type Live = { label: string; dot: string; pulse: boolean; cls: string };
 
 /** Honest liveness: reflects the real socket + match lifecycle instead of a hardcoded "LIVE". */
-function liveness(s: ViewState): Live {
+export function liveness(s: ViewState): Live {
   const refund = s.market.state === "REFUND";
   const terminal = s.market.state === "SETTLED" || refund;
   if (terminal) {
@@ -26,7 +26,7 @@ function liveness(s: ViewState): Live {
   return { label: "In session · live", dot: "bg-convict", pulse: true, cls: "text-gilt" };
 }
 
-const phaseTag = (s: ViewState): string => {
+export const phaseTag = (s: ViewState): string => {
   if (s.market.state === "REFUND") return "Mistrial · refundable";
   if (s.market.state === "SETTLED")
     return s.market.outcome === "DRAW" ? "Mistrial" : s.market.outcome === "VOID" ? "Market void" : "Sentence read";

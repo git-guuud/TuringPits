@@ -16,9 +16,11 @@
 import { config as loadEnv } from "dotenv";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { createServer } from "node:http";
 // Load the repo-root .env regardless of CWD (src/ and dist/ are both one level under server/).
 loadEnv({ path: resolve(dirname(fileURLToPath(import.meta.url)), "../../.env") });
 import { Hub } from "./broadcast.js";
+import { createRelayer } from "./relayer.js";
 import { runOneMatch, sweepAbandonedMatches, type OrchestratorConfig } from "./orchestrator.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -62,8 +64,30 @@ async function main() {
     onMatchCreated: (matchId, deadline) => pending.set(matchId, deadline),
   };
 
-  const hub = new Hub(PORT);
-  console.log(`[server] WebSocket listening on :${PORT}`);
+  // Optional EIP-2771 gas relayer — only active if RELAYER_PRIVATE_KEY + FORWARDER_ADDRESS are set.
+  // Lets spectators bet/claim with zero native 0G (it signs, the relayer pays gas). See relayer.ts.
+  const relayer = createRelayer({
+    rpcUrl: cfg.rpcUrl,
+    chainId: cfg.chainId,
+    relayerPrivateKey: process.env.RELAYER_PRIVATE_KEY ?? "",
+    forwarderAddress: process.env.FORWARDER_ADDRESS ?? "",
+    marketAddress: cfg.marketAddress,
+  });
+
+  // One HTTP server shared by the WS hub (upgrade) and the relay routes (/relay, /relay/info). Other
+  // paths get a 200 health response (Railway health check).
+  const httpServer = createServer((req, res) => {
+    void (async () => {
+      if (relayer && (await relayer.handle(req, res))) return;
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("TuringPits sequencer OK");
+    })();
+  });
+  httpServer.listen(PORT);
+
+  const hub = new Hub(httpServer);
+  console.log(`[server] HTTP + WebSocket listening on :${PORT}`);
+  console.log(`[server] gas relayer: ${relayer ? `ENABLED (${relayer.relayerAddress})` : "disabled"}`);
   console.log(`[server] market=${cfg.marketAddress} chain=${cfg.chainId} seats=${cfg.playerCount}`);
 
   // Run rounds back-to-back forever, with a short intermission between each.

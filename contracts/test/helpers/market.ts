@@ -26,17 +26,24 @@ export interface SettlementFixture {
 const ROLE_ENUM: Record<string, number> = { MAFIA: 0, DOCTOR: 1, DETECTIVE: 2, TOWN: 3 };
 
 /**
- * Deploy the MockBetToken (CHIP) + a MafiaMarket bound to it. Bets are denominated in CHIP, so the
- * market needs a token to settle in. Returns both so tests can mint/approve and assert token balances.
+ * Deploy the EIP-2771 Forwarder + MockBetToken (CHIP) + a MafiaMarket bound to both. Bets are
+ * denominated in CHIP, so the market needs a token to settle in; both trust the Forwarder so the
+ * optional gas relayer can relay faucet/approve/bet/claim. Returns all three so tests can mint/
+ * approve, assert balances, and exercise the relay path. (Direct calls behave identically whether or
+ * not a forwarder is wired — `_msgSender() == msg.sender` unless the caller IS the forwarder.)
  */
 export async function deployMarket(owner: any, treasury: { address: string }) {
+  const Forwarder = await ethers.getContractFactory("Forwarder");
+  const forwarder = await Forwarder.connect(owner).deploy();
+  await forwarder.waitForDeployment();
+  const forwarderAddr = await forwarder.getAddress();
   const Token = await ethers.getContractFactory("MockBetToken");
-  const token = await Token.connect(owner).deploy();
+  const token = await Token.connect(owner).deploy(forwarderAddr);
   await token.waitForDeployment();
   const Market = await ethers.getContractFactory("MafiaMarket");
-  const market = await Market.connect(owner).deploy(treasury.address, await token.getAddress());
+  const market = await Market.connect(owner).deploy(treasury.address, await token.getAddress(), forwarderAddr);
   await market.waitForDeployment();
-  return { market, token };
+  return { market, token, forwarder };
 }
 
 /**

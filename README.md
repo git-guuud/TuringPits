@@ -58,7 +58,12 @@ check runs on-chain; any failure reverts.
 - **Mechanism:** parimutuel pools — all YES stakes form one pool, all NO stakes another; winners
   split the pot pro-rata, minus a small protocol fee. Always solvent regardless of bet skew.
 - **Currency:** wagers are placed in **CHIP**, a faucet-mintable mock ERC20 (`MockBetToken`) — test
-  money with no value. Tap **"Get test tokens"** in the UI to mint some. Gas is paid in native 0G.
+  money with no value. Tap **"Get test tokens"** in the UI to mint some.
+- **Optional gasless betting (EIP-2771):** if the host runs a funded relayer, a spectator with **zero
+  native 0G** can still play — the wallet signs each action off-chain and a backend relayer submits it
+  through a trusted `Forwarder` and pays the gas, while the user stays the on-chain bettor. It's the
+  default whenever the relayer is live and funded (a "⛽ Gasless" toggle opts out); otherwise the UI
+  falls back to the normal path where gas is paid in native 0G. Real on-chain mechanism, not a mock.
 - **Open until settled:** betting stays open for the whole match and only closes when the verdict is
   settled on-chain. Draws and "nobody backed the winner" (Void) refund stakes.
 

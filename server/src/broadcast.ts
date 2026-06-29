@@ -3,6 +3,7 @@
  * client that connects mid-match, so a spectator who joins late still sees the bench, the
  * stream so far, and the market state. New match → buffer resets.
  */
+import type { Server as HttpServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import type { WsMessage } from "./wire.js";
 
@@ -10,8 +11,14 @@ export class Hub {
   private readonly wss: WebSocketServer;
   private buffer: WsMessage[] = [];
 
-  constructor(port: number) {
-    this.wss = new WebSocketServer({ port });
+  /**
+   * Bind the WebSocket hub to either a port (it creates+listens its own HTTP server) or an existing
+   * `http.Server` (so the WS feed shares a port with the HTTP relay endpoint — one port for Railway).
+   */
+  constructor(portOrServer: number | HttpServer) {
+    this.wss = typeof portOrServer === "number"
+      ? new WebSocketServer({ port: portOrServer })
+      : new WebSocketServer({ server: portOrServer });
     this.wss.on("connection", (socket: WebSocket) => {
       for (const msg of this.buffer) socket.send(JSON.stringify(msg));
     });

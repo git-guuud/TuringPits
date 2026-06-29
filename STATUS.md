@@ -142,6 +142,22 @@ from native 0G to the `MockBetToken` (CHIP) ERC20 with an in-app faucet, the mar
   `votedOutRounds()` across multiple rounds); server + frontend type-check + build clean. **Not yet
   deployed** — the new bytecode needs a Galileo redeploy (see `myTasks.md`).
 
+- **Optional gas relayer — EIP-2771 gasless betting (code-complete; redeploy + funded relayer pending).**
+  A spectator with ZERO native 0G signs a ForwardRequest off-chain; a funded backend relayer submits it
+  through a trusted `Forwarder` and pays gas, while `_msgSender()` keeps the user as the on-chain bettor.
+  New `contracts/Forwarder.sol` + `lib/ERC2771Context.sol`; `MafiaMarket` + `MockBetToken` now take a
+  `trustedForwarder` ctor arg and use `_msgSender()` in the value-moving user funcs (owner/treasury keep
+  `msg.sender`). Server `/relay` + `/relay/info` endpoint (`server/src/relayer.ts`, shares the WS port)
+  with target/selector allowlists, per-address rate limit, `verify()` pre-check, and serialized nonces —
+  enabled only when `RELAYER_PRIVATE_KEY` + `FORWARDER_ADDRESS` are set. Frontend routes every wallet
+  action (faucet/approve/bet/claim/refund) through the relayer **by default whenever it's live + funded**
+  (never gated on the user's own 0G; a manual "⛽ Gasless" toggle opts out), auto-falling back to the
+  direct user-pays-gas path when the relayer is absent/broke. The relayer/forwarder are **real, not
+  mocked** (CHIP remains the only mock). Tests: 11 new Hardhat relay tests (relayed bet/claim attribute to
+  the user, replay/expired/bad-sig revert, direct calls unaffected) — Hardhat suite **85 green**; server
+  vitest +5 (allowlist + rate-limit); frontend type-checks + builds clean. **Not yet deployed** — needs a
+  Galileo redeploy (Forwarder + fresh CHIP + market) and a funded relayer wallet (see `myTasks.md`).
+
 ## Pending
 - Polish / demo-day hardening per `TODO.md` (Day 7). Optional follow-ups: verify contract source on
   the explorer; broaden market types (agent survival, round-of-death) per `IDEA.md` roadmap.

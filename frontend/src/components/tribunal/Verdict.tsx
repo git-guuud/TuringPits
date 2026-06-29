@@ -427,7 +427,7 @@ export function Verdict({ api }: { api: MatchApi }) {
   const projWin = pickedChoice ? projectWin(stakeNum, pickedChoice.pool, pickedChoice.total) : null;
 
   return (
-    <aside className="panel flex min-h-0 flex-col overflow-hidden px-5 py-5">
+    <aside className="panel flex h-full min-h-0 flex-col overflow-hidden px-5 py-5">
       <div className="eyebrow mb-4 border-b hairline pb-3">The Wagers</div>
       <StateBadge s={s} />
 
@@ -538,9 +538,16 @@ export function Verdict({ api }: { api: MatchApi }) {
           <>
             <div className="mb-2 flex items-center justify-between">
               <span className="eyebrow">Stake</span>
-              {connected && balance != null ? (
-                <span className="font-mono text-[11px] tracking-[0.06em] text-mute">bal {balance.toFixed(3)} CHIP</span>
-              ) : null}
+              <div className="flex items-center gap-2">
+                {api.gasless && (
+                  <span className="rounded-sm border border-gilt/50 px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.12em] text-gilt">
+                    ⛽ gasless
+                  </span>
+                )}
+                {connected && balance != null ? (
+                  <span className="font-mono text-[11px] tracking-[0.06em] text-mute">bal {balance.toFixed(3)} CHIP</span>
+                ) : null}
+              </div>
             </div>
             <div className="flex items-center gap-2">
               <span className="font-mono text-[12px] text-mute">◈</span>
@@ -602,6 +609,11 @@ export function Verdict({ api }: { api: MatchApi }) {
               <div className="mt-1.5 text-center font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">
                 on {pickedChoice.label}
                 {m.hasWager ? " · adds to your wager" : ""}
+              </div>
+            )}
+            {connected && api.gasless && (
+              <div className="mt-1.5 text-center font-mono text-[10px] tracking-[0.1em] text-gilt/70">
+                Gas sponsored — just sign, no 0G needed.
               </div>
             )}
           </>

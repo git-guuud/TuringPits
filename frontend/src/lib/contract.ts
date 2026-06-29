@@ -5,7 +5,7 @@
  * state / outcome arrive over the WebSocket (the server reads them from this same contract), so
  * this module stays narrow.
  */
-import { BrowserProvider, Contract, JsonRpcProvider, MaxUint256, formatEther, parseEther } from "ethers";
+import { BrowserProvider, Contract, Interface, JsonRpcProvider, MaxUint256, formatEther, parseEther } from "ethers";
 import { MAFIA_MARKET_ABI, MOCK_BET_TOKEN_ABI } from "./abi.js";
 import type { MarketState, Outcome, PropSnapshot, Side } from "./types.js";
 
@@ -61,6 +61,124 @@ export function storageScanFile(cid: string): string {
  */
 export const MARKET_ADDRESS =
   (import.meta.env.VITE_MARKET_ADDRESS as string | undefined) || "0xBCB635Bb7a9454F665288Ed9c6E99214C284D240";
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Optional EIP-2771 gas relayer ("gasless" path). A bettor signs a ForwardRequest (free); the
+// server's relayer submits it and pays the 0G gas. The user stays the on-chain bettor. All of this
+// is OPTIONAL — if the server has no relayer (or it's out of gas) the helpers below fall back to the
+// normal user-pays-gas path. See server/src/relayer.ts and contracts/Forwarder.sol.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Base URL of the relayer HTTP endpoint. Mirrors feed.ts:resolveWsUrl so one tunnel covers both. */
+function resolveRelayBase(): string {
+  const override = import.meta.env.VITE_RELAYER_URL as string | undefined;
+  if (override) return override.replace(/\/$/, "");
+  const { hostname, host, protocol } = window.location;
+  if (hostname === "localhost" || hostname === "127.0.0.1") return "http://localhost:8080";
+  return `${protocol === "https:" ? "https" : "http"}://${host}`;
+}
+
+export interface RelayInfo {
+  enabled: boolean;
+  /** Does the relayer wallet still hold enough 0G to sponsor a tx? When false, use the direct path. */
+  funded: boolean;
+  forwarder: string;
+  market: string;
+  token: string;
+  relayer: string;
+  chainId: number;
+  relayerBalance: string;
+}
+
+let relayInfoCache: Promise<RelayInfo | null> | null = null;
+
+/**
+ * Discover the relayer config (cached). Returns null when no relayer is configured/reachable — the
+ * signal the UI uses to default the gasless toggle on/off. Pass force=true to re-poll (e.g. to
+ * refresh the `funded` flag after a long session).
+ */
+export function relayInfo(force = false): Promise<RelayInfo | null> {
+  if (force) relayInfoCache = null;
+  if (!relayInfoCache) {
+    relayInfoCache = fetch(`${resolveRelayBase()}/relay/info`)
+      .then((r) => (r.ok ? (r.json() as Promise<RelayInfo>) : null))
+      .then((info) => (info?.enabled ? info : null))
+      .catch(() => null);
+  }
+  return relayInfoCache;
+}
+
+/** Thrown when the gasless path can't be used (no relayer, or it's out of gas) — callers fall back. */
+export class RelayUnavailable extends Error {}
+
+const FORWARDER_TYPES = {
+  ForwardRequest: [
+    { name: "from", type: "address" },
+    { name: "to", type: "address" },
+    { name: "value", type: "uint256" },
+    { name: "gas", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint48" },
+    { name: "data", type: "bytes" },
+  ],
+};
+
+/** Gas forwarded to each relayed inner call — comfortably covers approve/bet/claim, under the server cap. */
+const RELAY_GAS = 600_000n;
+
+// Pure encoders (no provider) for building the calldata we relay.
+const marketIface = new Interface(MAFIA_MARKET_ABI);
+const tokenIface = new Interface(MOCK_BET_TOKEN_ABI);
+
+/**
+ * Sign a ForwardRequest for `to`+`data` and POST it to the relayer, which submits it on-chain and
+ * pays gas. Resolves to the inner tx hash once mined. Throws RelayUnavailable if the relayer is
+ * absent/broke so the caller can fall back to a normal (user-paid) transaction.
+ */
+async function signAndRelay(wallet: Wallet, to: string, data: string): Promise<string> {
+  const info = await relayInfo();
+  if (!info || !info.enabled || !info.funded) throw new RelayUnavailable("relayer unavailable");
+
+  const signer = await wallet.provider.getSigner();
+  const from = wallet.account;
+  const fwd = new Contract(info.forwarder, ["function getNonce(address) view returns (uint256)"], readProvider());
+  const nonce = (await fwd.getFunction("getNonce")(from)) as bigint;
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+
+  const domain = { name: "TuringPitsForwarder", version: "1", chainId: info.chainId, verifyingContract: info.forwarder };
+  const message = { from, to, value: 0n, gas: RELAY_GAS, nonce, deadline, data };
+  const signature = await signer.signTypedData(domain, FORWARDER_TYPES, message);
+
+  // Serialize the bigints as strings for JSON; the server parses them back with BigInt(...).
+  const request = { from, to, value: "0", gas: RELAY_GAS.toString(), nonce: nonce.toString(), deadline: deadline.toString(), data };
+  const res = await fetch(`${resolveRelayBase()}/relay`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ request, signature }),
+  });
+  if (res.status === 503) throw new RelayUnavailable("relayer out of gas");
+  const body = (await res.json().catch(() => ({}))) as { txHash?: string; error?: string };
+  if (!res.ok) throw new Error(body.error ?? "Relay failed.");
+  const txHash = body.txHash ?? "";
+  if (txHash) await readProvider().waitForTransaction(txHash);
+  return txHash;
+}
+
+/**
+ * Run `relayFn` when gasless, but transparently fall back to `directFn` (a normal user-paid tx) if
+ * the relayer is unavailable/out of gas. Any other relay error (e.g. a contract revert) propagates.
+ */
+async function withGasless(gasless: boolean, relayFn: () => Promise<string>, directFn: () => Promise<string>): Promise<string> {
+  if (gasless) {
+    try {
+      return await relayFn();
+    } catch (e) {
+      if (!(e instanceof RelayUnavailable)) throw e;
+      // relayer can't sponsor right now → fall through to the user's own wallet
+    }
+  }
+  return directFn();
+}
 
 /**
  * Turn a raw wallet/ethers error into a single plain-language line for the bettor. Wallet errors
@@ -168,14 +286,44 @@ export async function getBalance(wallet: Wallet, marketAddress = MARKET_ADDRESS)
 
 /**
  * Mint free test CHIP to the connected wallet via the token faucet (# MOCK — demo money). Returns the
- * tx hash once mined so the caller can refresh the balance.
+ * tx hash once mined so the caller can refresh the balance. When `gasless`, the faucet call is relayed
+ * (no native 0G needed); falls back to a normal tx if the relayer is unavailable.
  */
-export async function getTestTokens(wallet: Wallet, marketAddress = MARKET_ADDRESS): Promise<string> {
-  const signer = await wallet.provider.getSigner();
-  const token = new Contract(await betTokenAddress(marketAddress), MOCK_BET_TOKEN_ABI, signer);
-  const tx = await token.getFunction("faucet")();
-  const receipt = await tx.wait();
-  return receipt?.hash ?? tx.hash;
+export async function getTestTokens(wallet: Wallet, marketAddress = MARKET_ADDRESS, gasless = false): Promise<string> {
+  const tokenAddr = await betTokenAddress(marketAddress);
+  return withGasless(
+    gasless,
+    () => signAndRelay(wallet, tokenAddr, tokenIface.encodeFunctionData("faucet", [])),
+    async () => {
+      const signer = await wallet.provider.getSigner();
+      const token = new Contract(tokenAddr, MOCK_BET_TOKEN_ABI, signer);
+      const tx = await token.getFunction("faucet")();
+      const receipt = await tx.wait();
+      return receipt?.hash ?? tx.hash;
+    },
+  );
+}
+
+/**
+ * Ensure the market is approved to pull at least `value` CHIP from the bettor. Approves MaxUint256
+ * once if needed — relayed when `gasless`, else a normal approval tx. No-op if already approved.
+ */
+async function ensureApproval(market: string, wallet: Wallet, value: bigint, gasless: boolean): Promise<void> {
+  const tokenAddr = await betTokenAddress(market);
+  const token = new Contract(tokenAddr, MOCK_BET_TOKEN_ABI, wallet.provider);
+  const allowance = (await token.getFunction("allowance")(wallet.account, market)) as bigint;
+  if (allowance >= value) return;
+  await withGasless(
+    gasless,
+    () => signAndRelay(wallet, tokenAddr, tokenIface.encodeFunctionData("approve", [market, MaxUint256])),
+    async () => {
+      const signer = await wallet.provider.getSigner();
+      const t = new Contract(tokenAddr, MOCK_BET_TOKEN_ABI, signer);
+      const approveTx = await t.getFunction("approve")(market, MaxUint256);
+      await approveTx.wait();
+      return approveTx.hash;
+    },
+  );
 }
 
 function readContract(address: string, wallet: Wallet) {
@@ -222,21 +370,24 @@ export async function readStakesPublic(address: string, matchId: number, account
 /**
  * Place a real wager on a match. `amount` is a decimal string of CHIP (e.g. "0.01"). Bets are pulled
  * via ERC20 transferFrom, so this first ensures the market is approved to spend at least `amount`
- * CHIP (a one-time max approval), then stakes. Returns the bet tx hash.
+ * CHIP (a one-time max approval), then stakes. When `gasless`, both the approval and the bet are
+ * relayed (no native 0G needed), with an automatic fallback to a normal tx if the relayer is down.
+ * Returns the bet tx hash.
  */
-export async function placeBet(address: string, matchId: number, wallet: Wallet, side: Side, amount: string): Promise<string> {
+export async function placeBet(address: string, matchId: number, wallet: Wallet, side: Side, amount: string, gasless = false): Promise<string> {
   const value = parseEther(amount);
-  const signer = await wallet.provider.getSigner();
-  const token = new Contract(await betTokenAddress(address), MOCK_BET_TOKEN_ABI, signer);
-  const allowance = (await token.getFunction("allowance")(wallet.account, address)) as bigint;
-  if (allowance < value) {
-    const approveTx = await token.getFunction("approve")(address, MaxUint256);
-    await approveTx.wait();
-  }
-  const c = await writeContract(address, wallet);
-  const tx = side === "YES" ? await c.getFunction("betYes")(matchId, value) : await c.getFunction("betNo")(matchId, value);
-  const receipt = await tx.wait();
-  return receipt?.hash ?? tx.hash;
+  await ensureApproval(address, wallet, value, gasless);
+  const fn = side === "YES" ? "betYes" : "betNo";
+  return withGasless(
+    gasless,
+    () => signAndRelay(wallet, address, marketIface.encodeFunctionData(fn, [matchId, value])),
+    async () => {
+      const c = await writeContract(address, wallet);
+      const tx = await c.getFunction(fn)(matchId, value);
+      const receipt = await tx.wait();
+      return receipt?.hash ?? tx.hash;
+    },
+  );
 }
 
 /**
@@ -251,35 +402,48 @@ export async function placePropBet(
   wallet: Wallet,
   outcome: number,
   amount: string,
+  gasless = false,
 ): Promise<string> {
   const value = parseEther(amount);
-  const signer = await wallet.provider.getSigner();
-  const token = new Contract(await betTokenAddress(address), MOCK_BET_TOKEN_ABI, signer);
-  const allowance = (await token.getFunction("allowance")(wallet.account, address)) as bigint;
-  if (allowance < value) {
-    const approveTx = await token.getFunction("approve")(address, MaxUint256);
-    await approveTx.wait();
-  }
-  const c = await writeContract(address, wallet);
-  const tx = await c.getFunction("betProp")(matchId, propIdx, outcome, value);
-  const receipt = await tx.wait();
-  return receipt?.hash ?? tx.hash;
+  await ensureApproval(address, wallet, value, gasless);
+  return withGasless(
+    gasless,
+    () => signAndRelay(wallet, address, marketIface.encodeFunctionData("betProp", [matchId, propIdx, outcome, value])),
+    async () => {
+      const c = await writeContract(address, wallet);
+      const tx = await c.getFunction("betProp")(matchId, propIdx, outcome, value);
+      const receipt = await tx.wait();
+      return receipt?.hash ?? tx.hash;
+    },
+  );
 }
 
 /** Claim a side-market payout/returned stake from a SETTLED match (RESOLVED pays the winner, VOID refunds). */
-export async function claimPropPayout(address: string, matchId: number, propIdx: number, wallet: Wallet): Promise<string> {
-  const c = await writeContract(address, wallet);
-  const tx = await c.getFunction("claimProp")(matchId, propIdx);
-  const receipt = await tx.wait();
-  return receipt?.hash ?? tx.hash;
+export async function claimPropPayout(address: string, matchId: number, propIdx: number, wallet: Wallet, gasless = false): Promise<string> {
+  return withGasless(
+    gasless,
+    () => signAndRelay(wallet, address, marketIface.encodeFunctionData("claimProp", [matchId, propIdx])),
+    async () => {
+      const c = await writeContract(address, wallet);
+      const tx = await c.getFunction("claimProp")(matchId, propIdx);
+      const receipt = await tx.wait();
+      return receipt?.hash ?? tx.hash;
+    },
+  );
 }
 
 /** Reclaim a side-market stake from a match in RefundMode (host never settled). */
-export async function refundPropStake(address: string, matchId: number, propIdx: number, wallet: Wallet): Promise<string> {
-  const c = await writeContract(address, wallet);
-  const tx = await c.getFunction("refundProp")(matchId, propIdx);
-  const receipt = await tx.wait();
-  return receipt?.hash ?? tx.hash;
+export async function refundPropStake(address: string, matchId: number, propIdx: number, wallet: Wallet, gasless = false): Promise<string> {
+  return withGasless(
+    gasless,
+    () => signAndRelay(wallet, address, marketIface.encodeFunctionData("refundProp", [matchId, propIdx])),
+    async () => {
+      const c = await writeContract(address, wallet);
+      const tx = await c.getFunction("refundProp")(matchId, propIdx);
+      const receipt = await tx.wait();
+      return receipt?.hash ?? tx.hash;
+    },
+  );
 }
 
 export interface MyPropStake {
@@ -390,19 +554,31 @@ export async function readProps(address: string, matchId: number): Promise<PropS
  * Claim from a SETTLED match. The same call covers a winning payout (Yes/No) and a returned stake
  * (Draw = stake less the draw fee, Void = full stake) — the contract pays per the resolved outcome.
  */
-export async function claimPayout(address: string, matchId: number, wallet: Wallet): Promise<string> {
-  const c = await writeContract(address, wallet);
-  const tx = await c.getFunction("claim")(matchId);
-  const receipt = await tx.wait();
-  return receipt?.hash ?? tx.hash;
+export async function claimPayout(address: string, matchId: number, wallet: Wallet, gasless = false): Promise<string> {
+  return withGasless(
+    gasless,
+    () => signAndRelay(wallet, address, marketIface.encodeFunctionData("claim", [matchId])),
+    async () => {
+      const c = await writeContract(address, wallet);
+      const tx = await c.getFunction("claim")(matchId);
+      const receipt = await tx.wait();
+      return receipt?.hash ?? tx.hash;
+    },
+  );
 }
 
 /** Reclaim stake from a match in RefundMode (host never settled past the deadline). */
-export async function refundStake(address: string, matchId: number, wallet: Wallet): Promise<string> {
-  const c = await writeContract(address, wallet);
-  const tx = await c.getFunction("refund")(matchId);
-  const receipt = await tx.wait();
-  return receipt?.hash ?? tx.hash;
+export async function refundStake(address: string, matchId: number, wallet: Wallet, gasless = false): Promise<string> {
+  return withGasless(
+    gasless,
+    () => signAndRelay(wallet, address, marketIface.encodeFunctionData("refund", [matchId])),
+    async () => {
+      const c = await writeContract(address, wallet);
+      const tx = await c.getFunction("refund")(matchId);
+      const receipt = await tx.wait();
+      return receipt?.hash ?? tx.hash;
+    },
+  );
 }
 
 /**
@@ -410,11 +586,17 @@ export async function refundStake(address: string, matchId: number, wallet: Wall
  * stakes become refundable. Permissionless — normally the server does this automatically, but the
  * UI exposes it as a self-serve fallback. After this confirms, the bettor can call refundStake.
  */
-export async function enterRefundMode(address: string, matchId: number, wallet: Wallet): Promise<string> {
-  const c = await writeContract(address, wallet);
-  const tx = await c.getFunction("enterRefundMode")(matchId);
-  const receipt = await tx.wait();
-  return receipt?.hash ?? tx.hash;
+export async function enterRefundMode(address: string, matchId: number, wallet: Wallet, gasless = false): Promise<string> {
+  return withGasless(
+    gasless,
+    () => signAndRelay(wallet, address, marketIface.encodeFunctionData("enterRefundMode", [matchId])),
+    async () => {
+      const c = await writeContract(address, wallet);
+      const tx = await c.getFunction("enterRefundMode")(matchId);
+      const receipt = await tx.wait();
+      return receipt?.hash ?? tx.hash;
+    },
+  );
 }
 
 const MARKET_STATE: Record<number, MarketState> = { 2: "LOCKED", 3: "SETTLED", 4: "REFUND" };

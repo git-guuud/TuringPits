@@ -5,6 +5,7 @@ import "./MafiaTypes.sol";
 import "./lib/DecisionCodec.sol";
 import "./lib/TeeEnvelope.sol";
 import "./lib/MafiaRules.sol";
+import "./lib/ERC2771Context.sol";
 
 /// @dev Minimal ERC20 surface the market needs to escrow + pay out wagers in the bet token.
 interface IERC20 {
@@ -21,7 +22,13 @@ interface IERC20 {
 ///      settlement — so a host cannot reorder/forge/truncate moves, relabel roles, or be
 ///      front-run on the reveal. A host that sets a `teeSigner` it controls can still fabricate;
 ///      that residual trust is the product's TEE assumption, not an on-chain guarantee.
-contract MafiaMarket {
+/// @dev Gasless-ready: inherits ERC2771Context, so a bettor with zero native 0G can place/claim
+///      wagers through the optional gas relayer (the trusted Forwarder relays the call; the relayer
+///      pays gas). Only the value-MOVING user functions use `_msgSender()`; owner/treasury functions
+///      keep `msg.sender` (the host/treasury always transact directly, never via the relayer).
+///      Direct calls are unchanged — `_msgSender() == msg.sender` unless the caller IS the forwarder
+///      — so the relayer is purely additive.
+contract MafiaMarket is ERC2771Context {
     enum MatchState { None, Created, Locked, Settled, RefundMode }
     enum Outcome { Unset, Yes, No, Draw, Void }
     /// @dev Side-market ("prop") variety — CATEGORICAL (multi-outcome) parimutuel markets, all resolved
@@ -161,7 +168,9 @@ contract MafiaMarket {
 
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
-    constructor(address _treasury, address _betToken) {
+    /// @param _trustedForwarder the EIP-2771 Forwarder allowed to relay bet/claim/refund on a
+    ///        bettor's behalf (pass address(0) to disable the gas relayer entirely).
+    constructor(address _treasury, address _betToken, address _trustedForwarder) ERC2771Context(_trustedForwarder) {
         require(_treasury != address(0), "zero treasury");
         require(_betToken != address(0), "zero token");
         owner = msg.sender;
@@ -284,16 +293,17 @@ contract MafiaMarket {
         require(block.number <= m.settlementDeadlineBlock, "betting closed");
         require(amount >= MIN_BET, "below min bet");
         require(amount <= MAX_BET_PER_TX, "above max bet");
+        address user = _msgSender(); // EIP-2771: the relayed bettor (== msg.sender on direct calls)
         // Pull the stake into escrow; reverts (no state change) on insufficient balance/allowance.
-        require(betToken.transferFrom(msg.sender, address(this), amount), "token transfer failed");
+        require(betToken.transferFrom(user, address(this), amount), "token transfer failed");
         if (isYes) {
             m.poolYes += amount;
-            stakeYes[matchId][msg.sender] += amount;
+            stakeYes[matchId][user] += amount;
         } else {
             m.poolNo += amount;
-            stakeNo[matchId][msg.sender] += amount;
+            stakeNo[matchId][user] += amount;
         }
-        emit BetPlaced(matchId, msg.sender, isYes, amount, m.poolYes, m.poolNo);
+        emit BetPlaced(matchId, user, isYes, amount, m.poolYes, m.poolNo);
     }
 
     event PropBetPlaced(
@@ -320,10 +330,11 @@ contract MafiaMarket {
         // payout-neutral (see closeProp), so this is the on-chain enforcement of "no betting a decided market".
         require(!pr.closed, "prop closed");
         require(outcome < pr.numOutcomes, "bad outcome");
-        require(betToken.transferFrom(msg.sender, address(this), amount), "token transfer failed");
+        address user = _msgSender(); // EIP-2771: the relayed bettor (== msg.sender on direct calls)
+        require(betToken.transferFrom(user, address(this), amount), "token transfer failed");
         pr.pools[outcome] += amount;
-        propStake[matchId][propIdx][outcome][msg.sender] += amount;
-        emit PropBetPlaced(matchId, propIdx, msg.sender, outcome, amount, pr.pools[outcome]);
+        propStake[matchId][propIdx][outcome][user] += amount;
+        emit PropBetPlaced(matchId, propIdx, user, outcome, amount, pr.pools[outcome]);
     }
 
     event PropClosed(uint256 indexed matchId, uint256 indexed propIdx);
@@ -598,12 +609,13 @@ contract MafiaMarket {
     function refund(uint256 matchId) external {
         Match storage m = matches[matchId];
         require(m.state == MatchState.RefundMode, "not refund mode");
-        require(!claimed[matchId][msg.sender], "already refunded");
-        uint256 s = uint256(stakeYes[matchId][msg.sender]) + stakeNo[matchId][msg.sender];
+        address user = _msgSender(); // EIP-2771: the relayed bettor (== msg.sender on direct calls)
+        require(!claimed[matchId][user], "already refunded");
+        uint256 s = uint256(stakeYes[matchId][user]) + stakeNo[matchId][user];
         require(s > 0, "no stake");
-        claimed[matchId][msg.sender] = true;
-        require(betToken.transfer(msg.sender, s), "transfer failed");
-        emit Refunded(matchId, msg.sender, s);
+        claimed[matchId][user] = true;
+        require(betToken.transfer(user, s), "transfer failed");
+        emit Refunded(matchId, user, s);
     }
 
     function withdrawProtocolFees() external onlyTreasury {
@@ -618,33 +630,34 @@ contract MafiaMarket {
     function claim(uint256 matchId) external {
         Match storage m = matches[matchId];
         require(m.state == MatchState.Settled, "not settled");
-        require(!claimed[matchId][msg.sender], "already claimed");
+        address user = _msgSender(); // EIP-2771: the relayed bettor (== msg.sender on direct calls)
+        require(!claimed[matchId][user], "already claimed");
 
         uint256 payout;
         Outcome o = m.outcome;
         if (o == Outcome.Yes) {
-            uint256 s = stakeYes[matchId][msg.sender];
+            uint256 s = stakeYes[matchId][user];
             require(s > 0, "no winning stake");
             payout = (uint256(m.netPot) * s) / m.winningPool;
         } else if (o == Outcome.No) {
-            uint256 s = stakeNo[matchId][msg.sender];
+            uint256 s = stakeNo[matchId][user];
             require(s > 0, "no winning stake");
             payout = (uint256(m.netPot) * s) / m.winningPool;
         } else if (o == Outcome.Draw) {
-            uint256 s = uint256(stakeYes[matchId][msg.sender]) + stakeNo[matchId][msg.sender];
+            uint256 s = uint256(stakeYes[matchId][user]) + stakeNo[matchId][user];
             require(s > 0, "no stake");
             payout = (s * (10000 - m.feeBpsDraw)) / 10000;
         } else if (o == Outcome.Void) {
-            uint256 s = uint256(stakeYes[matchId][msg.sender]) + stakeNo[matchId][msg.sender];
+            uint256 s = uint256(stakeYes[matchId][user]) + stakeNo[matchId][user];
             require(s > 0, "no stake");
             payout = s;
         } else {
             revert("unexpected outcome");
         }
 
-        claimed[matchId][msg.sender] = true;
-        require(betToken.transfer(msg.sender, payout), "transfer failed");
-        emit Claimed(matchId, msg.sender, payout);
+        claimed[matchId][user] = true;
+        require(betToken.transfer(user, payout), "transfer failed");
+        emit Claimed(matchId, user, payout);
     }
 
     event PropClaimed(uint256 indexed matchId, uint256 indexed propIdx, address indexed user, uint256 payout);
@@ -654,25 +667,26 @@ contract MafiaMarket {
     ///         across every outcome the caller backed).
     function claimProp(uint256 matchId, uint256 propIdx) external {
         require(matches[matchId].state == MatchState.Settled, "not settled");
-        require(!propClaimed[matchId][propIdx][msg.sender], "already claimed");
+        address user = _msgSender(); // EIP-2771: the relayed bettor (== msg.sender on direct calls)
+        require(!propClaimed[matchId][propIdx][user], "already claimed");
         Prop storage pr = _props[matchId][propIdx];
 
         uint256 payout;
         if (pr.state == PropState.Resolved) {
-            uint256 s = propStake[matchId][propIdx][pr.winningOutcome][msg.sender];
+            uint256 s = propStake[matchId][propIdx][pr.winningOutcome][user];
             require(s > 0, "no winning stake");
             payout = (uint256(pr.netPot) * s) / pr.winningPool;
         } else if (pr.state == PropState.Void) {
-            uint256 s = _userPropTotal(matchId, propIdx, msg.sender, pr.numOutcomes);
+            uint256 s = _userPropTotal(matchId, propIdx, user, pr.numOutcomes);
             require(s > 0, "no stake");
             payout = s;
         } else {
             revert("unexpected outcome");
         }
 
-        propClaimed[matchId][propIdx][msg.sender] = true;
-        require(betToken.transfer(msg.sender, payout), "transfer failed");
-        emit PropClaimed(matchId, propIdx, msg.sender, payout);
+        propClaimed[matchId][propIdx][user] = true;
+        require(betToken.transfer(user, payout), "transfer failed");
+        emit PropClaimed(matchId, propIdx, user, payout);
     }
 
     event PropRefunded(uint256 indexed matchId, uint256 indexed propIdx, address indexed user, uint256 payout);
@@ -681,13 +695,14 @@ contract MafiaMarket {
     ///         returns the caller's total stake across every outcome of the prop.
     function refundProp(uint256 matchId, uint256 propIdx) external {
         require(matches[matchId].state == MatchState.RefundMode, "not refund mode");
-        require(!propClaimed[matchId][propIdx][msg.sender], "already refunded");
+        address user = _msgSender(); // EIP-2771: the relayed bettor (== msg.sender on direct calls)
+        require(!propClaimed[matchId][propIdx][user], "already refunded");
         Prop storage pr = _props[matchId][propIdx];
-        uint256 s = _userPropTotal(matchId, propIdx, msg.sender, pr.numOutcomes);
+        uint256 s = _userPropTotal(matchId, propIdx, user, pr.numOutcomes);
         require(s > 0, "no stake");
-        propClaimed[matchId][propIdx][msg.sender] = true;
-        require(betToken.transfer(msg.sender, s), "transfer failed");
-        emit PropRefunded(matchId, propIdx, msg.sender, s);
+        propClaimed[matchId][propIdx][user] = true;
+        require(betToken.transfer(user, s), "transfer failed");
+        emit PropRefunded(matchId, propIdx, user, s);
     }
 
     /// @notice Number of side markets attached to a match (one PlayerFate per seat + one RoundVotedOut

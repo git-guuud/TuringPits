@@ -13,6 +13,9 @@ export default defineConfig({
     // forwarded to the match server on :8080. See src/lib/feed.ts for the matching client URL.
     proxy: {
       "/ws": { target: "ws://localhost:8080", ws: true, changeOrigin: true },
+      // The optional gas-relayer HTTP endpoint (/relay, /relay/info) — proxied like /ws so a single
+      // tunnel carries the gasless betting path too. See src/lib/contract.ts resolveRelayUrl.
+      "/relay": { target: "http://localhost:8080", changeOrigin: true },
     },
   },
 });

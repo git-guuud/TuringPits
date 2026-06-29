@@ -10,6 +10,10 @@ export function Menu({ api }: { api: MatchApi }) {
   const s = api.state;
   const connected = s.wallet.status === "connected";
   const balance = s.wallet.balance != null ? parseFloat(s.wallet.balance) : null;
+  // Gas relayer ("gasless") status. The relayer is optional — only surface the affordance when the
+  // server actually runs one. `api.gasless` is the live decision (enabled + funded + not opted out).
+  const relayLive = !!s.relay?.enabled;
+  const relayFunded = !!s.relay?.funded;
 
   return (
     <main className="flex min-h-screen w-full flex-col items-center justify-center px-6 py-12">
@@ -58,9 +62,33 @@ export function Menu({ api }: { api: MatchApi }) {
                 >
                   {s.tx.pending ? "Minting…" : "Get test tokens"}
                 </button>
+                {relayLive && (
+                  <button
+                    type="button"
+                    onClick={() => api.setGasless(!api.gasless)}
+                    disabled={!relayFunded}
+                    title={
+                      !relayFunded
+                        ? "Relayer is out of 0G — using your own wallet for gas"
+                        : api.gasless
+                          ? "Gas sponsored — click to pay your own gas instead"
+                          : "Click to let the relayer pay gas (no 0G needed)"
+                    }
+                    className={[
+                      "rounded-sm border px-3 py-1.5 uppercase tracking-[0.14em] transition-colors disabled:opacity-50",
+                      api.gasless
+                        ? "border-gilt/60 text-gilt"
+                        : "border-line-2 text-cream-dim hover:border-gilt hover:text-gilt",
+                    ].join(" ")}
+                  >
+                    {!relayFunded ? "⛽ Relayer empty" : api.gasless ? "⛽ Gasless on" : "⛽ Gasless off"}
+                  </button>
+                )}
               </div>
               <span className="text-[10px] tracking-[0.1em] text-mute/70">
-                CHIP is mock test money — wagers settle in it; gas is paid in 0G.
+                {api.gasless
+                  ? "Gas sponsored — just sign to bet, no 0G needed. CHIP is mock test money."
+                  : "CHIP is mock test money — wagers settle in it; gas is paid in 0G."}
               </span>
             </>
           ) : (
