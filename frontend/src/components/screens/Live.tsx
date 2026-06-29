@@ -222,7 +222,7 @@ function AudioControls({
       <AudioToggle
         on={sound.on}
         onToggle={sound.toggle}
-        label={sound.on ? "Mute typewriter sound" : "Unmute typewriter sound"}
+        label={sound.on ? "Mute sound effects" : "Unmute sound effects"}
       >
         <SpeakerIcon on={sound.on} />
       </AudioToggle>

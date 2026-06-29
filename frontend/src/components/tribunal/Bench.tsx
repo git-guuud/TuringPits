@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import type { ViewState } from "../../state/matchStore.js";
 import type { Role } from "../../lib/types.js";
 import { useDialog } from "../../lib/useDialog.js";
@@ -11,26 +11,38 @@ function roleLabel(role: Role): { text: string; cls: string } {
   return { text: role.charAt(0) + role.slice(1).toLowerCase(), cls: "text-acquit" };
 }
 
+// The masks-fall reveal cascades down the bench; this is the per-seat delay (seconds) between each
+// seat turning to show its true allegiance.
+const STAGGER = 0.13;
+
 export function Bench({ s }: { s: ViewState }) {
   const maxVotes = Math.max(0, ...Object.values(s.votes));
   const [openSeat, setOpenSeat] = useState<number | null>(null);
+  const reduce = useReducedMotion();
+  // The verdict reveals every role at once (s.reveal lands wholesale when playback completes); we
+  // choreograph that flat swap into a staggered "the masks fall" cascade down the bench.
+  const revealing = !!s.reveal;
 
   return (
     <section className="panel min-h-0 overflow-y-auto px-5 py-5">
       <div className="eyebrow mb-4 border-b hairline pb-3">The Bench</div>
       <div>
-        {s.seats.map((seat) => {
+        {s.seats.map((seat, idx) => {
           const persona = s.personas.find((p) => p.seat === seat.id);
           const speaking = s.speakingSeat === seat.id && seat.alive;
           const role = s.reveal?.roles[seat.id];
+          const faction = role ? (role === "MAFIA" ? "mafia" : "town") : null;
           const votes = seat.alive ? s.votes[seat.id] ?? 0 : 0;
           const leading = votes > 0 && votes === maxVotes; // the seat the floor is closing on
+          // Each seat lights up its true role in turn, top to bottom; the avatar's turn and its
+          // colour wash share this one per-seat delay so they land together.
+          const cascade = revealing && !reduce ? idx * STAGGER : 0;
 
           return (
             <motion.div
               key={seat.id}
               layout
-              animate={{ opacity: seat.alive ? 1 : 0.5 }}
+              animate={{ opacity: revealing || seat.alive ? 1 : 0.5 }}
               role="button"
               tabIndex={0}
               onClick={() => setOpenSeat(seat.id)}
@@ -42,18 +54,34 @@ export function Bench({ s }: { s: ViewState }) {
               }}
               title="View persona"
               className={[
-                "-mx-2.5 flex cursor-pointer items-center gap-3 border-l-2 px-2.5 py-3 transition-colors duration-300 hover:bg-gilt/[0.06]",
-                speaking ? "border-gilt bg-gradient-to-r from-gilt/10 to-transparent" : "border-transparent",
+                "-mx-2.5 flex cursor-pointer items-center gap-3 border-l-2 px-2.5 py-3 transition-colors duration-500 hover:bg-gilt/[0.06]",
+                faction === "mafia"
+                  ? "border-convict/70 bg-gradient-to-r from-convict/[0.12] to-transparent"
+                  : faction === "town"
+                    ? "border-acquit/40 bg-gradient-to-r from-acquit/[0.06] to-transparent"
+                    : speaking
+                      ? "border-gilt bg-gradient-to-r from-gilt/10 to-transparent"
+                      : "border-transparent",
               ].join(" ")}
             >
-              <span
+              <motion.span
+                initial={false}
+                animate={{ rotateY: revealing && !reduce ? 360 : 0 }}
+                transition={{ duration: 0.7, delay: cascade, ease: "easeInOut" }}
+                style={{ transformPerspective: 700, transitionDelay: `${cascade}s` }}
                 className={[
-                  "flex h-7 w-7 flex-none items-center justify-center rounded-full border font-display text-[16px] font-semibold",
-                  speaking ? "border-gilt text-gilt shadow-[0_0_14px_rgba(201,162,63,0.28)]" : "border-line-2 text-mute",
+                  "flex h-7 w-7 flex-none items-center justify-center rounded-full border font-display text-[16px] font-semibold transition-[color,border-color,box-shadow] duration-500",
+                  faction === "mafia"
+                    ? "border-convict text-convict shadow-[0_0_16px_rgba(181,48,46,0.55)]"
+                    : faction === "town"
+                      ? "border-acquit text-acquit shadow-[0_0_12px_rgba(127,160,126,0.4)]"
+                      : speaking
+                        ? "border-gilt text-gilt shadow-[0_0_14px_rgba(201,162,63,0.28)]"
+                        : "border-line-2 text-mute",
                 ].join(" ")}
               >
                 {persona ? initialOf(persona.name) : seat.id}
-              </span>
+              </motion.span>
 
               <span className="leading-snug">
                 <span
@@ -72,9 +100,14 @@ export function Bench({ s }: { s: ViewState }) {
 
               <span className="ml-auto text-right">
                 {role ? (
-                  <span className={["font-display text-[14px] tracking-[0.08em]", roleLabel(role).cls].join(" ")}>
+                  <motion.span
+                    initial={reduce ? false : { opacity: 0, x: 10, scale: 0.85 }}
+                    animate={{ opacity: 1, x: 0, scale: 1 }}
+                    transition={{ duration: 0.4, delay: cascade + 0.12, ease: "easeOut" }}
+                    className={["inline-block font-display text-[14px] tracking-[0.08em]", roleLabel(role).cls].join(" ")}
+                  >
                     {roleLabel(role).text}
-                  </span>
+                  </motion.span>
                 ) : votes > 0 ? (
                   <span
                     title={`${votes} vote${votes > 1 ? "s" : ""}`}

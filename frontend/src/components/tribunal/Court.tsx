@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { CATCHUP_THRESHOLD, type ViewState } from "../../state/matchStore.js";
 import { useTypewriter } from "../../lib/useTypewriter.js";
+import { bodyFall, dayBreak, gavel, loseSting, nightFall, winSting } from "../../lib/typeSound.js";
 import type { VoiceApi } from "../../lib/useVoice.js";
 import { Testimony } from "./Testimony.js";
 
@@ -271,6 +272,63 @@ export function Court({
       voiceStop(); // night / dawn narration
     }
   }, [s.cursor, s.playbackComplete, s.currentBeat, s.personas, voiceAvailable, voiceSpeak, voiceStop]);
+
+  // ── Dramatic SFX ──────────────────────────────────────────────────────────────────────────────
+  // Procedural stings punctuate the key beats (shares the typewriter's per-user mute + autoplay
+  // guard, so a muted spectator hears none of this and nothing fires before the context is unlocked).
+  // Each effect fires ONLY on a genuine transition — a ref carries the prior value so a re-render or a
+  // playback pause never re-triggers it; stepping back out of a beat re-arms it.
+
+  // Dusk / dawn sting on the lamp swing. Only during live play — the verdict/settle scenes (also
+  // "day"-lit) get the gavel instead, so a match ending at night doesn't pile a dawn chime onto it.
+  const lampRef = useRef<"day" | "night" | null>(null);
+  useEffect(() => {
+    const prev = lampRef.current;
+    lampRef.current = scene.lamp;
+    if (prev === null || prev === scene.lamp || s.reveal || s.playbackComplete) return;
+    if (scene.lamp === "night") nightFall();
+    else dayBreak();
+  }, [scene.lamp, s.reveal, s.playbackComplete]);
+
+  // A heavy thud whenever a seat newly falls — fires as the death becomes visible on stage, whether
+  // it's a night kill surfaced at dawn or a day-vote elimination. Keyed on the rendered alive count.
+  const aliveRef = useRef<number | null>(null);
+  useEffect(() => {
+    const alive = s.seats.reduce((n, x) => n + (x.alive ? 1 : 0), 0);
+    const prev = aliveRef.current;
+    aliveRef.current = alive;
+    if (prev !== null && alive < prev) bodyFall();
+  }, [s.seats]);
+
+  // The gavel falls with the verdict — the masks come off (reveal shown once playback completes).
+  const gaveledRef = useRef(false);
+  useEffect(() => {
+    if (s.reveal && !gaveledRef.current) {
+      gaveledRef.current = true;
+      gavel();
+    } else if (!s.reveal) {
+      gaveledRef.current = false; // re-arm if the viewer steps back out of the verdict
+    }
+  }, [s.reveal]);
+
+  // A win/lose cue once the market settles on-chain — keyed to the spectator's own wager on the main
+  // market. A refund (Draw/Void) or no stake gets no cue; the gavel already marked the verdict.
+  const settledRef = useRef(false);
+  useEffect(() => {
+    const settled = s.market.state === "SETTLED" && s.playbackComplete;
+    if (settled && !settledRef.current) {
+      settledRef.current = true;
+      const o = s.market.outcome;
+      const yes = parseFloat(s.stakes.yes) || 0;
+      const no = parseFloat(s.stakes.no) || 0;
+      const won = (o === "YES" && yes > 0) || (o === "NO" && no > 0);
+      const lost = !won && ((o === "YES" && no > 0) || (o === "NO" && yes > 0));
+      if (won) winSting();
+      else if (lost) loseSting();
+    } else if (!settled) {
+      settledRef.current = false;
+    }
+  }, [s.market.state, s.market.outcome, s.playbackComplete, s.stakes.yes, s.stakes.no]);
 
   // The aggregate day-vote drama for the stage: how full the count is, who the floor is closing on,
   // and whether the plurality is already locked. Each ALIVE seat casts one vote and the seat with the

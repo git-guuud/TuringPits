@@ -257,10 +257,20 @@ Make the on-chain reality one click away (`lib/contract.ts` already has `explore
       file-detail route; the committed bytes32 root IS the StorageScan cid. Links render only when the
       roots are non-zero, i.e. storage is enabled.)
 
-### 4. SFX / audio
+### 4. SFX / audio ✅
 Lean into the courtroom-drama theme.
-- [ ] Move/typing SFX, gavel on verdict, night/day transition stings, a win/lose sting on settle.
-- [ ] Respect the existing `useMusic`/`typeSound` hooks; per-user mute; no autoplay surprises.
+- [x] Move/typing SFX, gavel on verdict, night/day transition stings, a win/lose sting on settle.
+      Shipped as procedural Web-Audio stings in `frontend/src/lib/typeSound.ts` (no asset files):
+      `gavel` (verdict — fires when the masks fall / `s.reveal`), `nightFall`/`dayBreak` (the day↔night
+      lamp swing), `bodyFall` (a seat newly dies — night kill at dawn or a day-vote elimination), and
+      `winSting`/`loseSting` (settle, keyed to the spectator's own main-market wager; refund/no-stake
+      gets none). Typing SFX (`clickKey`/`bell`) pre-existed. Triggers live in `Court.tsx`, each
+      ref-guarded to fire only on a real transition.
+- [x] Respect the existing `useMusic`/`typeSound` hooks; per-user mute; no autoplay surprises. The
+      stings reuse `typeSound`'s single `AudioContext`, its persisted mute flag (so the existing
+      sound toggle — relabeled "sound effects" — covers them), and its first-gesture unlock; every
+      emitter no-ops while the context is suspended, so nothing plays before the spectator interacts.
+      `useMusic` is untouched. Frontend type-checks + builds clean.
 
 ### 5. More roles (stretch)
 The engine currently runs MAFIA / DOCTOR / DETECTIVE / TOWN.
