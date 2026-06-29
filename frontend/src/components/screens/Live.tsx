@@ -2,6 +2,7 @@ import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { MatchApi, ViewState } from "../../state/matchStore.js";
 import { useMusic } from "../../lib/useMusic.js";
+import { useSound } from "../../lib/useSound.js";
 import { useMediaQuery } from "../../lib/useMediaQuery.js";
 import { useCountdown } from "../../lib/useCountdown.js";
 import { useDialog } from "../../lib/useDialog.js";
@@ -28,6 +29,7 @@ export function Live({ api }: { api: MatchApi }) {
   // When night falls the whole arena cools to moonlight; the gilt warmth recedes until dawn.
   const night = s.phase === "night";
   const music = useMusic(night);
+  const sound = useSound();
 
   // Moonlight veil — above the panels (z-30) so it tints them, below the modals (z-50).
   const veil = (
@@ -55,6 +57,7 @@ export function Live({ api }: { api: MatchApi }) {
         <div className="flex items-center gap-4 pt-3">
           <NavLink onClick={() => navigate("menu")}>‹ Lobby</NavLink>
           <NavLink onClick={() => navigate("history")}>Battle history</NavLink>
+          <AudioControls music={music} sound={sound} className="ml-auto" />
         </div>
 
         <Masthead s={s} onOpenRecord={() => setRecordOpen(true)} />
@@ -70,7 +73,6 @@ export function Live({ api }: { api: MatchApi }) {
         </div>
 
         {recordModal}
-        <MusicToggle music={music} className="fixed bottom-4 left-4 z-40" />
       </main>
     );
   }
@@ -83,6 +85,7 @@ export function Live({ api }: { api: MatchApi }) {
       <MobileHeader
         s={s}
         music={music}
+        sound={sound}
         onOpenBench={() => setBenchOpen(true)}
         onOpenRecord={() => setRecordOpen(true)}
       />
@@ -119,21 +122,81 @@ function NavLink({ onClick, children }: { onClick: () => void; children: React.R
   );
 }
 
-function MusicToggle({ music, className }: { music: ReturnType<typeof useMusic>; className?: string }) {
+/** One uniform circular audio control — the music note and the SFX speaker share this exact chrome. */
+function AudioToggle({
+  on,
+  onToggle,
+  label,
+  children,
+}: {
+  on: boolean;
+  onToggle: () => void;
+  label: string;
+  children: React.ReactNode;
+}) {
   return (
     <button
       type="button"
-      onClick={music.toggle}
-      aria-label={music.on ? "Pause background music" : "Play background music"}
-      aria-pressed={music.on}
+      onClick={onToggle}
+      aria-label={label}
+      aria-pressed={on}
       className={[
         "flex h-9 w-9 items-center justify-center rounded-full border bg-ink-2 text-[15px] transition-colors hover:border-gilt hover:text-cream",
-        music.on ? "border-gilt text-gilt" : "border-line-2 text-mute",
-        className ?? "",
+        on ? "border-gilt text-gilt" : "border-line-2 text-mute",
       ].join(" ")}
     >
-      ♪
+      {children}
     </button>
+  );
+}
+
+/** Monochrome speaker that inherits the button's colour (so it matches the ♪ glyph, not a colour emoji). */
+function SpeakerIcon({ on }: { on: boolean }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden focusable="false">
+      <path d="M3 6h2.5L9 3.2v9.6L5.5 10H3z" fill="currentColor" />
+      {on ? (
+        <g fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round">
+          <path d="M11.2 6.1a3 3 0 0 1 0 3.8" />
+          <path d="M12.9 4.7a5.2 5.2 0 0 1 0 6.6" />
+        </g>
+      ) : (
+        <g stroke="currentColor" strokeWidth="1.2" strokeLinecap="round">
+          <path d="M11.5 6.2 14.5 9.8" />
+          <path d="M14.5 6.2 11.5 9.8" />
+        </g>
+      )}
+    </svg>
+  );
+}
+
+/** The two audio controls, grouped — placed in the top panel of both layouts so they never relocate. */
+function AudioControls({
+  music,
+  sound,
+  className,
+}: {
+  music: ReturnType<typeof useMusic>;
+  sound: ReturnType<typeof useSound>;
+  className?: string;
+}) {
+  return (
+    <div className={["flex items-center gap-2", className ?? ""].join(" ")}>
+      <AudioToggle
+        on={music.on}
+        onToggle={music.toggle}
+        label={music.on ? "Pause background music" : "Play background music"}
+      >
+        ♪
+      </AudioToggle>
+      <AudioToggle
+        on={sound.on}
+        onToggle={sound.toggle}
+        label={sound.on ? "Mute typewriter sound" : "Unmute typewriter sound"}
+      >
+        <SpeakerIcon on={sound.on} />
+      </AudioToggle>
+    </div>
   );
 }
 
@@ -143,11 +206,13 @@ function MusicToggle({ music, className }: { music: ReturnType<typeof useMusic>;
 function MobileHeader({
   s,
   music,
+  sound,
   onOpenBench,
   onOpenRecord,
 }: {
   s: ViewState;
   music: ReturnType<typeof useMusic>;
+  sound: ReturnType<typeof useSound>;
   onOpenBench: () => void;
   onOpenRecord: () => void;
 }) {
@@ -187,7 +252,7 @@ function MobileHeader({
         </div>
       </button>
 
-      <MusicToggle music={music} />
+      <AudioControls music={music} sound={sound} />
 
       <button
         type="button"

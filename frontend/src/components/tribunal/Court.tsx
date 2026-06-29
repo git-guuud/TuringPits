@@ -2,7 +2,6 @@ import { useEffect, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { CATCHUP_THRESHOLD, type ViewState } from "../../state/matchStore.js";
 import { useTypewriter } from "../../lib/useTypewriter.js";
-import { getMuted, setMuted } from "../../lib/typeSound.js";
 import { Testimony } from "./Testimony.js";
 
 const TELLS = ["watching", "Mafia tell"];
@@ -217,7 +216,6 @@ export function Court({
   // Attestation provenance only ever shown for a day testimony — night carries no actor.
   const att = s.currentBeat?.kind === "turn" ? s.currentBeat.turn.attestation : null;
   const [showLog, setShowLog] = useState(false);
-  const [muted, setMutedState] = useState(getMuted);
   // Playback transport: when paused, the auto-advance below stands down so the current beat holds on
   // the stage. Stepping a beat at a time (back/forward) pauses too, so the show never runs off while
   // a spectator re-reads. Controls show whenever a beat is on stage (cursor ≥ 0).
@@ -327,22 +325,9 @@ export function Court({
           )}
         </div>
       )}
-      {/* Stage controls — mute the typewriter, and open the testimony log over the stage. */}
-      <div className="absolute right-3 top-3 z-30 flex items-center gap-2">
-        <button
-          type="button"
-          aria-label={muted ? "Unmute typewriter sound" : "Mute typewriter sound"}
-          aria-pressed={muted}
-          onClick={() => {
-            const next = !muted;
-            setMuted(next);
-            setMutedState(next);
-          }}
-          className="rounded-sm border border-line-2 px-2 py-1 font-mono text-[12px] leading-none text-mute transition-colors hover:border-gilt hover:text-gilt"
-        >
-          {muted ? "🔇" : "🔊"}
-        </button>
-        {(shownTurns > 0 || showLog) && (
+      {/* Stage control — open the testimony log over the stage. (Audio toggles live in the top panel.) */}
+      {(shownTurns > 0 || showLog) && (
+        <div className="absolute right-3 top-3 z-30 flex items-center gap-2">
           <button
             type="button"
             onClick={() => setShowLog((v) => !v)}
@@ -350,8 +335,8 @@ export function Court({
           >
             {showLog ? "Close ✕" : `Transcript · ${shownTurns}`}
           </button>
-        )}
-      </div>
+        </div>
+      )}
       {showLog && <Testimony s={s} />}
       {/* the banker's lamp — signature element */}
       <motion.div
