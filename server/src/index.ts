@@ -21,6 +21,8 @@ import { createServer } from "node:http";
 loadEnv({ path: resolve(dirname(fileURLToPath(import.meta.url)), "../../.env") });
 import { Hub } from "./broadcast.js";
 import { createRelayer } from "./relayer.js";
+import { createTts } from "./tts.js";
+import { DEFAULT_FALLBACK_VOICE, loadVoiceMap } from "./voices.js";
 import { runOneMatch, sweepAbandonedMatches, type OrchestratorConfig } from "./orchestrator.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -74,6 +76,18 @@ async function main() {
     marketAddress: cfg.marketAddress,
   });
 
+  // Optional spoken-dialogue layer — only active if ELEVENLABS_API_KEY is set. Voices the players'
+  // lines (tone-tagged, one voice per persona) over POST /tts; the keys never leave the server. See
+  // tts.ts. With no key, /tts/info reports enabled:false and the frontend stays silent.
+  const tts = createTts({
+    apiKey: process.env.ELEVENLABS_API_KEY ?? "",
+    modelId: process.env.ELEVENLABS_MODEL_ID ?? "eleven_v3",
+    voiceMap: loadVoiceMap(process.env.ELEVENLABS_VOICE_MAP),
+    defaultVoiceId: process.env.ELEVENLABS_DEFAULT_VOICE_ID ?? DEFAULT_FALLBACK_VOICE,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
+    llmModel: process.env.TTS_LLM_MODEL ?? "claude-haiku-4-5",
+  });
+
   // One HTTP server shared by the WS hub (upgrade), the relay routes (/relay, /relay/info), and a
   // read-only /status route. `hub` is assigned just below; the handler only dereferences it at
   // request time, by which point it is set. Other paths get a 200 health response (Railway check).
@@ -88,6 +102,7 @@ async function main() {
         return;
       }
       if (relayer && (await relayer.handle(req, res))) return;
+      if (await tts.handle(req, res)) return;
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("TuringPits sequencer OK");
     })();
@@ -97,6 +112,9 @@ async function main() {
   hub = new Hub(httpServer);
   console.log(`[server] HTTP + WebSocket listening on :${PORT}`);
   console.log(`[server] gas relayer: ${relayer ? `ENABLED (${relayer.relayerAddress})` : "disabled"}`);
+  console.log(
+    `[server] dialogue TTS: ${tts.enabled ? `ENABLED (${tts.info().model}, ${tts.info().tagger} tags)` : "disabled (set ELEVENLABS_API_KEY)"}`,
+  );
   console.log(`[server] market=${cfg.marketAddress} chain=${cfg.chainId} seats=${cfg.playerCount}`);
 
   // Run rounds back-to-back forever, with a short intermission between each.

@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { MatchApi, ViewState } from "../../state/matchStore.js";
 import { useMusic } from "../../lib/useMusic.js";
 import { useSound } from "../../lib/useSound.js";
+import { useVoice } from "../../lib/useVoice.js";
 import { useMediaQuery } from "../../lib/useMediaQuery.js";
 import { useCountdown } from "../../lib/useCountdown.js";
 import { useDialog } from "../../lib/useDialog.js";
@@ -30,6 +31,7 @@ export function Live({ api }: { api: MatchApi }) {
   const night = s.phase === "night";
   const music = useMusic(night);
   const sound = useSound();
+  const voice = useVoice();
 
   // Moonlight veil — above the panels (z-30) so it tints them, below the modals (z-50).
   const veil = (
@@ -57,7 +59,7 @@ export function Live({ api }: { api: MatchApi }) {
         <div className="flex items-center gap-4 pt-3">
           <NavLink onClick={() => navigate("menu")}>‹ Lobby</NavLink>
           <NavLink onClick={() => navigate("history")}>Battle history</NavLink>
-          <AudioControls music={music} sound={sound} className="ml-auto" />
+          <AudioControls music={music} sound={sound} voice={voice} className="ml-auto" />
         </div>
 
         <Masthead s={s} onOpenRecord={() => setRecordOpen(true)} />
@@ -68,7 +70,7 @@ export function Live({ api }: { api: MatchApi }) {
           style={{ gridTemplateColumns: PANE_COLUMNS }}
         >
           <Bench s={s} />
-          <Court s={s} advance={api.advance} stepBack={api.stepBack} skipToPresent={api.skipToPresent} />
+          <Court s={s} advance={api.advance} stepBack={api.stepBack} skipToPresent={api.skipToPresent} voice={voice} />
           <Verdict api={api} />
         </div>
 
@@ -86,12 +88,13 @@ export function Live({ api }: { api: MatchApi }) {
         s={s}
         music={music}
         sound={sound}
+        voice={voice}
         onOpenBench={() => setBenchOpen(true)}
         onOpenRecord={() => setRecordOpen(true)}
       />
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        <Court s={s} advance={api.advance} stepBack={api.stepBack} skipToPresent={api.skipToPresent} />
+        <Court s={s} advance={api.advance} stepBack={api.stepBack} skipToPresent={api.skipToPresent} voice={voice} />
       </div>
 
       <BottomDock s={s} onOpen={() => setWagersOpen(true)} />
@@ -170,14 +173,41 @@ function SpeakerIcon({ on }: { on: boolean }) {
   );
 }
 
-/** The two audio controls, grouped — placed in the top panel of both layouts so they never relocate. */
+/** Voice-level bars for the character-voices toggle — a slash crosses them when muted. */
+function VoiceWavesIcon({ on }: { on: boolean }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden focusable="false">
+      {on ? (
+        <g stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+          <path d="M4 6.4v3.2" />
+          <path d="M6.7 4.3v7.4" />
+          <path d="M9.3 2.8v10.4" />
+          <path d="M12 5.3v5.4" />
+        </g>
+      ) : (
+        <g stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+          <path d="M4 7.2v1.6" />
+          <path d="M6.7 6.5v3" />
+          <path d="M9.3 6.9v2.2" />
+          <path d="M12 7.2v1.6" />
+          <path d="M2.6 2.6 13.4 13.4" opacity="0.75" />
+        </g>
+      )}
+    </svg>
+  );
+}
+
+/** The audio controls, grouped — placed in the top panel of both layouts so they never relocate.
+ *  The character-voices toggle only appears when the server has TTS configured (`voice.available`). */
 function AudioControls({
   music,
   sound,
+  voice,
   className,
 }: {
   music: ReturnType<typeof useMusic>;
   sound: ReturnType<typeof useSound>;
+  voice: ReturnType<typeof useVoice>;
   className?: string;
 }) {
   return (
@@ -196,6 +226,15 @@ function AudioControls({
       >
         <SpeakerIcon on={sound.on} />
       </AudioToggle>
+      {voice.available && (
+        <AudioToggle
+          on={voice.on}
+          onToggle={voice.toggle}
+          label={voice.on ? "Mute character voices" : "Unmute character voices"}
+        >
+          <VoiceWavesIcon on={voice.on} />
+        </AudioToggle>
+      )}
     </div>
   );
 }
@@ -207,12 +246,14 @@ function MobileHeader({
   s,
   music,
   sound,
+  voice,
   onOpenBench,
   onOpenRecord,
 }: {
   s: ViewState;
   music: ReturnType<typeof useMusic>;
   sound: ReturnType<typeof useSound>;
+  voice: ReturnType<typeof useVoice>;
   onOpenBench: () => void;
   onOpenRecord: () => void;
 }) {
@@ -252,7 +293,7 @@ function MobileHeader({
         </div>
       </button>
 
-      <AudioControls music={music} sound={sound} />
+      <AudioControls music={music} sound={sound} voice={voice} />
 
       <button
         type="button"

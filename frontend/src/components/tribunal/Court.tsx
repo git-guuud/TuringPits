@@ -1,7 +1,8 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { CATCHUP_THRESHOLD, type ViewState } from "../../state/matchStore.js";
 import { useTypewriter } from "../../lib/useTypewriter.js";
+import type { VoiceApi } from "../../lib/useVoice.js";
 import { Testimony } from "./Testimony.js";
 
 const TELLS = ["watching", "Mafia tell"];
@@ -190,11 +191,13 @@ export function Court({
   advance,
   stepBack,
   skipToPresent,
+  voice,
 }: {
   s: ViewState;
   advance: () => void;
   stepBack: () => void;
   skipToPresent: () => void;
+  voice: VoiceApi;
 }) {
   const scene = sceneFor(s);
   // The stage paces each beat (seconds on screen) while the server emits them ~1/s, so the viewer
@@ -238,6 +241,36 @@ export function Court({
     const t = setTimeout(advance, 4000);
     return () => clearTimeout(t);
   }, [paused, done, s.currentBeat, s.reveal, s.rawReveal, s.cursor, s.beats.length, advance]);
+
+  // Speak the player's line when a day-speech beat reaches the stage, alongside the typewriter. Night,
+  // dawn and the verdict are narration — fall silent there. Keyed on the cursor (via a ref guard) so a
+  // pause or an unrelated re-render never restarts the current line, but stepping to a new beat does.
+  const { speak: voiceSpeak, stop: voiceStop, available: voiceAvailable } = voice;
+  const lastVoiceCursor = useRef(-2);
+  useEffect(() => {
+    if (!voiceAvailable) return;
+    if (lastVoiceCursor.current === s.cursor && !s.playbackComplete) return;
+    lastVoiceCursor.current = s.cursor;
+    const persona = (seat: number) => s.personas.find((p) => p.seat === seat);
+    const nameOf = (seat: number) => persona(seat)?.name ?? `Seat ${seat}`;
+    const b = s.currentBeat;
+    if (s.playbackComplete || !b) {
+      voiceStop();
+    } else if (b.kind === "discussion") {
+      voiceSpeak({ text: b.speech, name: nameOf(b.seat), blurb: persona(b.seat)?.blurb, kind: "discussion" });
+    } else if (b.kind === "turn") {
+      const d = b.turn.decision;
+      voiceSpeak({
+        text: b.turn.speech,
+        name: nameOf(b.turn.seat),
+        blurb: persona(b.turn.seat)?.blurb,
+        kind: "vote",
+        targetName: d.action === "vote" ? nameOf(d.target) : null,
+      });
+    } else {
+      voiceStop(); // night / dawn narration
+    }
+  }, [s.cursor, s.playbackComplete, s.currentBeat, s.personas, voiceAvailable, voiceSpeak, voiceStop]);
 
   // The aggregate day-vote drama for the stage: how full the count is, who the floor is closing on,
   // and whether the plurality is already locked. Each ALIVE seat casts one vote and the seat with the

@@ -117,6 +117,19 @@ from native 0G to the `MockBetToken` (CHIP) ERC20 with an in-app faucet, the mar
       skipped by default. Uploads paid by the funded `COMPUTE_PRIVATE_KEY` wallet.
 
 ## In progress
+- **Optional spoken-dialogue TTS (code-complete; ElevenLabs key pending).** A server `/tts` endpoint
+  voices each player's line: a tone-tag step inserts ElevenLabs v3 audio tags ([nervous]/[accusing]…)
+  — via a fast Claude Haiku call when `ANTHROPIC_API_KEY` is set, else a heuristic from the wire
+  context — then ElevenLabs synthesizes it, **one voice per persona** (`server/src/voices.ts`). The
+  frontend plays each clip alongside the typewriter with a third audio toggle (hidden unless the server
+  reports a key). **Generation happens ONCE per line, server-side:** clips are content-hash cached +
+  in-flight deduped, so every spectator and every replay/step-back reuses the same synthesis (no
+  per-user or past-dialogue regeneration; the Anthropic tagger is inside the same cached path). Gated
+  on keys — with no `ELEVENLABS_API_KEY` the feature is fully OFF (keys never ship to the browser). 14
+  new server vitest (voice map, heuristic tags, cache/dedupe, /tts/info gating, validation, rate limit);
+  server suite 30 green; server + frontend type-check + build clean. **Needs a direct ElevenLabs key**
+  (+ optional Anthropic key) — see myTasks.md.
+
 - **Side markets — Survival + Round-of-death + RECURRING per-round "Voted out" (code-complete; redeploy pending).**
   `MafiaMarket` auto-creates three prop kinds, all resolved inside the SAME verified `settle()` from the
   same TEE-checked run (no new trust, no extra settlement tx). At creation `propCount == 3 * playerCount`,

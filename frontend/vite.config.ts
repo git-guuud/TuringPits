@@ -19,6 +19,9 @@ export default defineConfig({
       // Read-only lobby status (is court in session, what round, how big the pot). Proxied like the
       // others so one tunnel carries it. See src/lib/useLiveStatus.ts / contract.ts fetchMatchStatus.
       "/status": { target: "http://localhost:8080", changeOrigin: true },
+      // Optional spoken-dialogue TTS (/tts, /tts/info) — proxied so one tunnel also carries the
+      // voices. See src/lib/voice.ts resolveTtsBase and server/src/tts.ts.
+      "/tts": { target: "http://localhost:8080", changeOrigin: true },
     },
   },
 });
