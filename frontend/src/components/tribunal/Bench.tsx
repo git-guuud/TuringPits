@@ -2,6 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import type { ViewState } from "../../state/matchStore.js";
 import type { Role } from "../../lib/types.js";
+import { useDialog } from "../../lib/useDialog.js";
 
 const initialOf = (name: string) => name.charAt(0).toUpperCase();
 
@@ -97,6 +98,7 @@ export function Bench({ s }: { s: ViewState }) {
 
 /** A popup dossier for one seat: their persona, current standing, and testimony on the record. */
 function SeatProfile({ s, seatId, onClose }: { s: ViewState; seatId: number; onClose: () => void }) {
+  const dialogRef = useDialog<HTMLElement>(onClose);
   const persona = s.personas.find((p) => p.seat === seatId);
   const seat = s.seats.find((x) => x.id === seatId);
   const alive = seat?.alive ?? true;
@@ -126,6 +128,7 @@ function SeatProfile({ s, seatId, onClose }: { s: ViewState; seatId: number; onC
       onClick={onClose}
     >
       <section
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label={`${persona?.name ?? `Seat ${seatId}`} — persona`}

@@ -37,17 +37,29 @@ function reclaimableTotal(r: HistoryRow): number {
   return a;
 }
 
+/** Nested lenses on the record — claimable ⊆ mine ⊆ all. One control instead of scanning 60 rows. */
+type FilterMode = "all" | "mine" | "claimable";
+
 export function History({ api }: { api: MatchApi }) {
   const s = api.state;
   const { rows, loading } = useHistory(s.wallet.account, s.tx.lastHash);
   const connected = s.wallet.status === "connected";
   const busy = s.tx.pending;
 
-  // Surface money you're owed: never make people scan every row for a reclaim button.
-  const [claimableOnly, setClaimableOnly] = useState(false);
+  // Surface money you're owed and let people narrow to their own positions: never make anyone
+  // scan every row for a reclaim button or to find what they backed.
+  const [filter, setFilter] = useState<FilterMode>("all");
+  const mineRows = rows.filter((r) => !!r.mine);
   const claimableRows = rows.filter(isClaimable);
   const owed = claimableRows.reduce((acc, r) => acc + reclaimableTotal(r), 0);
-  const visibleRows = claimableOnly ? claimableRows : rows;
+  const visibleRows = filter === "claimable" ? claimableRows : filter === "mine" ? mineRows : rows;
+
+  // Only the lenses that hold something: drop "Claimable" when nothing's outstanding.
+  const segments: [FilterMode, string, number][] = [
+    ["all", "All", rows.length],
+    ["mine", "My wagers", mineRows.length],
+  ];
+  if (claimableRows.length > 0) segments.push(["claimable", "Claimable", claimableRows.length]);
 
   // The CHIP token is read from the market on-chain; resolve it for the verifiable-source footer.
   const [tokenAddr, setTokenAddr] = useState<string | null>(null);
@@ -116,28 +128,38 @@ export function History({ api }: { api: MatchApi }) {
         )}
       </header>
 
-      {/* Money you're owed, impossible to miss: total reclaimable across every past battle + a filter. */}
+      {/* Money you're owed, impossible to miss: total reclaimable across every past battle. */}
       {connected && claimableRows.length > 0 && (
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border border-gilt/40 bg-gilt/[0.05] px-4 py-3">
-          <div>
-            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gilt">You can reclaim</div>
-            <div className="mt-1 font-mono tabular-nums text-cream">
-              <span className="text-[16px]">◈ {owed.toFixed(2)}</span>
-              <span className="ml-2 text-[12px] text-mute">
-                across {claimableRows.length} {claimableRows.length === 1 ? "battle" : "battles"}
-              </span>
-            </div>
+        <div className="mt-4 border border-gilt/40 bg-gilt/[0.05] px-4 py-3">
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gilt">You can reclaim</div>
+          <div className="mt-1 font-mono tabular-nums text-cream">
+            <span className="text-[16px]">◈ {owed.toFixed(2)}</span>
+            <span className="ml-2 text-[12px] text-mute">
+              across {claimableRows.length} {claimableRows.length === 1 ? "battle" : "battles"}
+            </span>
           </div>
-          <button
-            type="button"
-            onClick={() => setClaimableOnly((v) => !v)}
-            className={[
-              "rounded-sm border px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] transition-colors",
-              claimableOnly ? "border-gilt bg-gilt text-ink" : "border-gilt text-gilt hover:bg-gilt hover:text-ink",
-            ].join(" ")}
-          >
-            {claimableOnly ? "Show all battles" : "Show claimable only"}
-          </button>
+        </div>
+      )}
+
+      {/* One lens control: jump straight to your own positions, or just what's still reclaimable. */}
+      {connected && mineRows.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em]">
+          <span className="mr-1 text-mute-2">Show</span>
+          {segments.map(([key, label, count]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setFilter(key)}
+              className={[
+                "rounded-sm border px-3 py-1.5 transition-colors",
+                filter === key
+                  ? "border-gilt bg-gilt text-ink"
+                  : "border-line-2 text-cream-dim hover:border-gilt hover:text-gilt",
+              ].join(" ")}
+            >
+              {label} <span className="opacity-60">{count}</span>
+            </button>
+          ))}
         </div>
       )}
 
@@ -164,7 +186,8 @@ export function History({ api }: { api: MatchApi }) {
           </div>
         ) : visibleRows.length === 0 ? (
           <div className="py-16 text-center font-body text-[16px] italic text-mute">
-            Nothing left to reclaim. <button type="button" onClick={() => setClaimableOnly(false)} className="text-gilt underline-offset-2 hover:underline">Show all battles</button>.
+            {filter === "claimable" ? "Nothing left to reclaim." : "No wagers of yours on record yet."}{" "}
+            <button type="button" onClick={() => setFilter("all")} className="text-gilt underline-offset-2 hover:underline">Show all battles</button>.
           </div>
         ) : (
           <ul className="flex flex-col gap-px bg-line">
@@ -219,6 +242,17 @@ function Row({
   const pot = (parseFloat(s.yesPool) + parseFloat(s.noPool)).toFixed(2);
   const props = mine?.props ?? [];
 
+  // What the viewer backed on the faction market, for the status when there's no reclaim button:
+  // YES = Acquittal (Mafia walks), NO = Conviction (Town prevails). Mirrors verdictOf's colours.
+  const yes = mine?.stakeYes ?? 0;
+  const no = mine?.stakeNo ?? 0;
+  const factionStake = yes + no;
+  const backed = yes > 0 && no > 0 ? "BOTH" : yes > 0 ? "YES" : "NO";
+  const backedLabel = backed === "BOTH" ? "both sides" : backed === "YES" ? "Acquittal" : "Conviction";
+  const backedClass = backed === "BOTH" ? "text-gilt" : backed === "YES" ? "text-convict" : "text-acquit";
+  // No reclaim + settled verdict + backed the side that didn't win = the wager missed.
+  const lost = s.state === "SETTLED" && (s.outcome === "YES" || s.outcome === "NO") && backed !== "BOTH" && backed !== s.outcome;
+
   return (
     <li className={["panel flex flex-col gap-3 px-5 py-4", claimable ? "border-l-2 border-gilt" : ""].join(" ")}>
       <div className="flex items-center gap-4">
@@ -234,7 +268,7 @@ function Row({
           </div>
         </div>
 
-        {mine && (
+        {mine && (mine.reclaim || factionStake > 0) && (
           <div className="flex-none text-right">
             {mine.reclaim ? (
               <button
@@ -249,10 +283,17 @@ function Row({
                     ? RECLAIM_CTA.enable
                     : `${RECLAIM_CTA[mine.reclaim.kind]} ◈ ${mine.reclaim.amount}`}
               </button>
+            ) : mine.claimed ? (
+              <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">Collected ✓</span>
             ) : (
-              <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">
-                {mine.claimed ? "Collected ✓" : "Wagered"}
-              </span>
+              <div className={lost ? "opacity-60" : ""}>
+                <div className={["font-mono text-[11px] tracking-[0.06em]", backedClass].join(" ")}>
+                  Backed {backedLabel}
+                </div>
+                <div className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-mute">
+                  {lost ? "Missed" : "Wagered"}
+                </div>
+              </div>
             )}
           </div>
         )}

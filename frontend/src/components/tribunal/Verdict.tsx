@@ -887,7 +887,7 @@ export function Verdict({ api }: { api: MatchApi }) {
 
         <div className="mt-2.5 text-center font-mono text-[11px] tracking-[0.06em] text-mute">
           {connected
-            ? `${s.wallet.account?.slice(0, 6)}…${s.wallet.account?.slice(-4)}${balance != null ? ` · ${balance.toFixed(3)} 0G` : ""} · 0G Galileo`
+            ? `${s.wallet.account?.slice(0, 6)}…${s.wallet.account?.slice(-4)}${balance != null ? ` · ${balance.toFixed(3)} CHIP` : ""} · 0G Galileo`
             : "connect a wallet to enter the record"}
         </div>
       </div>

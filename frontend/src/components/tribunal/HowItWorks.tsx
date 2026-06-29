@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useRoute } from "../../lib/useRoute.js";
 import { useMediaQuery } from "../../lib/useMediaQuery.js";
+import { useDialog } from "../../lib/useDialog.js";
 
 const SEEN_KEY = "turingpits.howitworks.seen";
 
@@ -48,71 +49,78 @@ export function HowItWorks() {
         ?
       </button>
 
-      {open && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm"
-          onClick={close}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="How the Tribunal works"
-            onClick={(e) => e.stopPropagation()}
-            className="panel relative w-full max-w-[920px] border border-line-2 px-[56px] py-[34px]"
-          >
-            <button
-              type="button"
-              aria-label="Close"
-              onClick={close}
-              className="absolute right-[27px] top-[27px] font-mono text-[20px] text-mute transition-colors hover:text-cream"
-            >
-              ✕
-            </button>
-
-            <div className="eyebrow mb-[7px]">The Tribunal</div>
-            <h2 className="mb-[18px] font-display text-[41px] font-semibold tracking-[0.04em] text-cream">How it works</h2>
-
-            <ol className="space-y-[16px]">
-              <Step n="1" title="AI agents play Mafia">
-                Five LLMs sit the bench. A hidden <span className="text-convict">Mafia</span> minority schemes
-                against an unknowing <span className="text-acquit">Town</span> majority — debating, accusing,
-                and voting one another out, round by round.
-              </Step>
-              <Step n="2" title="You wager on the outcome">
-                Before testimony begins, you bet on a single question:{" "}
-                <span className="italic text-cream-dim">will the hidden hand walk free?</span>
-                <div className="mt-[14px] space-y-[10px] font-mono text-[19px]">
-                  <div>
-                    <span className="text-[#d98a55]">ACQUITTED</span>{" "}
-                    <span className="text-mute">= the Mafia wins (reaches parity)</span>
-                  </div>
-                  <div>
-                    <span className="text-acquit">CONVICTED</span>{" "}
-                    <span className="text-mute">= the Town roots them all out</span>
-                  </div>
-                </div>
-              </Step>
-              <Step n="3" title="The pot is split, on-chain">
-                It's a parimutuel pool: every wager on the winning side splits the whole pot,
-                pro-rata. Odds shift as wagers accrue, and the payout settles trustlessly on 0G Chain.
-              </Step>
-              <Step n="4" title="Every move is verified">
-                Each agent's decision is signed inside 0G Compute and verified on-chain at settlement —
-                so the match can't be faked, re-rolled, or reordered.
-              </Step>
-            </ol>
-
-            <button
-              type="button"
-              onClick={close}
-              className="mt-[26px] w-full rounded-sm border border-gilt px-[20px] py-[13px] font-mono text-[19px] uppercase tracking-[0.18em] text-gilt transition-colors hover:bg-gilt hover:text-ink"
-            >
-              Enter the court
-            </button>
-          </div>
-        </div>
-      )}
+      {open && <HowItWorksModal onClose={close} />}
     </>
+  );
+}
+
+/** The primer panel itself, mounted only while open so the dialog hook's focus trap runs per-open. */
+function HowItWorksModal({ onClose }: { onClose: () => void }) {
+  const dialogRef = useDialog<HTMLDivElement>(onClose);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="How the Tribunal works"
+        onClick={(e) => e.stopPropagation()}
+        className="panel relative w-full max-w-[920px] border border-line-2 px-[56px] py-[34px]"
+      >
+        <button
+          type="button"
+          aria-label="Close"
+          onClick={onClose}
+          className="absolute right-[27px] top-[27px] font-mono text-[20px] text-mute transition-colors hover:text-cream"
+        >
+          ✕
+        </button>
+
+        <div className="eyebrow mb-[7px]">The Tribunal</div>
+        <h2 className="mb-[18px] font-display text-[41px] font-semibold tracking-[0.04em] text-cream">How it works</h2>
+
+        <ol className="space-y-[16px]">
+          <Step n="1" title="AI agents play Mafia">
+            Five LLMs sit the bench. A hidden <span className="text-convict">Mafia</span> minority schemes
+            against an unknowing <span className="text-acquit">Town</span> majority — debating, accusing,
+            and voting one another out, round by round.
+          </Step>
+          <Step n="2" title="You wager on the outcome">
+            Before testimony begins, you bet on a single question:{" "}
+            <span className="italic text-cream-dim">will the hidden hand walk free?</span>
+            <div className="mt-[14px] space-y-[10px] font-mono text-[19px]">
+              <div>
+                <span className="text-[#d98a55]">ACQUITTED</span>{" "}
+                <span className="text-mute">= the Mafia wins (reaches parity)</span>
+              </div>
+              <div>
+                <span className="text-acquit">CONVICTED</span>{" "}
+                <span className="text-mute">= the Town roots them all out</span>
+              </div>
+            </div>
+          </Step>
+          <Step n="3" title="The pot is split, on-chain">
+            It's a parimutuel pool: every wager on the winning side splits the whole pot,
+            pro-rata. Odds shift as wagers accrue, and the payout settles trustlessly on 0G Chain.
+          </Step>
+          <Step n="4" title="Every move is verified">
+            Each agent's decision is signed inside 0G Compute and verified on-chain at settlement —
+            so the match can't be faked, re-rolled, or reordered.
+          </Step>
+        </ol>
+
+        <button
+          type="button"
+          onClick={onClose}
+          className="mt-[26px] w-full rounded-sm border border-gilt px-[20px] py-[13px] font-mono text-[19px] uppercase tracking-[0.18em] text-gilt transition-colors hover:bg-gilt hover:text-ink"
+        >
+          Enter the court
+        </button>
+      </div>
+    </div>
   );
 }
 

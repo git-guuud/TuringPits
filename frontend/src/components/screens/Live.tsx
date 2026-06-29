@@ -4,6 +4,7 @@ import type { MatchApi, ViewState } from "../../state/matchStore.js";
 import { useMusic } from "../../lib/useMusic.js";
 import { useMediaQuery } from "../../lib/useMediaQuery.js";
 import { useCountdown } from "../../lib/useCountdown.js";
+import { useDialog } from "../../lib/useDialog.js";
 import { navigate } from "../../lib/useRoute.js";
 import { Masthead, liveness, phaseTag } from "../tribunal/Masthead.js";
 import { Bench } from "../tribunal/Bench.js";
@@ -295,6 +296,7 @@ function BottomDock({ s, onOpen }: { s: ViewState; onOpen: () => void }) {
 
 /** The bench, slid in from the left. The Bench panel renders its own header + scroll. */
 function BenchDrawer({ s, onClose }: { s: ViewState; onClose: () => void }) {
+  const dialogRef = useDialog<HTMLElement>(onClose);
   return (
     <>
       <motion.div
@@ -305,6 +307,10 @@ function BenchDrawer({ s, onClose }: { s: ViewState; onClose: () => void }) {
         onClick={onClose}
       />
       <motion.aside
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="The bench"
         className="panel fixed inset-y-0 left-0 z-50 flex w-[min(86vw,340px)] flex-col border-r border-line-2"
         initial={{ x: "-100%" }}
         animate={{ x: 0 }}
@@ -329,6 +335,7 @@ function BenchDrawer({ s, onClose }: { s: ViewState; onClose: () => void }) {
 
 /** The full Wagers panel, raised from the bottom as a sheet. */
 function WagersSheet({ api, onClose }: { api: MatchApi; onClose: () => void }) {
+  const dialogRef = useDialog<HTMLDivElement>(onClose);
   return (
     <>
       <motion.div
@@ -339,6 +346,10 @@ function WagersSheet({ api, onClose }: { api: MatchApi; onClose: () => void }) {
         onClick={onClose}
       />
       <motion.div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Wagers"
         className="panel fixed inset-x-0 bottom-0 z-50 flex h-[86dvh] flex-col rounded-t-2xl border-t border-line-2"
         initial={{ y: "100%" }}
         animate={{ y: 0 }}

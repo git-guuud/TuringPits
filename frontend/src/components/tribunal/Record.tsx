@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ViewState } from "../../state/matchStore.js";
+import { useDialog } from "../../lib/useDialog.js";
 import {
   betTokenAddress,
   explorerAddress,
@@ -39,6 +40,7 @@ const short = (h: string) => (h.length > 12 ? `${h.slice(0, 6)}…${h.slice(-4)}
 const isZero = (h?: string) => !h || /^0x0+$/.test(h);
 
 export function Record({ s, onClose }: { s: ViewState; onClose: () => void }) {
+  const dialogRef = useDialog<HTMLElement>(onClose);
   const r = s.record;
   const settled = s.market.state === "SETTLED";
   const anyMock = s.isMock; // whole feed is the labeled replay
@@ -68,6 +70,7 @@ export function Record({ s, onClose }: { s: ViewState; onClose: () => void }) {
       onClick={onClose}
     >
       <section
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="The Record"
