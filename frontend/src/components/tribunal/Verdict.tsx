@@ -816,7 +816,7 @@ export function Verdict({ api }: { api: MatchApi }) {
       )}
 
       {/* ── The market list — every bet on the table, scannable. Tap a row to expand one. ── */}
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {markets.map((mk) => (
           <MarketRow
             key={mk.key}

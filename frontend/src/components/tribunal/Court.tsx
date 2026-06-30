@@ -5,7 +5,6 @@ import { useTypewriter } from "../../lib/useTypewriter.js";
 import { bodyFall, dayBreak, gavel, loseSting, nightFall, winSting } from "../../lib/typeSound.js";
 import type { VoiceApi } from "../../lib/useVoice.js";
 import { Testimony } from "./Testimony.js";
-import { liveness } from "./Masthead.js";
 
 const TELLS = ["watching", "Mafia tell"];
 
@@ -202,24 +201,14 @@ export function Court({
   stepBack,
   skipToPresent,
   voice,
-  phaseLabel,
-  onOpenRecord,
 }: {
   s: ViewState;
   advance: () => void;
   stepBack: () => void;
   skipToPresent: () => void;
   voice: VoiceApi;
-  /** The phase tag (e.g. "Day · round 2"), shown top-right above the transcript button on desktop —
-   *  the narrow layout carries it in its own header instead, so it's omitted there. */
-  phaseLabel?: string;
-  /** When provided (desktop), the live/record status pill rides the bottom bar at the left and opens
-   *  the record on click. Omitted on narrow, where the mobile header already carries both. */
-  onOpenRecord?: () => void;
 }) {
   const scene = sceneFor(s);
-  // The live/record status for the bottom bar — only when this layout owns it (desktop).
-  const recordLive = onOpenRecord ? liveness(s) : null;
   // The stage paces each beat (seconds on screen) while the server emits them ~1/s, so the viewer
   // steadily falls behind "live" — and a late joiner replays from the very start. When the backlog
   // is meaningful, offer a prominent jump straight to the newest beat. Hidden once the record is
@@ -433,22 +422,16 @@ export function Court({
           )}
         </div>
       )}
-      {/* Stage control — the phase tag, and the testimony-log toggle stacked beneath it. (Audio toggles
-          live in the top panel.) */}
-      {(phaseLabel || shownTurns > 0 || showLog) && (
+      {/* Stage control — the testimony-log toggle. (Audio toggles + phase/liveness live in the header.) */}
+      {(shownTurns > 0 || showLog) && (
         <div className="absolute right-3 top-3 z-30 flex flex-col items-end gap-2">
-          {phaseLabel && (
-            <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-gilt">{phaseLabel}</span>
-          )}
-          {(shownTurns > 0 || showLog) && (
-            <button
-              type="button"
-              onClick={() => setShowLog((v) => !v)}
-              className="rounded-sm border border-line-2 px-2.5 py-1 font-mono text-[10.5px] uppercase tracking-[0.16em] text-mute transition-colors hover:border-gilt hover:text-gilt"
-            >
-              {showLog ? "Close ✕" : `Transcript · ${shownTurns}`}
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => setShowLog((v) => !v)}
+            className="rounded-sm border border-line-2 px-2.5 py-1 font-mono text-[10.5px] uppercase tracking-[0.16em] text-mute transition-colors hover:border-gilt hover:text-gilt"
+          >
+            {showLog ? "Close ✕" : `Transcript · ${shownTurns}`}
+          </button>
         </div>
       )}
       {showLog && <Testimony s={s} />}
@@ -513,54 +496,33 @@ export function Court({
         </div>
       </div>
 
-      {/* Pinned bottom bar — the live/record status sits at the left, the playback transport at the
-          right. It lives outside the scroll area, so long dialogue never carries the controls off. */}
-      {(recordLive || s.cursor >= 0) && (
-        <div className="relative z-30 flex shrink-0 items-center justify-between gap-3 px-4 pb-3 pt-1.5">
-          {recordLive && onOpenRecord ? (
-            <button
-              type="button"
-              onClick={onOpenRecord}
-              title="Open the record"
-              className={[
-                "flex items-center gap-2 rounded-full border border-line-2 px-3 py-1 font-mono text-[12px] uppercase tracking-[0.2em] transition-colors hover:border-gilt hover:text-cream",
-                recordLive.cls,
-              ].join(" ")}
-            >
-              <span className={["h-2 w-2 rounded-full", recordLive.dot, recordLive.pulse ? "animate-livepulse" : ""].join(" ")} />
-              {recordLive.label}
-            </button>
-          ) : (
-            <span />
-          )}
-
+      {/* Pinned bottom bar — the playback transport, kept to the right. It lives outside the scroll
+          area, so long dialogue never carries the controls off-screen. */}
+      {s.cursor >= 0 && (
+        <div className="relative z-30 flex shrink-0 items-center justify-end gap-3 px-4 pb-3 pt-1.5">
           {/* Playback transport — pause the auto-advance, or step a beat at a time to re-read a moment
               that scrolled past. Manual steps pause, so the show never runs off while you read. */}
-          {s.cursor >= 0 ? (
-            <div className="flex items-center gap-1 rounded-full border border-line-2 bg-[#131009]/90 px-1.5 py-1 backdrop-blur-sm">
-              <TransportBtn label="Step back a beat" disabled={!canBack} onClick={() => stepTo(stepBack)}>
-                ◀
-              </TransportBtn>
-              <button
-                type="button"
-                aria-label={paused ? "Resume playback" : "Pause playback"}
-                aria-pressed={paused}
-                title={paused ? "Play" : "Pause"}
-                onClick={() => setPaused((p) => !p)}
-                className={[
-                  "flex h-7 w-9 items-center justify-center rounded-full border font-mono text-[12px] leading-none transition-colors",
-                  paused ? "border-gilt bg-gilt/15 text-gilt" : "border-line-2 text-mute hover:border-gilt hover:text-gilt",
-                ].join(" ")}
-              >
-                {paused ? "▶" : "❚❚"}
-              </button>
-              <TransportBtn label="Step forward a beat" disabled={!canForward} onClick={() => stepTo(advance)}>
-                ▶
-              </TransportBtn>
-            </div>
-          ) : (
-            <span />
-          )}
+          <div className="flex items-center gap-1 rounded-full border border-line-2 bg-[#131009]/90 px-1.5 py-1 backdrop-blur-sm">
+            <TransportBtn label="Step back a beat" disabled={!canBack} onClick={() => stepTo(stepBack)}>
+              ◀
+            </TransportBtn>
+            <button
+              type="button"
+              aria-label={paused ? "Resume playback" : "Pause playback"}
+              aria-pressed={paused}
+              title={paused ? "Play" : "Pause"}
+              onClick={() => setPaused((p) => !p)}
+              className={[
+                "flex h-7 w-9 items-center justify-center rounded-full border font-mono text-[12px] leading-none transition-colors",
+                paused ? "border-gilt bg-gilt/15 text-gilt" : "border-line-2 text-mute hover:border-gilt hover:text-gilt",
+              ].join(" ")}
+            >
+              {paused ? "▶" : "❚❚"}
+            </button>
+            <TransportBtn label="Step forward a beat" disabled={!canForward} onClick={() => stepTo(advance)}>
+              ▶
+            </TransportBtn>
+          </div>
         </div>
       )}
     </section>

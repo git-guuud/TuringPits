@@ -8,7 +8,7 @@ import { useMediaQuery } from "../../lib/useMediaQuery.js";
 import { useCountdown } from "../../lib/useCountdown.js";
 import { useDialog } from "../../lib/useDialog.js";
 import { navigate } from "../../lib/useRoute.js";
-import { Masthead, liveness, phaseTag } from "../tribunal/Masthead.js";
+import { liveness, phaseTag } from "../tribunal/Masthead.js";
 import { Bench } from "../tribunal/Bench.js";
 import { Court } from "../tribunal/Court.js";
 import { Verdict } from "../tribunal/Verdict.js";
@@ -71,14 +71,14 @@ export function Live({ api }: { api: MatchApi }) {
       <main className="flex h-[100dvh] w-full flex-col overflow-hidden px-6 pb-4">
         {veil}
 
-        <div className="flex items-center gap-3 pt-3">
-          <NavLink onClick={() => navigate("menu")}>‹ Lobby</NavLink>
-          <NavLink onClick={() => navigate("history")}>Battle history</NavLink>
-          <WalletCapsule s={s} connect={api.connect} className="ml-auto" />
-          <AudioControls music={music} sound={sound} voice={voice} />
-        </div>
-
-        <Masthead s={s} />
+        <DesktopHeader
+          s={s}
+          music={music}
+          sound={sound}
+          voice={voice}
+          connect={api.connect}
+          onOpenRecord={() => setRecordOpen(true)}
+        />
 
         {/* THE BENCH · THE COURT · THE VERDICT — THE RECORD lives in a popup off the masthead.
             The bench collapses to a rail; the divider between the Court and the Wagers is draggable. */}
@@ -101,15 +101,7 @@ export function Live({ api }: { api: MatchApi }) {
           )}
 
           <div className="min-h-0 min-w-0 flex-1">
-            <Court
-              s={s}
-              advance={api.advance}
-              stepBack={api.stepBack}
-              skipToPresent={api.skipToPresent}
-              voice={voice}
-              phaseLabel={phaseTag(s)}
-              onOpenRecord={() => setRecordOpen(true)}
-            />
+            <Court s={s} advance={api.advance} stepBack={api.stepBack} skipToPresent={api.skipToPresent} voice={voice} />
           </div>
 
           {wagersCollapsed ? (
@@ -280,15 +272,67 @@ function WalletCapsule({ s, connect, className }: { s: ViewState; connect: () =>
   );
 }
 
-function NavLink({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
+/** Desktop header in the compact mobile-header style: a back arrow, the title + liveness chip with the
+ *  phase (and current speaker) beneath, then the wallet + audio controls. Tapping the title block opens
+ *  the record. The phase/liveness used to live on the Court stage; they ride here now. */
+function DesktopHeader({
+  s,
+  music,
+  sound,
+  voice,
+  connect,
+  onOpenRecord,
+}: {
+  s: ViewState;
+  music: ReturnType<typeof useMusic>;
+  sound: ReturnType<typeof useSound>;
+  voice: ReturnType<typeof useVoice>;
+  connect: () => void;
+  onOpenRecord: () => void;
+}) {
+  const live = liveness(s);
+  const speaker =
+    s.speakingSeat != null
+      ? s.personas.find((p) => p.seat === s.speakingSeat)?.name ?? `Seat ${s.speakingSeat}`
+      : null;
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="font-mono text-[11px] uppercase tracking-[0.18em] text-mute transition-colors hover:text-gilt"
-    >
-      {children}
-    </button>
+    <header className="flex shrink-0 items-center gap-4 border-b hairline pb-3 pt-3">
+      <button
+        type="button"
+        onClick={() => navigate("menu")}
+        aria-label="Back to lobby"
+        title="Back to lobby"
+        className="font-mono text-[24px] leading-none text-mute transition-colors hover:text-gilt"
+      >
+        ‹
+      </button>
+
+      <button type="button" onClick={onOpenRecord} title="Open the record" className="min-w-0 text-left">
+        <div className="flex items-center gap-3">
+          <span className="font-display text-[24px] font-semibold uppercase leading-none tracking-[0.3em] text-gilt">
+            Turing Pits
+          </span>
+          <span className={["flex shrink-0 items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.16em]", live.cls].join(" ")}>
+            <span className={["h-1.5 w-1.5 rounded-full", live.dot, live.pulse ? "animate-livepulse" : ""].join(" ")} />
+            {live.label}
+          </span>
+        </div>
+        <div className="mt-1 truncate font-mono text-[11px] uppercase tracking-[0.18em] text-gilt">
+          {phaseTag(s)}
+          {speaker && <span className="text-cream"> · {speaker} speaking</span>}
+        </div>
+      </button>
+
+      <div className="ml-auto flex items-center gap-3">
+        {s.isMock && (
+          <span className="rounded-sm border border-gilt-soft/40 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-gilt-soft" title="Replaying a captured match">
+            ◈ Mock feed
+          </span>
+        )}
+        <WalletCapsule s={s} connect={connect} />
+        <AudioControls music={music} sound={sound} voice={voice} />
+      </div>
+    </header>
   );
 }
 
@@ -447,7 +491,7 @@ function MobileHeader({
       <button type="button" onClick={onOpenRecord} title="Open the record" className="min-w-0 flex-1 text-left">
         <div className="flex items-center gap-2">
           <span className="truncate font-display text-[17px] font-semibold uppercase tracking-[0.2em] text-cream">
-            The Tribunal
+            Turing Pits
           </span>
           <span className={["flex shrink-0 items-center gap-1 font-mono text-[9.5px] uppercase tracking-[0.14em]", live.cls].join(" ")}>
             <span className={["h-1.5 w-1.5 rounded-full", live.dot, live.pulse ? "animate-livepulse" : ""].join(" ")} />

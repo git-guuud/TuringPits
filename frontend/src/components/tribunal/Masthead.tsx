@@ -37,24 +37,3 @@ export const phaseTag = (s: ViewState): string => {
   return "Wagers open";
 };
 
-export function Masthead({ s }: { s: ViewState }) {
-  return (
-    <header className="flex items-end justify-between border-b hairline px-1 pb-3 pt-3">
-      <div>
-        <h1 className="font-display text-[28px] font-semibold uppercase leading-none tracking-[0.34em] text-gilt">
-          Turing Pits
-        </h1>
-      </div>
-      <div className="flex flex-col items-end gap-2">
-        <div className="eyebrow text-right">
-          The People v. The Hidden Hand{s.nonce ? ` · case ${s.nonce.slice(-6)}` : ""}
-        </div>
-        {s.isMock && (
-          <span className="rounded-sm border border-gilt-soft/40 px-2 py-1 font-mono text-[10.5px] uppercase tracking-[0.16em] text-gilt-soft">
-            ◈ Mock feed · replaying captured match
-          </span>
-        )}
-      </div>
-    </header>
-  );
-}
