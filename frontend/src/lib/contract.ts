@@ -60,7 +60,7 @@ export function storageScanFile(cid: string): string {
  * needs the address up front. Override per-env with VITE_MARKET_ADDRESS.
  */
 export const MARKET_ADDRESS =
-  (import.meta.env.VITE_MARKET_ADDRESS as string | undefined) || "0xBCB635Bb7a9454F665288Ed9c6E99214C284D240";
+  (import.meta.env.VITE_MARKET_ADDRESS as string | undefined) || "0xdF955ED2D8C5D1F3C4Acfdb8e26885a25a79b917";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Optional EIP-2771 gas relayer ("gasless" path). A bettor signs a ForwardRequest (free); the

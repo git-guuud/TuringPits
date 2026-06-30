@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import type { MatchApi, ViewState } from "../../state/matchStore.js";
 import type { PropSnapshot, Side } from "../../lib/types.js";
 import { explorerTx } from "../../lib/contract.js";
@@ -57,11 +58,11 @@ function StateBadge({ s }: { s: ViewState }) {
         : "Verdict settled on-chain";
   const map: Record<string, { text: string; cls: string }> = {
     OPEN: preOpen
-      ? { text: "Sealing the record · wagers open shortly", cls: "text-cream-dim" }
-      : { text: "Wagers open · bet now", cls: "text-gilt" },
-    LOCKED: { text: "Wagers sealed · match running", cls: "text-cream-dim" },
+      ? { text: "Opening shortly", cls: "text-cream-dim" }
+      : { text: "Open", cls: "text-gilt" },
+    LOCKED: { text: "Closed", cls: "text-cream-dim" },
     SETTLED: { text: settledText, cls: "text-acquit border-acquit/40" },
-    REFUND: { text: "Match abandoned · stakes refundable", cls: "text-gilt border-gilt/40" },
+    REFUND: { text: "Match abandoned", cls: "text-gilt border-gilt/40" },
   };
   const m = map[s.market.state] ?? map.OPEN!;
   return (
@@ -81,8 +82,6 @@ interface Choice {
   eyebrowClass: string;
   /** The big display word for this outcome. */
   label: string;
-  /** Plain-language meaning, one line. */
-  sub: string;
   accent: string;
   bar: string;
   /** This choice's pool. */
@@ -114,15 +113,15 @@ function ChoiceCard({
       disabled={!selectable}
       onClick={onSelect}
       className={[
-        "relative w-full border px-3.5 py-3 text-left transition-colors",
+        "relative w-full border-[3px] px-3.5 py-3 text-left transition-colors",
         selected
           ? "border-gilt bg-gilt/[0.06]"
           : c.mine > 0
-            ? "border-line-2"
+            ? "border-gilt/60"
             : c.winner
               ? c.accent.replace("text-", "border-")
-              : "border-line",
-        selectable ? "cursor-pointer hover:border-line-2" : "cursor-default",
+              : "border-gilt/40",
+        selectable ? "cursor-pointer hover:border-gilt/70" : "cursor-default",
         dimmed ? "opacity-40" : "",
       ].join(" ")}
     >
@@ -136,14 +135,13 @@ function ChoiceCard({
           ✓ Picked
         </span>
       )}
-      <div className="flex items-center justify-between">
-        <span className={["font-mono text-[10px] uppercase tracking-[0.14em]", c.eyebrowClass].join(" ")}>{c.eyebrow}</span>
-        <span className="font-mono text-[15px] tabular-nums text-cream">{mult(c.pool, c.total)}</span>
+      <div className="flex items-center justify-between gap-1.5">
+        <span className={["truncate font-mono text-[10px] uppercase tracking-[0.14em]", c.eyebrowClass].join(" ")}>{c.eyebrow}</span>
+        <span className="shrink-0 font-mono text-[15px] tabular-nums text-cream">{mult(c.pool, c.total)}</span>
       </div>
       <div className={["mt-1.5 font-display text-[21px] tracking-[0.1em]", c.accent].join(" ")}>{c.label}</div>
-      <div className="mt-0.5 text-[13px] italic text-mute">{c.sub}</div>
-      <div className="mt-2.5 flex items-baseline justify-between font-mono text-[10.5px] tracking-[0.06em] text-mute">
-        <span>{pct(c.pool, c.total)}% of the pot backs this</span>
+      <div className="mt-2 flex items-baseline justify-between font-mono text-[10.5px] tracking-[0.06em] text-mute">
+        <span>{pct(c.pool, c.total)}% of pot</span>
         <span>◈ {parseFloat(c.pool).toFixed(2)}</span>
       </div>
       <div className="mt-1.5 h-0.5 bg-line">
@@ -183,12 +181,12 @@ interface BetMarket {
 }
 
 // PlayerFate death-round buckets (MafiaMarket.FATE_BUCKETS == 5), in outcome order.
-const FATE_COPY: ReadonlyArray<Pick<Choice, "eyebrow" | "eyebrowClass" | "label" | "sub" | "accent" | "bar">> = [
-  { eyebrow: "to the final bell", eyebrowClass: "text-acquit", label: "SURVIVES", sub: "still standing when the court rises", accent: "text-acquit", bar: "bg-acquit" },
-  { eyebrow: "first to fall", eyebrowClass: "text-convict", label: "OUT · R1", sub: "taken in the night or the opening vote", accent: "text-convict", bar: "bg-convict" },
-  { eyebrow: "second round", eyebrowClass: "text-convict", label: "OUT · R2", sub: "falls in the second round", accent: "text-convict", bar: "bg-convict" },
-  { eyebrow: "third round", eyebrowClass: "text-convict", label: "OUT · R3", sub: "falls in the third round", accent: "text-convict", bar: "bg-convict" },
-  { eyebrow: "the long game", eyebrowClass: "text-convict", label: "OUT · R4+", sub: "holds on, then falls late", accent: "text-convict", bar: "bg-convict" },
+const FATE_COPY: ReadonlyArray<Pick<Choice, "eyebrow" | "eyebrowClass" | "label" | "accent" | "bar">> = [
+  { eyebrow: "to the final bell", eyebrowClass: "text-acquit", label: "SURVIVES", accent: "text-acquit", bar: "bg-acquit" },
+  { eyebrow: "first to fall", eyebrowClass: "text-convict", label: "OUT · R1", accent: "text-convict", bar: "bg-convict" },
+  { eyebrow: "second round", eyebrowClass: "text-convict", label: "OUT · R2", accent: "text-convict", bar: "bg-convict" },
+  { eyebrow: "third round", eyebrowClass: "text-convict", label: "OUT · R3", accent: "text-convict", bar: "bg-convict" },
+  { eyebrow: "the long game", eyebrowClass: "text-convict", label: "OUT · R4+", accent: "text-convict", bar: "bg-convict" },
 ];
 
 // ── a single market in the at-a-glance list: collapsed header + (when open) inline outcomes+action ──
@@ -205,7 +203,6 @@ function MarketRow({
   amount,
   setAmount,
   stepStake,
-  chips,
   balance,
   gasless,
   getTestTokens,
@@ -223,7 +220,6 @@ function MarketRow({
   amount: string;
   setAmount: (a: string) => void;
   stepStake: (dir: number) => void;
-  chips: { label: string; value: string }[];
   balance: number | null;
   gasless: boolean;
   getTestTokens: () => void;
@@ -244,7 +240,7 @@ function MarketRow({
   const canWager = !!picked && !busy && stakeNum > 0 && !exceedsBalance;
 
   return (
-    <div className={["border transition-colors", open ? "border-line-2 bg-ink-2/40" : "border-line hover:border-line-2"].join(" ")}>
+    <div className={["border transition-colors", open ? "border-gilt/50 bg-ink-2/40" : "border-gilt/40 hover:border-gilt/60"].join(" ")}>
       {/* ── Collapsed header — title, status, odds peek, your position. Tap to expand. ── */}
       <button type="button" onClick={onToggle} className="flex w-full items-start justify-between gap-2 px-3.5 py-2.5 text-left">
         <div className="min-w-0 flex-1">
@@ -267,15 +263,33 @@ function MarketRow({
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-0.5">
           <span className={["rounded-sm border px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.12em]", m.pill.cls].join(" ")}>{m.pill.text}</span>
-          <span className="w-3 text-center font-mono text-[12px] leading-none text-mute">{open ? "▾" : "▸"}</span>
+          <motion.span
+            aria-hidden
+            animate={{ rotate: open ? 90 : 0 }}
+            transition={{ duration: 0.24, ease: "easeInOut" }}
+            className="inline-block w-3 text-center font-mono text-[12px] leading-none text-mute"
+          >
+            ▸
+          </motion.span>
         </div>
       </button>
 
       {/* ── Expanded body — the question, its outcomes, and the stake+confirm RIGHT HERE. ── */}
-      {open && (
-        <div className="border-t hairline px-3.5 pb-3.5 pt-3">
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            key="body"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.24, ease: "easeInOut" }}
+            className="overflow-hidden"
+          >
+            <div className="border-t hairline px-3.5 pb-3.5 pt-3">
           <div className="mb-3 font-display text-[18px] leading-tight text-cream">{m.question}</div>
-          <div className="flex flex-col gap-2.5">
+          {/* Tile the outcomes to the panel width — as many per row as fit (≈165px each), instead of
+              one tall card per row with a wasteland of empty space beside it. */}
+          <div className="grid gap-2.5 grid-cols-[repeat(auto-fill,minmax(165px,1fr))]">
             {m.choices.map((c) => (
               <ChoiceCard
                 key={c.key}
@@ -292,7 +306,7 @@ function MarketRow({
           <div className="mt-3.5 border-t hairline pt-3.5">
             {m.bettable ? (
               <>
-                <div className="mb-2 flex items-center justify-between">
+                {/* <div className="mb-2 flex items-center justify-between">
                   <span className="eyebrow">Stake</span>
                   <div className="flex items-center gap-2">
                     {gasless && (
@@ -314,7 +328,7 @@ function MarketRow({
                       </button>
                     )}
                   </div>
-                </div>
+                </div> */}
 
                 {/* Stepper: big −/+ tap targets flanking the amount. */}
                 <div className="flex items-center gap-2">
@@ -344,23 +358,6 @@ function MarketRow({
                   >
                     +
                   </button>
-                </div>
-
-                {/* Quick chips — full-width tap targets. */}
-                <div className="mt-2 flex gap-1.5">
-                  {chips.map((c) => (
-                    <button
-                      key={c.label}
-                      type="button"
-                      onClick={() => setAmount(c.value)}
-                      className={[
-                        "flex-1 rounded-sm border px-2 py-1.5 font-mono text-[11.5px] tracking-[0.06em] transition-colors",
-                        amount === c.value ? "border-gilt text-gilt" : "border-line text-mute hover:border-line-2 hover:text-cream-dim",
-                      ].join(" ")}
-                    >
-                      {c.label}
-                    </button>
-                  ))}
                 </div>
 
                 {!connected ? (
@@ -417,11 +414,6 @@ function MarketRow({
                     {m.hasWager ? " · adds to your wager" : ""}
                   </div>
                 )}
-                {connected && gasless && (
-                  <div className="mt-1.5 text-center font-mono text-[10px] tracking-[0.1em] text-gilt/70">
-                    Gas sponsored — just sign, no 0G needed.
-                  </div>
-                )}
               </>
             ) : m.canClaim ? (
               <button
@@ -438,8 +430,10 @@ function MarketRow({
               </div>
             )}
           </div>
-        </div>
-      )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -558,7 +552,6 @@ export function Verdict({ api }: { api: MatchApi }) {
           eyebrow: "Mafia faction",
           eyebrowClass: "text-[#d98a55]",
           label: "ACQUITTED",
-          sub: "the hidden hand walks free",
           accent: "text-[#d98a55]",
           bar: "bg-[#d98a55]",
           pool: s.market.yesPool,
@@ -571,7 +564,6 @@ export function Verdict({ api }: { api: MatchApi }) {
           eyebrow: "Town faction",
           eyebrowClass: "text-acquit",
           label: "CONVICTED",
-          sub: "the Town roots them out",
           accent: "text-acquit",
           bar: "bg-acquit",
           pool: s.market.noPool,
@@ -609,7 +601,9 @@ export function Verdict({ api }: { api: MatchApi }) {
     const decided = prop.closed === true || (prop.kind === "PLAYER_FATE" && !(aliveBySeat.get(prop.param) ?? true));
     const bettable = open && !decided;
     const myWin = win != null && myStakeFor(win) > 0;
-    const canClaim = !claimed && ((settled && (myWin || isVoid)) || (refundMode && myTotalStake > 0));
+    // A claim/refund only exists if you actually staked here: a win implies a stake on the winning
+    // outcome; a void or liveness refund returns your stake — so all three require myTotalStake > 0.
+    const canClaim = !claimed && ((settled && (myWin || (isVoid && myTotalStake > 0))) || (refundMode && myTotalStake > 0));
 
     let title: string;
     let question: string;
@@ -643,7 +637,6 @@ export function Verdict({ api }: { api: MatchApi }) {
           eyebrow: `seat ${seat + 1}`,
           eyebrowClass: "text-convict",
           label: seatName(seat),
-          sub: "to the gallows this round",
           accent: "text-convict",
           bar: "bg-convict",
           pool: prop.pools[seat] ?? "0",
@@ -657,7 +650,6 @@ export function Verdict({ api }: { api: MatchApi }) {
         eyebrow: "a hung vote",
         eyebrowClass: "text-acquit",
         label: "NO ONE",
-        sub: "the vote ties — nobody hangs",
         accent: "text-acquit",
         bar: "bg-acquit",
         pool: prop.pools[noOne] ?? "0",
@@ -745,13 +737,6 @@ export function Verdict({ api }: { api: MatchApi }) {
 
   const balance = s.wallet.balance != null ? parseFloat(s.wallet.balance) : null;
   const maxStake = balance != null ? Math.max(0, balance) : null;
-  const chips: { label: string; value: string }[] = [
-    { label: "0.01", value: "0.01" },
-    { label: "0.1", value: "0.1" },
-    { label: "1", value: "1" },
-    ...(maxStake != null && maxStake > 0 ? [{ label: "Max", value: maxStake.toFixed(3) }] : []),
-  ];
-
   // Stepper: nudge the stake by a magnitude-scaled increment, clamped to [0, balance].
   const stepStake = (dir: number) => {
     const v = parseFloat(amount) || 0;
@@ -771,8 +756,9 @@ export function Verdict({ api }: { api: MatchApi }) {
 
   return (
     <aside className="panel flex h-full min-h-0 flex-col overflow-hidden px-5 py-5">
-      <div className="eyebrow mb-4 border-b hairline pb-3">The Wagers</div>
-      <StateBadge s={s} />
+      <div className="eyebrow mb-4 border-b hairline pb-0">Wagers&#x20;
+        <StateBadge s={s} />
+      </div>
 
       {/* Live betting countdown — turns urgent in the final seconds. */}
       {live && countdown && (
@@ -846,7 +832,6 @@ export function Verdict({ api }: { api: MatchApi }) {
             amount={amount}
             setAmount={setAmount}
             stepStake={stepStake}
-            chips={chips}
             balance={balance}
             gasless={api.gasless}
             getTestTokens={mint}
@@ -856,41 +841,37 @@ export function Verdict({ api }: { api: MatchApi }) {
       </div>
 
       {/* ── Slim global footer: cross-market wallet identity + on-chain receipts. ── */}
-      <div className="mt-4 border-t hairline pt-3">
-        {s.tx.error && <div className="mb-2 text-center font-mono text-[11px] leading-snug text-convict">{s.tx.error}</div>}
+      {(s.tx.error || s.tx.lastHash || s.settleTxHash) && (
+        <div className="mt-4 border-t hairline pt-3">
+          {s.tx.error && <div className="mb-2 text-center font-mono text-[11px] leading-snug text-convict">{s.tx.error}</div>}
 
-        {/* Receipt: on-chain proof of the last wager/claim. */}
-        {s.tx.lastHash && !s.tx.pending && (
-          <a
-            href={explorerTx(s.tx.lastHash)}
-            target="_blank"
-            rel="noreferrer"
-            className="flex items-center justify-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-acquit transition-colors hover:text-cream"
-          >
-            ✓ Confirmed on-chain · {s.tx.lastHash.slice(0, 6)}…{s.tx.lastHash.slice(-4)}
-            <span aria-hidden>↗</span>
-          </a>
-        )}
+          {/* Receipt: on-chain proof of the last wager/claim. */}
+          {s.tx.lastHash && !s.tx.pending && (
+            <a
+              href={explorerTx(s.tx.lastHash)}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center justify-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-acquit transition-colors hover:text-cream"
+            >
+              ✓ Confirmed on-chain · {s.tx.lastHash.slice(0, 6)}…{s.tx.lastHash.slice(-4)}
+              <span aria-hidden>↗</span>
+            </a>
+          )}
 
-        {/* The settlement tx that verified the transcript and resolved the markets. */}
-        {settled && s.settleTxHash && (
-          <a
-            href={explorerTx(s.settleTxHash)}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-2 flex items-center justify-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-mute transition-colors hover:text-cream"
-          >
-            ⚖ Verdict settled on-chain · {s.settleTxHash.slice(0, 6)}…{s.settleTxHash.slice(-4)}
-            <span aria-hidden>↗</span>
-          </a>
-        )}
-
-        <div className="mt-2.5 text-center font-mono text-[11px] tracking-[0.06em] text-mute">
-          {connected
-            ? `${s.wallet.account?.slice(0, 6)}…${s.wallet.account?.slice(-4)}${balance != null ? ` · ${balance.toFixed(3)} CHIP` : ""} · 0G Galileo`
-            : "connect a wallet to enter the record"}
+          {/* The settlement tx that verified the transcript and resolved the markets. */}
+          {settled && s.settleTxHash && (
+            <a
+              href={explorerTx(s.settleTxHash)}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-2 flex items-center justify-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-mute transition-colors hover:text-cream"
+            >
+              ⚖ Verdict settled on-chain · {s.settleTxHash.slice(0, 6)}…{s.settleTxHash.slice(-4)}
+              <span aria-hidden>↗</span>
+            </a>
+          )}
         </div>
-      </div>
+      )}
     </aside>
   );
 }

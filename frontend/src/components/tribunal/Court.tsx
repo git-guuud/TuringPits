@@ -5,6 +5,7 @@ import { useTypewriter } from "../../lib/useTypewriter.js";
 import { bodyFall, dayBreak, gavel, loseSting, nightFall, winSting } from "../../lib/typeSound.js";
 import type { VoiceApi } from "../../lib/useVoice.js";
 import { Testimony } from "./Testimony.js";
+import { liveness } from "./Masthead.js";
 
 const TELLS = ["watching", "Mafia tell"];
 
@@ -34,6 +35,13 @@ function CaretBar({ at }: { at: "left-0" | "left-full" }) {
  */
 function RevealedSpeech({ full, count, done }: { full: string; count: number; done: boolean }) {
   const mask = giltMask(full);
+  const caretRef = useRef<HTMLSpanElement>(null);
+  // Follow the typing cursor: keep the just-revealed character in view so a long speech scrolls itself
+  // as it types instead of running off the bottom of the panel. `block: "nearest"` only nudges the
+  // scroll when the caret actually leaves the viewport, so it sits still while the line is visible.
+  useEffect(() => {
+    if (!done) caretRef.current?.scrollIntoView({ block: "nearest" });
+  }, [count, done]);
   return (
     <>
       {count === 0 && !done && (
@@ -46,6 +54,7 @@ function RevealedSpeech({ full, count, done }: { full: string; count: number; do
         return (
           <span
             key={i}
+            ref={boundary ? caretRef : undefined}
             className={[
               i < count ? "opacity-100" : "opacity-0",
               mask[i] ? "text-gilt" : "",
@@ -193,14 +202,24 @@ export function Court({
   stepBack,
   skipToPresent,
   voice,
+  phaseLabel,
+  onOpenRecord,
 }: {
   s: ViewState;
   advance: () => void;
   stepBack: () => void;
   skipToPresent: () => void;
   voice: VoiceApi;
+  /** The phase tag (e.g. "Day · round 2"), shown top-right above the transcript button on desktop —
+   *  the narrow layout carries it in its own header instead, so it's omitted there. */
+  phaseLabel?: string;
+  /** When provided (desktop), the live/record status pill rides the bottom bar at the left and opens
+   *  the record on click. Omitted on narrow, where the mobile header already carries both. */
+  onOpenRecord?: () => void;
 }) {
   const scene = sceneFor(s);
+  // The live/record status for the bottom bar — only when this layout owns it (desktop).
+  const recordLive = onOpenRecord ? liveness(s) : null;
   // The stage paces each beat (seconds on screen) while the server emits them ~1/s, so the viewer
   // steadily falls behind "live" — and a late joiner replays from the very start. When the backlog
   // is meaningful, offer a prominent jump straight to the newest beat. Hidden once the record is
@@ -217,8 +236,6 @@ export function Court({
   const { shown, done } = useTypewriter(scene.body, { sound: true });
   // The vote line types out, but only after the speech itself has finished.
   const move = useTypewriter(done && moveLine ? moveLine : "", { sound: true });
-  // Attestation provenance only ever shown for a day testimony — night carries no actor.
-  const att = s.currentBeat?.kind === "turn" ? s.currentBeat.turn.attestation : null;
   const [showLog, setShowLog] = useState(false);
   // Playback transport: when paused, the auto-advance below stands down so the current beat holds on
   // the stage. Stepping a beat at a time (back/forward) pauses too, so the show never runs off while
@@ -363,7 +380,7 @@ export function Court({
   }
 
   return (
-    <section className="panel relative flex h-full min-h-0 flex-col items-center justify-center overflow-y-auto px-5 pb-8 pt-3.5 sm:px-8">
+    <section className="panel relative flex h-full min-h-0 flex-col overflow-hidden">
       {/* Replaying banner — make it unmistakable the stage is behind live, with one big jump to now. */}
       {behindLive && (
         <button
@@ -416,16 +433,22 @@ export function Court({
           )}
         </div>
       )}
-      {/* Stage control — open the testimony log over the stage. (Audio toggles live in the top panel.) */}
-      {(shownTurns > 0 || showLog) && (
-        <div className="absolute right-3 top-3 z-30 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setShowLog((v) => !v)}
-            className="rounded-sm border border-line-2 px-2.5 py-1 font-mono text-[10.5px] uppercase tracking-[0.16em] text-mute transition-colors hover:border-gilt hover:text-gilt"
-          >
-            {showLog ? "Close ✕" : `Transcript · ${shownTurns}`}
-          </button>
+      {/* Stage control — the phase tag, and the testimony-log toggle stacked beneath it. (Audio toggles
+          live in the top panel.) */}
+      {(phaseLabel || shownTurns > 0 || showLog) && (
+        <div className="absolute right-3 top-3 z-30 flex flex-col items-end gap-2">
+          {phaseLabel && (
+            <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-gilt">{phaseLabel}</span>
+          )}
+          {(shownTurns > 0 || showLog) && (
+            <button
+              type="button"
+              onClick={() => setShowLog((v) => !v)}
+              className="rounded-sm border border-line-2 px-2.5 py-1 font-mono text-[10.5px] uppercase tracking-[0.16em] text-mute transition-colors hover:border-gilt hover:text-gilt"
+            >
+              {showLog ? "Close ✕" : `Transcript · ${shownTurns}`}
+            </button>
+          )}
         </div>
       )}
       {showLog && <Testimony s={s} />}
@@ -449,75 +472,95 @@ export function Court({
         />
       </motion.div>
 
-      <div className="relative z-10 mb-7 mt-1.5 text-center">
-        <div className="font-mono text-[12px] uppercase tracking-[0.3em] text-gilt">{scene.title}</div>
-        <div className="mt-1.5 font-body text-[15px] italic text-mute">{scene.note}</div>
-      </div>
-
-      <motion.h2
-        key={scene.name}
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-        className="relative z-10 text-center font-display text-[clamp(2rem,7vw,2.875rem)] font-bold leading-none tracking-[0.16em] text-cream sm:tracking-[0.2em]"
-        style={{ textShadow: "0 2px 30px rgba(240,197,82,.18)" }}
-      >
-        {scene.name}
-      </motion.h2>
-      <div className="relative z-10 mb-7 mt-2.5 text-center font-body text-[15px] italic text-gilt-soft">
-        <span className="mx-2 text-mute-2">—</span>
-        {scene.role}
-        <span className="mx-2 text-mute-2">—</span>
-      </div>
-
-      <blockquote className="relative z-10 min-h-[120px] w-full max-w-[34.5rem] text-center font-body text-[clamp(1.25rem,4.6vw,2rem)] italic leading-[1.55] text-cream sm:leading-[1.62]">
-        {/* Full text is laid out from the start; characters only fade in — so centered lines
-            never slide while typing. */}
-        <RevealedSpeech full={scene.body} count={shown.length} done={done} />
-      </blockquote>
-
-      {moveLine && (
-        <div className="relative z-10 mt-4 min-h-[1.3em] font-mono text-[13px] uppercase tracking-[0.22em] text-gilt">
-          {move.shown}
-          {!move.done && <span aria-hidden className="ml-0.5 inline-block h-[1em] w-0.5 animate-blink bg-gilt align-middle" />}
+      {/* The stage scrolls inside this inner area; the bottom bar below stays pinned, so long
+          dialogue can never carry the controls off-screen. */}
+      <div className="relative z-10 flex min-h-0 w-full flex-1 flex-col items-center overflow-y-auto px-5 pt-3.5 pb-3 sm:px-8">
+        {/* Centres when short; on a long speech the auto-margins collapse and the block scrolls. */}
+        <div className="my-auto flex w-full flex-col items-center py-3">
+        <div className="mb-7 mt-1.5 text-center">
+          <div className="font-mono text-[14px] uppercase tracking-[0.3em] text-gilt">{scene.title}</div>
+          <div className="mt-1.5 font-body text-[18px] italic text-mute">{scene.note}</div>
         </div>
-      )}
 
-      {att && (
-        <span className="absolute bottom-[4.25rem] left-1/2 z-20 inline-flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-sm border border-line-2 bg-[#131009] px-3 py-1.5 font-mono text-[11.5px] uppercase tracking-[0.14em] text-mute">
-          <span
-            className={[
-              "h-1.5 w-1.5 rounded-full",
-              att.source === "0g-tee" ? "bg-acquit shadow-[0_0_8px_rgba(127,160,126,0.8)]" : "bg-gilt-soft",
-            ].join(" ")}
-          />
-          {att.source === "0g-tee" ? "Sworn & witnessed · 0G attested" : "Local key · MOCK-local"} · {att.signerAddress.slice(0, 6)}…{att.signerAddress.slice(-4)}
-        </span>
-      )}
+        <motion.h2
+          key={scene.name}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className="text-center font-display text-[clamp(2rem,7vw,2.875rem)] font-bold leading-none tracking-[0.16em] text-cream sm:tracking-[0.2em]"
+          style={{ textShadow: "0 2px 30px rgba(240,197,82,.18)" }}
+        >
+          {scene.name}
+        </motion.h2>
+        <div className="mb-7 mt-2.5 text-center font-body text-[18px] italic text-gilt-soft">
+          <span className="mx-2 text-mute-2">—</span>
+          {scene.role}
+          <span className="mx-2 text-mute-2">—</span>
+        </div>
 
-      {/* Playback transport — pause the auto-advance, or step a beat at a time to re-read a moment
-          that scrolled past. Manual steps pause, so the show never runs off while you read. */}
-      {s.cursor >= 0 && (
-        <div className="absolute bottom-3 left-1/2 z-30 flex -translate-x-1/2 items-center gap-1 rounded-full border border-line-2 bg-[#131009]/90 px-1.5 py-1 backdrop-blur-sm">
-          <TransportBtn label="Step back a beat" disabled={!canBack} onClick={() => stepTo(stepBack)}>
-            ◀
-          </TransportBtn>
-          <button
-            type="button"
-            aria-label={paused ? "Resume playback" : "Pause playback"}
-            aria-pressed={paused}
-            title={paused ? "Play" : "Pause"}
-            onClick={() => setPaused((p) => !p)}
-            className={[
-              "flex h-7 w-9 items-center justify-center rounded-full border font-mono text-[12px] leading-none transition-colors",
-              paused ? "border-gilt bg-gilt/15 text-gilt" : "border-line-2 text-mute hover:border-gilt hover:text-gilt",
-            ].join(" ")}
-          >
-            {paused ? "▶" : "❚❚"}
-          </button>
-          <TransportBtn label="Step forward a beat" disabled={!canForward} onClick={() => stepTo(advance)}>
-            ▶
-          </TransportBtn>
+        <blockquote className="min-h-[120px] w-full max-w-[34.5rem] text-center font-body text-[clamp(1.25rem,4.6vw,2rem)] italic leading-[1.55] text-cream sm:leading-[1.62]">
+          {/* Full text is laid out from the start; characters only fade in — so centered lines
+              never slide while typing. */}
+          <RevealedSpeech full={scene.body} count={shown.length} done={done} />
+        </blockquote>
+
+        {moveLine && (
+          <div className="mt-4 min-h-[1.3em] font-mono text-[13px] uppercase tracking-[0.22em] text-gilt">
+            {move.shown}
+            {!move.done && <span aria-hidden className="ml-0.5 inline-block h-[1em] w-0.5 animate-blink bg-gilt align-middle" />}
+          </div>
+        )}
+        </div>
+      </div>
+
+      {/* Pinned bottom bar — the live/record status sits at the left, the playback transport at the
+          right. It lives outside the scroll area, so long dialogue never carries the controls off. */}
+      {(recordLive || s.cursor >= 0) && (
+        <div className="relative z-30 flex shrink-0 items-center justify-between gap-3 px-4 pb-3 pt-1.5">
+          {recordLive && onOpenRecord ? (
+            <button
+              type="button"
+              onClick={onOpenRecord}
+              title="Open the record"
+              className={[
+                "flex items-center gap-2 rounded-full border border-line-2 px-3 py-1 font-mono text-[12px] uppercase tracking-[0.2em] transition-colors hover:border-gilt hover:text-cream",
+                recordLive.cls,
+              ].join(" ")}
+            >
+              <span className={["h-2 w-2 rounded-full", recordLive.dot, recordLive.pulse ? "animate-livepulse" : ""].join(" ")} />
+              {recordLive.label}
+            </button>
+          ) : (
+            <span />
+          )}
+
+          {/* Playback transport — pause the auto-advance, or step a beat at a time to re-read a moment
+              that scrolled past. Manual steps pause, so the show never runs off while you read. */}
+          {s.cursor >= 0 ? (
+            <div className="flex items-center gap-1 rounded-full border border-line-2 bg-[#131009]/90 px-1.5 py-1 backdrop-blur-sm">
+              <TransportBtn label="Step back a beat" disabled={!canBack} onClick={() => stepTo(stepBack)}>
+                ◀
+              </TransportBtn>
+              <button
+                type="button"
+                aria-label={paused ? "Resume playback" : "Pause playback"}
+                aria-pressed={paused}
+                title={paused ? "Play" : "Pause"}
+                onClick={() => setPaused((p) => !p)}
+                className={[
+                  "flex h-7 w-9 items-center justify-center rounded-full border font-mono text-[12px] leading-none transition-colors",
+                  paused ? "border-gilt bg-gilt/15 text-gilt" : "border-line-2 text-mute hover:border-gilt hover:text-gilt",
+                ].join(" ")}
+              >
+                {paused ? "▶" : "❚❚"}
+              </button>
+              <TransportBtn label="Step forward a beat" disabled={!canForward} onClick={() => stepTo(advance)}>
+                ▶
+              </TransportBtn>
+            </div>
+          ) : (
+            <span />
+          )}
         </div>
       )}
     </section>

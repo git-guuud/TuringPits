@@ -86,8 +86,9 @@ check runs on-chain; any failure reverts.
 
 | Contract                | Address                                      |
 | ----------------------- | -------------------------------------------- |
-| `MafiaMarket`           | `0xBCB635Bb7a9454F665288Ed9c6E99214C284D240` |
-| `MockBetToken` (CHIP)   | `0xC983771bee3Acea4AB72045F6E6D0D22b6E1b1a6` |
+| `MafiaMarket`           | `0xdF955ED2D8C5D1F3C4Acfdb8e26885a25a79b917` |
+| `MockBetToken` (CHIP)   | `0x48cF05921C8f042Ed337f56F947542aB89691aBb` |
+| `Forwarder` (EIP-2771)  | `0xaD341c0A01eaA8EBe8B9aee9FD1364C619fB770A` |
 
 RPC `https://evmrpc-testnet.0g.ai` · Explorer https://chainscan-galileo.0g.ai · Faucet
 https://faucet.0g.ai (native 0G for gas; CHIP comes from the in-app faucet). `MafiaMarket` is a

@@ -6,9 +6,9 @@ _Updated: 2026-06-29_
 > 0G — `betYes/betNo(matchId, amount)` pull via approve+transferFrom; payouts/refunds/fees pay CHIP.
 > The menu shows the CHIP balance + a "Get test tokens" faucet button. **Betting also stays open
 > until settle()** (no block-based close/lock). Redeployed to Galileo: market
-> `0xBCB635Bb7a9454F665288Ed9c6E99214C284D240` (now also hosts per-seat **survival side markets** —
-> see DEPLOYMENT.md / TODO.md Post-MVP #1), token `0xC983771bee3Acea4AB72045F6E6D0D22b6E1b1a6`
-> (see DEPLOYMENT.md). Contract suite 49 green; frontend + server type-check clean.
+> `0xdF955ED2D8C5D1F3C4Acfdb8e26885a25a79b917` (now also hosts per-seat **survival side markets** —
+> see DEPLOYMENT.md / TODO.md Post-MVP #1), token `0x48cF05921C8f042Ed337f56F947542aB89691aBb`,
+> forwarder `0xaD341c0A01eaA8EBe8B9aee9FD1364C619fB770A`. Contract suite 49 green; frontend + server type-check clean.
 
 ## Current task
 **AI Mafia** (multiple LLMs playing Mafia). Days 1–6 **complete**: engine, TEE players,

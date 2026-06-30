@@ -37,35 +37,18 @@ export const phaseTag = (s: ViewState): string => {
   return "Wagers open";
 };
 
-export function Masthead({ s, onOpenRecord }: { s: ViewState; onOpenRecord: () => void }) {
-  const live = liveness(s);
+export function Masthead({ s }: { s: ViewState }) {
   return (
-    <header className="flex items-end justify-between border-b hairline px-1 pb-4 pt-7">
+    <header className="flex items-end justify-between border-b hairline px-1 pb-3 pt-3">
       <div>
-        <div className="eyebrow mb-2">
-          The People v. The Hidden Hand{s.nonce ? ` · case ${s.nonce.slice(-6)}` : ""}
-        </div>
-        <h1 className="font-display text-[30px] font-semibold uppercase leading-none tracking-[0.46em] text-cream">
-          The Tribunal
+        <h1 className="font-display text-[28px] font-semibold uppercase leading-none tracking-[0.34em] text-gilt">
+          Turing Pits
         </h1>
-        <div className="mt-2 font-body text-[15px] italic text-gilt-soft">
-          {s.seats.length > 0 ? `${s.seats.length} seats sworn` : "the court convenes"} · one hand hidden · the verdict wagered
-        </div>
       </div>
       <div className="flex flex-col items-end gap-2">
-        <button
-          type="button"
-          onClick={onOpenRecord}
-          title="Open the record"
-          className={[
-            "flex items-center gap-2 rounded-full border border-line-2 px-3 py-1 font-mono text-[12px] uppercase tracking-[0.24em] transition-colors hover:border-gilt hover:text-cream",
-            live.cls,
-          ].join(" ")}
-        >
-          <span className={["h-2 w-2 rounded-full", live.dot, live.pulse ? "animate-livepulse" : ""].join(" ")} />
-          {live.label}
-        </button>
-        <span className="font-mono text-[12px] uppercase tracking-[0.18em] text-gilt">{phaseTag(s)}</span>
+        <div className="eyebrow text-right">
+          The People v. The Hidden Hand{s.nonce ? ` · case ${s.nonce.slice(-6)}` : ""}
+        </div>
         {s.isMock && (
           <span className="rounded-sm border border-gilt-soft/40 px-2 py-1 font-mono text-[10.5px] uppercase tracking-[0.16em] text-gilt-soft">
             ◈ Mock feed · replaying captured match

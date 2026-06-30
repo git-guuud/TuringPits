@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { MatchApi, ViewState } from "../../state/matchStore.js";
 import { useMusic } from "../../lib/useMusic.js";
@@ -14,9 +14,13 @@ import { Court } from "../tribunal/Court.js";
 import { Verdict } from "../tribunal/Verdict.js";
 import { Record } from "../tribunal/Record.js";
 
-// The desktop three-pane: side panels stay bounded (so the centre stage never gets crushed at
-// 1024px, nor stretched on ultrawide) while the Court takes the rest.
-const PANE_COLUMNS = "clamp(220px,18vw,280px) minmax(0,1fr) clamp(360px,27vw,440px)";
+// The desktop three-pane. The bench is a fixed rail (collapsible to a sliver); the wagers panel has a
+// draggable width the viewer sets, clamped so neither it nor the centre stage can be crushed; the
+// Court takes whatever's left in between.
+const BENCH_WIDTH = 248;
+const WAGERS_DEFAULT = 408;
+const WAGERS_MIN = 340;
+const WAGERS_MAX = 840;
 
 /** The live arena — the bench, the court, and the verdict, fed by the live WebSocket match. */
 export function Live({ api }: { api: MatchApi }) {
@@ -27,6 +31,17 @@ export function Live({ api }: { api: MatchApi }) {
   const [recordOpen, setRecordOpen] = useState(false);
   const [benchOpen, setBenchOpen] = useState(false);
   const [wagersOpen, setWagersOpen] = useState(false);
+  // Desktop layout the viewer can shape: collapse the bench to reclaim its width, and drag the
+  // dialogue|wagers divider to set how the remaining space is split.
+  const [benchCollapsed, setBenchCollapsed] = useState(true);
+  const [wagersCollapsed, setWagersCollapsed] = useState(false);
+  const [wagersWidth, setWagersWidth] = useState(WAGERS_DEFAULT);
+  const paneRowRef = useRef<HTMLDivElement>(null);
+  const resizeWagers = (clientX: number) => {
+    const rect = paneRowRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setWagersWidth(Math.min(WAGERS_MAX, Math.max(WAGERS_MIN, rect.right - clientX)));
+  };
   // When night falls the whole arena cools to moonlight; the gilt warmth recedes until dawn.
   const night = s.phase === "night";
   const music = useMusic(night);
@@ -56,22 +71,66 @@ export function Live({ api }: { api: MatchApi }) {
       <main className="flex h-[100dvh] w-full flex-col overflow-hidden px-6 pb-4">
         {veil}
 
-        <div className="flex items-center gap-4 pt-3">
+        <div className="flex items-center gap-3 pt-3">
           <NavLink onClick={() => navigate("menu")}>‹ Lobby</NavLink>
           <NavLink onClick={() => navigate("history")}>Battle history</NavLink>
-          <AudioControls music={music} sound={sound} voice={voice} className="ml-auto" />
+          <WalletCapsule s={s} connect={api.connect} className="ml-auto" />
+          <AudioControls music={music} sound={sound} voice={voice} />
         </div>
 
-        <Masthead s={s} onOpenRecord={() => setRecordOpen(true)} />
+        <Masthead s={s} />
 
-        {/* THE BENCH · THE COURT · THE VERDICT — THE RECORD lives in a popup off the masthead */}
-        <div
-          className="mt-4 grid min-h-0 flex-1 gap-px bg-line"
-          style={{ gridTemplateColumns: PANE_COLUMNS }}
-        >
-          <Bench s={s} />
-          <Court s={s} advance={api.advance} stepBack={api.stepBack} skipToPresent={api.skipToPresent} voice={voice} />
-          <Verdict api={api} />
+        {/* THE BENCH · THE COURT · THE VERDICT — THE RECORD lives in a popup off the masthead.
+            The bench collapses to a rail; the divider between the Court and the Wagers is draggable. */}
+        <div ref={paneRowRef} className="mt-4 flex min-h-0 flex-1 overflow-hidden">
+          {benchCollapsed ? (
+            <BenchRail s={s} onExpand={() => setBenchCollapsed(false)} />
+          ) : (
+            <div className="relative min-h-0 shrink-0 border-r border-line" style={{ width: BENCH_WIDTH }}>
+              <button
+                type="button"
+                onClick={() => setBenchCollapsed(true)}
+                aria-label="Collapse the bench"
+                title="Collapse the bench"
+                className="absolute right-2 top-4 z-10 flex h-6 w-6 items-center justify-center rounded-sm border border-line-2 font-mono text-[13px] leading-none text-mute transition-colors hover:border-gilt hover:text-gilt"
+              >
+                «
+              </button>
+              <Bench s={s} />
+            </div>
+          )}
+
+          <div className="min-h-0 min-w-0 flex-1">
+            <Court
+              s={s}
+              advance={api.advance}
+              stepBack={api.stepBack}
+              skipToPresent={api.skipToPresent}
+              voice={voice}
+              phaseLabel={phaseTag(s)}
+              onOpenRecord={() => setRecordOpen(true)}
+            />
+          </div>
+
+          {wagersCollapsed ? (
+            <WagersRail s={s} onExpand={() => setWagersCollapsed(false)} />
+          ) : (
+            <>
+              <ResizeHandle onDrag={resizeWagers} />
+              <div className="relative min-h-0 shrink-0" style={{ width: wagersWidth }}>
+                <button
+                  type="button"
+                  onClick={() => setWagersCollapsed(true)}
+                  aria-label="Collapse the wagers"
+                  title="Collapse the wagers"
+                  className="absolute right-3 top-4 z-10 flex h-6 w-6 items-center justify-center rounded-sm border border-line-2 font-mono text-[13px] leading-none text-mute transition-colors hover:border-gilt hover:text-gilt"
+                >
+                  »
+                </button>
+                <Verdict api={api} />
+              </div>
+            </>
+          )}
         </div>
 
         {recordModal}
@@ -112,6 +171,114 @@ export function Live({ api }: { api: MatchApi }) {
 }
 
 // ── shared chrome ────────────────────────────────────────────────────────────────
+
+/** The draggable seam between the Court (dialogue) and the Wagers panel. Pointer-captured so the drag
+ *  keeps tracking even if the cursor outruns the thin handle. */
+function ResizeHandle({ onDrag }: { onDrag: (clientX: number) => void }) {
+  const dragging = useRef(false);
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the dialogue and wagers panels"
+      title="Drag to resize"
+      onPointerDown={(e) => {
+        dragging.current = true;
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        if (dragging.current) onDrag(e.clientX);
+      }}
+      onPointerUp={(e) => {
+        dragging.current = false;
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }}
+      className="group relative z-20 flex w-[3px] shrink-0 cursor-col-resize touch-none select-none items-stretch bg-line transition-colors hover:bg-gilt/40"
+    >
+      {/* a slightly wider invisible hit-area so the 3px seam is easy to grab */}
+      <span aria-hidden className="absolute inset-y-0 -left-1.5 -right-1.5" />
+      <span aria-hidden className="m-auto h-10 w-[3px] rounded bg-line-2 transition-colors group-hover:bg-gilt" />
+    </div>
+  );
+}
+
+/** The bench collapsed to a sliver — a vertical label + alive count that expands the full bench back. */
+function BenchRail({ s, onExpand }: { s: ViewState; onExpand: () => void }) {
+  const aliveCount = s.seats.filter((x) => x.alive).length;
+  const total = s.seats.length;
+  return (
+    <button
+      type="button"
+      onClick={onExpand}
+      aria-label="Expand the bench"
+      title="Expand the bench"
+      className="panel group flex w-10 shrink-0 flex-col items-center gap-4 border-r border-line py-4 transition-colors hover:bg-gilt/[0.05]"
+    >
+      <span className="font-mono text-[13px] leading-none text-mute transition-colors group-hover:text-gilt">»</span>
+      <span className="eyebrow rotate-180 tracking-[0.3em] [writing-mode:vertical-rl]">The Bench</span>
+      {total > 0 && (
+        <span className="mt-auto font-mono text-[12px] tabular-nums text-mute">
+          <span className="text-cream">{aliveCount}</span>/{total}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/** The wagers panel collapsed to a sliver on the right — a vertical label plus a live-betting pulse,
+ *  expanding the full Wagers panel back. Mirrors the bench rail on the opposite edge. */
+function WagersRail({ s, onExpand }: { s: ViewState; onExpand: () => void }) {
+  const live = s.market.state === "OPEN" && s.market.bettingLive === true;
+  return (
+    <button
+      type="button"
+      onClick={onExpand}
+      aria-label="Expand the wagers"
+      title={live ? "Wagers open — expand to bet" : "Expand the wagers"}
+      className="panel group flex w-10 shrink-0 flex-col items-center gap-4 border-l border-line py-4 transition-colors hover:bg-gilt/[0.05]"
+    >
+      <span className="font-mono text-[13px] leading-none text-mute transition-colors group-hover:text-gilt">«</span>
+      <span className="eyebrow tracking-[0.3em] [writing-mode:vertical-rl]">The Wagers</span>
+      {live && (
+        <span aria-hidden className="mt-auto h-1.5 w-1.5 animate-livepulse rounded-full bg-gilt" title="Wagers open" />
+      )}
+    </button>
+  );
+}
+
+/** Masthead wallet pill — a "Connect wallet" call-to-action until connected, then the live CHIP
+ *  balance. Sits left of the audio controls; the per-market action zones still own the actual betting. */
+function WalletCapsule({ s, connect, className }: { s: ViewState; connect: () => void; className?: string }) {
+  const connecting = s.wallet.status === "connecting";
+  if (s.wallet.status === "connected") {
+    const balance = s.wallet.balance != null ? parseFloat(s.wallet.balance) : null;
+    return (
+      <span
+        title={s.wallet.account ?? undefined}
+        className={[
+          "flex h-9 items-center gap-2 rounded-full border border-line-2 bg-ink-2 px-3.5 font-mono text-[12px] tracking-[0.06em] text-cream",
+          className ?? "",
+        ].join(" ")}
+      >
+        <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-acquit shadow-[0_0_8px_rgba(127,160,126,0.8)]" />
+        {balance != null ? `${balance.toFixed(3)} CHIP` : "wallet"}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={connect}
+      disabled={connecting}
+      className={[
+        "flex h-9 items-center rounded-full border border-gilt/50 bg-ink-2 px-3.5 font-mono text-[12px] uppercase tracking-[0.14em] text-gilt transition-colors hover:border-gilt hover:bg-gilt/10 disabled:opacity-60",
+        className ?? "",
+      ].join(" ")}
+    >
+      {connecting ? "Connecting…" : "Connect wallet"}
+    </button>
+  );
+}
 
 function NavLink({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
   return (

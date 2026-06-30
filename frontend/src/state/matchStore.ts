@@ -313,6 +313,9 @@ function reduce(state: ViewState, action: Action): ViewState {
         wallet: state.wallet,
         relay: state.relay,
         gaslessPref: state.gaslessPref,
+        // match_init arrives over an already-OPEN socket — keep the live status (baseState would
+        // otherwise slam it back to "connecting", leaving the masthead stuck on "Connecting…").
+        connection: state.connection,
         isMock: msg.isMock,
         nonce: msg.nonce,
         personas: msg.personas,
