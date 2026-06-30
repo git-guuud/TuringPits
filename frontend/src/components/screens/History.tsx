@@ -40,6 +40,8 @@ function reclaimableTotal(r: HistoryRow): number {
 /** Nested lenses on the record — claimable ⊆ mine ⊆ all. One control instead of scanning 60 rows. */
 type FilterMode = "all" | "mine" | "claimable";
 
+const PAGE_SIZE = 10; // battles per page — keep the list (and the DOM) to a readable window
+
 export function History({ api }: { api: MatchApi }) {
   const s = api.state;
   const { rows, loading } = useHistory(s.wallet.account, s.tx.lastHash);
@@ -53,6 +55,16 @@ export function History({ api }: { api: MatchApi }) {
   const claimableRows = rows.filter(isClaimable);
   const owed = claimableRows.reduce((acc, r) => acc + reclaimableTotal(r), 0);
   const visibleRows = filter === "claimable" ? claimableRows : filter === "mine" ? mineRows : rows;
+
+  // Page the visible rows so we render 10 at a time, not the whole record. Reset to the first page
+  // whenever the lens changes, and clamp so a shrinking list (e.g. after a claim) never strands us
+  // past the end.
+  const [page, setPage] = useState(0);
+  useEffect(() => setPage(0), [filter]);
+  const pageCount = Math.max(1, Math.ceil(visibleRows.length / PAGE_SIZE));
+  const clampedPage = Math.min(page, pageCount - 1);
+  const pageStart = clampedPage * PAGE_SIZE;
+  const pageRows = visibleRows.slice(pageStart, pageStart + PAGE_SIZE);
 
   // Only the lenses that hold something: drop "Claimable" when nothing's outstanding.
   const segments: [FilterMode, string, number][] = [
@@ -190,11 +202,38 @@ export function History({ api }: { api: MatchApi }) {
             <button type="button" onClick={() => setFilter("all")} className="text-gilt underline-offset-2 hover:underline">Show all battles</button>.
           </div>
         ) : (
-          <ul className="flex flex-col gap-px bg-line">
-            {visibleRows.map((r) => (
-              <Row key={r.summary.matchId} row={r} busy={busy} claimable={isClaimable(r)} onReclaim={onReclaim} onReclaimProp={onReclaimProp} />
-            ))}
-          </ul>
+          <>
+            <ul className="flex flex-col gap-px bg-line">
+              {pageRows.map((r) => (
+                <Row key={r.summary.matchId} row={r} busy={busy} claimable={isClaimable(r)} onReclaim={onReclaim} onReclaimProp={onReclaimProp} />
+              ))}
+            </ul>
+
+            {/* Page through the record 10 at a time — only when there's more than one page. */}
+            {visibleRows.length > PAGE_SIZE && (
+              <div className="mt-5 flex items-center justify-between font-mono text-[11px] uppercase tracking-[0.14em]">
+                <button
+                  type="button"
+                  onClick={() => setPage(clampedPage - 1)}
+                  disabled={clampedPage === 0}
+                  className="rounded-sm border border-line-2 px-3 py-1.5 text-cream-dim transition-colors hover:border-gilt hover:text-gilt disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line-2 disabled:hover:text-cream-dim"
+                >
+                  ‹ Prev
+                </button>
+                <span className="text-mute">
+                  {pageStart + 1}–{pageStart + pageRows.length} of {visibleRows.length}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPage(clampedPage + 1)}
+                  disabled={clampedPage >= pageCount - 1}
+                  className="rounded-sm border border-line-2 px-3 py-1.5 text-cream-dim transition-colors hover:border-gilt hover:text-gilt disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line-2 disabled:hover:text-cream-dim"
+                >
+                  Next ›
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
 

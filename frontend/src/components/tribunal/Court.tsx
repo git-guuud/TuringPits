@@ -1,12 +1,25 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
-import { CATCHUP_THRESHOLD, type ViewState } from "../../state/matchStore.js";
+import { CATCHUP_THRESHOLD, type Beat, type ViewState } from "../../state/matchStore.js";
 import { useTypewriter } from "../../lib/useTypewriter.js";
 import { bodyFall, dayBreak, gavel, loseSting, nightFall, winSting } from "../../lib/typeSound.js";
 import type { VoiceApi } from "../../lib/useVoice.js";
+import type { SpeakLine } from "../../lib/voice.js";
 import { Testimony } from "./Testimony.js";
 
 const TELLS = ["watching", "Mafia tell"];
+
+// Stage pacing once a beat has finished typing. A spoken beat holds until its audio ends, then a short
+// breath (AUDIO_TAIL) before the next speaker; a backstop (AUDIO_MAX_HOLD) advances anyway if a clip
+// never signals completion, so a stuck fetch can't freeze the show. Narration / muted playback (no
+// audio to wait on) uses a fixed read hold instead.
+const NARRATION_HOLD = 4000;
+const AUDIO_TAIL = 1200;
+const AUDIO_MAX_HOLD = 16000;
+// When the stage has fallen behind live (a backlog queued behind the cursor), stop waiting on the full
+// audio and drain beats briskly so the gap is self-limiting instead of widening — the "Skip to present"
+// banner is already up for an instant jump. Honoring the full clip is reserved for caught-up playback.
+const CATCHUP_HOLD = 1200;
 
 /** Per-character gilt mask for the two recurring tells, without parsing meaning. */
 function giltMask(text: string): boolean[] {
@@ -237,47 +250,88 @@ export function Court({
     move();
   };
 
+  // Voice control + the cursor whose spoken line has finished playing (bumped by speak's onEnded, which
+  // also fires on mute/synth-failure). The auto-advance below waits on this so a beat is never cut off.
+  const { speak: voiceSpeak, stop: voiceStop, prefetch: voicePrefetch, available: voiceAvailable, on: voiceOn } = voice;
+  const [audioDoneCursor, setAudioDoneCursor] = useState(-1);
+
   // Playback pacing: once a beat finishes typing, hold a moment, then advance the cursor to the
   // next beat — so nothing is ever cut off, even when the server (or a buffer replay) delivers
   // beats faster than they can be read. Only runs while a beat is actually on the stage, and never
-  // while paused (the viewer is holding to re-read).
+  // while paused (the viewer is holding to re-read). When the beat is being voiced, the hold tracks
+  // the AUDIO: wait for the spoken line to finish (then a short tail) instead of a fixed timer, so the
+  // clip is neither cut off early nor left hanging in silence. Narration / muted playback keeps the
+  // fixed read hold. `kind` check (not `lineForBeat`) so this doesn't re-run on every persona change.
+  const isSpeechBeat = s.currentBeat?.kind === "discussion" || s.currentBeat?.kind === "turn";
+  const audioExpected = voiceAvailable && voiceOn && !!isSpeechBeat && !s.playbackComplete;
   useEffect(() => {
     if (paused || !done || !s.currentBeat || s.reveal) return;
     const atLast = s.cursor >= s.beats.length - 1;
     if (atLast && !s.rawReveal) return; // last shown beat, match still going → wait for the next
-    const t = setTimeout(advance, 4000);
+    // Behind live (a backlog has queued behind the cursor): drain briskly and DON'T wait on the audio,
+    // so the trail is self-limiting rather than widening with every long clip. Caught up: a voiced beat
+    // still mid-playback holds until its audio ends (a backstop advances anyway if the clip never signals
+    // done); once the audio is done — or this is narration / muted — use the tail / read hold. onEnded
+    // fires on mute and on synth failure too, so this can't deadlock.
+    const behind = s.pendingBeats >= CATCHUP_THRESHOLD;
+    const waitingOnAudio = !behind && audioExpected && audioDoneCursor !== s.cursor;
+    const hold = waitingOnAudio
+      ? AUDIO_MAX_HOLD
+      : behind
+        ? CATCHUP_HOLD
+        : audioExpected
+          ? AUDIO_TAIL
+          : NARRATION_HOLD;
+    const t = setTimeout(advance, hold);
     return () => clearTimeout(t);
-  }, [paused, done, s.currentBeat, s.reveal, s.rawReveal, s.cursor, s.beats.length, advance]);
+  }, [paused, done, s.currentBeat, s.reveal, s.rawReveal, s.cursor, s.beats.length, s.pendingBeats, advance, audioExpected, audioDoneCursor]);
 
   // Speak the player's line when a day-speech beat reaches the stage, alongside the typewriter. Night,
   // dawn and the verdict are narration — fall silent there. Keyed on the cursor (via a ref guard) so a
   // pause or an unrelated re-render never restarts the current line, but stepping to a new beat does.
-  const { speak: voiceSpeak, stop: voiceStop, available: voiceAvailable } = voice;
   const lastVoiceCursor = useRef(-2);
-  useEffect(() => {
-    if (!voiceAvailable) return;
-    if (lastVoiceCursor.current === s.cursor && !s.playbackComplete) return;
-    lastVoiceCursor.current = s.cursor;
+  // Resolve a beat to the line to voice (null for night/dawn narration) — shared by speak + prefetch.
+  const lineForBeat = (b: Beat | null): SpeakLine | null => {
+    if (!b) return null;
     const persona = (seat: number) => s.personas.find((p) => p.seat === seat);
     const nameOf = (seat: number) => persona(seat)?.name ?? `Seat ${seat}`;
-    const b = s.currentBeat;
-    if (s.playbackComplete || !b) {
-      voiceStop();
-    } else if (b.kind === "discussion") {
-      voiceSpeak({ text: b.speech, name: nameOf(b.seat), blurb: persona(b.seat)?.blurb, kind: "discussion" });
-    } else if (b.kind === "turn") {
+    if (b.kind === "discussion")
+      return { text: b.speech, name: nameOf(b.seat), blurb: persona(b.seat)?.blurb, kind: "discussion" };
+    if (b.kind === "turn") {
       const d = b.turn.decision;
-      voiceSpeak({
+      return {
         text: b.turn.speech,
         name: nameOf(b.turn.seat),
         blurb: persona(b.turn.seat)?.blurb,
         kind: "vote",
         targetName: d.action === "vote" ? nameOf(d.target) : null,
-      });
-    } else {
-      voiceStop(); // night / dawn narration
+      };
     }
-  }, [s.cursor, s.playbackComplete, s.currentBeat, s.personas, voiceAvailable, voiceSpeak, voiceStop]);
+    return null;
+  };
+  useEffect(() => {
+    if (!voiceAvailable) return;
+    if (lastVoiceCursor.current === s.cursor && !s.playbackComplete) return;
+    const cursorAtCall = s.cursor;
+    lastVoiceCursor.current = cursorAtCall;
+    const line = lineForBeat(s.currentBeat);
+    if (s.playbackComplete || !line) {
+      voiceStop();
+    } else {
+      // onEnded marks this cursor done so the stage can advance the instant the voice finishes.
+      voiceSpeak(line, { onEnded: () => setAudioDoneCursor(cursorAtCall) });
+    }
+    // Warm the next spoken line so it plays instantly when it reaches the stage — this is what closes
+    // the "audio starts well after the text" gap (the tag + synth round-trip happens during this beat).
+    for (let i = cursorAtCall + 1; i < s.beats.length; i++) {
+      const next = lineForBeat(s.beats[i] ?? null);
+      if (next) {
+        voicePrefetch(next);
+        break;
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.cursor, s.playbackComplete, s.currentBeat, s.personas, s.beats, voiceAvailable, voiceSpeak, voiceStop, voicePrefetch]);
 
   // ── Dramatic SFX ──────────────────────────────────────────────────────────────────────────────
   // Procedural stings punctuate the key beats (shares the typewriter's per-user mute + autoplay

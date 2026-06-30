@@ -18,9 +18,27 @@ import { toPublicState, toPublicTurn } from "./redact.js";
 import { gateTurn, newNightGate } from "./night.js";
 import { buildPersonas, buildProvider, runMatch } from "./match-runner.js";
 import type { Hub } from "./broadcast.js";
-import type { PropSnapshot } from "./wire.js";
+import type { PropSnapshot, WsMessage } from "./wire.js";
+import { estimateSpeechMs, type Tts, type ToneInput } from "./tts.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Reject a promise that runs past `ms` so a slow synth can never stall the match loop. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("timeout")), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
 
 export interface OrchestratorConfig {
   rpcUrl: string;
@@ -79,7 +97,7 @@ function randomSeed(): string {
   return "0x" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 }
 
-export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<void> {
+export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts): Promise<void> {
   const provider = new JsonRpcProvider(cfg.rpcUrl, cfg.chainId);
   const host = new Wallet(cfg.hostPrivateKey, provider);
   const market = new Contract(cfg.marketAddress, MAFIA_MARKET_ABI, host);
@@ -383,6 +401,57 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
     if (changed) await pushPools();
   };
 
+  // ── voice-paced stage emission ────────────────────────────────────────────────────────────────
+  // Beats are released to the stage at the speed they can actually be WATCHED, not the speed they are
+  // inferred — otherwise a slow ElevenLabs line (~10s) against a fast emit cadence makes the viewer
+  // fall behind and voices get cut off. The pipeline the user asked for:
+  //   infer(N) → synth(N) (warms the clip the client will play) → wait out beat N-1's playback → emit N
+  //   → return immediately so infer(N+1) runs IN PARALLEL with watching N.
+  // Because playMatch awaits the hook, returning right after `emit` (not after the playback elapses) is
+  // what lets the next inference overlap the current beat — the synth/infer of N+1 hide under N's audio.
+  const personaName = (seat: number) => personas.find((p) => p.seat === seat)?.name ?? `Seat ${seat}`;
+  const personaBlurb = (seat: number) => personas.find((p) => p.seat === seat)?.blurb;
+  // The spoken line behind a beat (null for night/dawn narration, which carries no audio).
+  const speechLineFor = (m: WsMessage): ToneInput | null => {
+    if (m.type === "discussion")
+      return { text: m.speech, name: personaName(m.seat), blurb: personaBlurb(m.seat), kind: "discussion" };
+    if (m.type === "turn") {
+      const d = m.turn.decision;
+      return {
+        text: m.turn.speech,
+        name: personaName(m.turn.seat),
+        blurb: personaBlurb(m.turn.seat),
+        kind: "vote",
+        targetName: d.action === "vote" ? personaName(d.target) : null,
+      };
+    }
+    return null;
+  };
+  const AUDIO_TAIL_MS = Number(process.env.TTS_TAIL_MS ?? 1200); // a breath after a line, matches the client
+  const NARRATION_PACE_MS = Number(process.env.NARRATION_PACE_MS ?? 8000); // night/dawn (no audio) read time
+  const SYNTH_TIMEOUT_MS = Number(process.env.TTS_SYNTH_TIMEOUT_MS ?? 8000); // never let a slow synth stall
+  // How long this beat will occupy the stage — the real audio length when we can synth it, else a text
+  // estimate, else a fixed narration read. Synthesizing here ALSO warms the client's clip cache.
+  const playbackMsFor = async (line: ToneInput | null): Promise<number> => {
+    if (!line) return NARRATION_PACE_MS;
+    if (tts?.enabled) {
+      try {
+        return (await withTimeout(tts.durationMs(line), SYNTH_TIMEOUT_MS)) + AUDIO_TAIL_MS;
+      } catch (e) {
+        console.warn(`[orch] tts duration fell back to a text estimate: ${(e as Error).message}`);
+      }
+    }
+    return estimateSpeechMs(line.text) + AUDIO_TAIL_MS;
+  };
+  let freeAt = 0; // wall-clock at which the previous beat finishes playing on the stage
+  const emitPaced = async (m: WsMessage): Promise<void> => {
+    const dur = await playbackMsFor(speechLineFor(m)); // synth runs here, overlapping the prior playback
+    const wait = freeAt - Date.now();
+    if (wait > 0) await sleep(wait); // hold until the previous beat has finished on the stage
+    hub.broadcast(m); // the client now shows this beat's text alongside its (pre-warmed) audio
+    freeAt = Date.now() + dur; // the next beat waits out THIS beat's playback
+  };
+
   let result;
   try {
     result = await runMatch({
@@ -399,10 +468,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
           toPublicState(state),
           toPublicTurn(turn),
         );
-        for (const m of msgs) {
-          hub.broadcast(m);
-          await sleep(cfg.moveIntervalMs);
-        }
+        for (const m of msgs) await emitPaced(m);
         // After the public death beat lands, freeze the fallen seat's player-fate market on-chain.
         await closeFallenProps(state);
         // The recurring "voted out" market opens the new round's market and freezes already-resolved
@@ -410,10 +476,9 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig): Promise<vo
         await syncVotedOutMarkets(state);
       },
       // Daytime deliberation streams as-is: it is public day speech (the discussion pass never runs
-      // at night), so no role can leak. Paced like a turn so the stage can read it.
+      // at night), so no role can leak. Paced by its spoken duration so the stage can keep up.
       onDiscussion: async (entry, state) => {
-        hub.broadcast({ type: "discussion", seat: entry.seat, round: entry.round, speech: entry.speech, state: toPublicState(state) });
-        await sleep(cfg.moveIntervalMs);
+        await emitPaced({ type: "discussion", seat: entry.seat, round: entry.round, speech: entry.speech, state: toPublicState(state) });
       },
     });
   } finally {

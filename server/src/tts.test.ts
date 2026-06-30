@@ -1,7 +1,16 @@
 import { describe, it, expect } from "vitest";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { createTts, heuristicTaggedText, type ToneInput } from "./tts.js";
+import {
+  createTts,
+  heuristicTaggedText,
+  parseTaggerResponse,
+  sanitizeTaggedLine,
+  estimateMp3DurationMs,
+  estimateSpeechMs,
+  RECOGNIZED_TAGS,
+  type ToneInput,
+} from "./tts.js";
 import { DEFAULT_VOICE_MAP, DEFAULT_FALLBACK_VOICE, loadVoiceMap, voiceFor } from "./voices.js";
 
 // ── fake http req/res ─────────────────────────────────────────────────────────
@@ -99,6 +108,122 @@ describe("heuristic tone tags", () => {
   });
 });
 
+describe("sanitizeTaggedLine — keep recognized v3 tags, strip everything else", () => {
+  it("keeps a recognized tag and leaves plain words untouched", () => {
+    expect(sanitizeTaggedLine("[nervous] I think it's Vesper.")).toBe("[nervous] I think it's Vesper.");
+    expect(sanitizeTaggedLine("No tags here at all.")).toBe("No tags here at all.");
+  });
+
+  it("strips an unrecognized tag (a stage direction v3 would speak aloud)", () => {
+    expect(sanitizeTaggedLine("[leans forward] You're lying.")).toBe("You're lying.");
+    expect(sanitizeTaggedLine("I saw it [clears throat] last round.")).toBe("I saw it last round.");
+  });
+
+  it("removes a player-leaked bracket while keeping a real tag", () => {
+    expect(sanitizeTaggedLine("[accusing] It was [whispers to himself] you all along.")).toBe(
+      "[accusing] It was you all along.",
+    );
+  });
+
+  it("normalizes tag casing/whitespace to the canonical [tag] form", () => {
+    expect(sanitizeTaggedLine("[ SERIOUS ] We vote now.")).toBe("[serious] We vote now.");
+  });
+
+  it("collapses the gaps left by stripped tags, including before punctuation", () => {
+    expect(sanitizeTaggedLine("Wait [pauses] , who said that?")).toBe("Wait, who said that?");
+    expect(sanitizeTaggedLine("[unknown]   leading junk")).toBe("leading junk");
+  });
+
+  it("every recognized tag survives the sanitizer round-trip", () => {
+    for (const tag of RECOGNIZED_TAGS) {
+      expect(sanitizeTaggedLine(`[${tag}] line`)).toBe(`[${tag}] line`);
+    }
+  });
+
+  it("the heuristic tagger's output always survives sanitization", () => {
+    const vote = heuristicTaggedText(line({ kind: "vote", text: "I vote Vesper." }));
+    const question = heuristicTaggedText(line({ text: "Why so quiet?" }));
+    expect(sanitizeTaggedLine(vote)).toBe(vote);
+    expect(sanitizeTaggedLine(question)).toBe(question);
+  });
+});
+
+describe("parseTaggerResponse — validate the LLM tagger reply against the line it was given", () => {
+  const original = "I think Vesper is hiding something.";
+
+  it("returns a tagged reply whose words still match the original", () => {
+    const tagged = "[nervous] I think Vesper is hiding something. [accusing]";
+    expect(parseTaggerResponse(tagged, original)).toBe(tagged);
+  });
+
+  it("trims surrounding whitespace from the reply", () => {
+    expect(parseTaggerResponse(`  [serious] ${original}\n`, original)).toBe(`[serious] ${original}`);
+  });
+
+  it("throws on an empty or missing reply", () => {
+    expect(() => parseTaggerResponse(undefined, original)).toThrow(/no text/);
+    expect(() => parseTaggerResponse("   ", original)).toThrow(/no text/);
+  });
+
+  it("throws when the model rewrote the line instead of only tagging it (drift)", () => {
+    // A chatty model that answered/rewrote rather than inserting tags must be rejected so the caller
+    // falls back to the heuristic instead of voicing words the player never said.
+    expect(() => parseTaggerResponse("[curious] Sure! Here is a punchier version of that.", original)).toThrow(
+      /drift/,
+    );
+  });
+
+  it("accepts a reply that only differs by inserted tags and spacing", () => {
+    const tagged = "[serious] I think Vesper [whispers] is hiding something.";
+    expect(() => parseTaggerResponse(tagged, original)).not.toThrow();
+  });
+});
+
+describe("play-length estimation (stage pacing)", () => {
+  it("derives mp3 duration from byte size at the default 128 kbps", () => {
+    // 160 000 bytes × 8 ÷ 128 kbps = 10 000 ms
+    expect(estimateMp3DurationMs(160_000)).toBe(10_000);
+    expect(estimateMp3DurationMs(80_000)).toBe(5_000);
+  });
+
+  it("honors a custom bitrate", () => {
+    expect(estimateMp3DurationMs(160_000, 64)).toBe(20_000);
+  });
+
+  it("clamps degenerate sizes into the pacing window and treats empty as zero", () => {
+    expect(estimateMp3DurationMs(0)).toBe(0);
+    expect(estimateMp3DurationMs(10)).toBe(1_500); // tiny clip floored
+    expect(estimateMp3DurationMs(100_000_000)).toBe(30_000); // huge clip capped
+  });
+
+  it("estimates speech length from text at ~14 chars/sec, clamped", () => {
+    expect(estimateSpeechMs("")).toBe(0);
+    expect(estimateSpeechMs("hi")).toBe(1_500); // floored
+    expect(estimateSpeechMs("x".repeat(140))).toBe(10_000); // 140 / 14 × 1000
+    expect(estimateSpeechMs("x".repeat(100_000))).toBe(30_000); // capped
+  });
+});
+
+describe("createTts — durationMs", () => {
+  it("synthesizes once and reports the clip's play length from its byte size", async () => {
+    let synthCalls = 0;
+    const tts = createTts(
+      { ...baseCfg, apiKey: "x" },
+      {
+        tag: async (i) => i.text,
+        synth: async () => {
+          synthCalls++;
+          return Buffer.alloc(160_000); // 10s at 128 kbps
+        },
+      },
+    );
+    expect(await tts.durationMs(line())).toBe(10_000);
+    // A second call for the same line reuses the cached audio — no extra synth.
+    await tts.durationMs(line());
+    expect(synthCalls).toBe(1);
+  });
+});
+
 describe("createTts — disabled (no key)", () => {
   const tts = createTts(baseCfg);
   it("reports disabled", () => {
@@ -128,7 +253,7 @@ describe("createTts — enabled (injected synth + tagger)", () => {
     const tts = createTts(
       { ...baseCfg, apiKey: "x" },
       {
-        tag: async (i) => `[t]${i.text}`,
+        tag: async (i) => `[serious] ${i.text}`,
         synth: async (text) => {
           synthCalls++;
           await Promise.resolve();
@@ -145,7 +270,25 @@ describe("createTts — enabled (injected synth + tagger)", () => {
     await tts.handle(fakeReq("POST", "/tts", JSON.stringify(line({ text: "hello" }))), r);
     expect(r.statusCode).toBe(200);
     expect(r.headers["Content-Type"]).toBe("audio/mpeg");
-    expect(r.text).toBe("[t]hello"); // tagger output reached synth
+    expect(r.text).toBe("[serious] hello"); // tagger output reached synth
+  });
+
+  it("sanitizes the tagged line before synthesis — an unrecognized tag never reaches the voice", async () => {
+    let synthed = "";
+    const tts = createTts(
+      { ...baseCfg, apiKey: "x" },
+      {
+        // A drifting tagger inserts a stage direction v3 would otherwise read out loud.
+        tag: async (i) => `[leans in] [nervous] ${i.text} [glances around]`,
+        synth: async (text) => {
+          synthed = text;
+          return Buffer.from(text);
+        },
+      },
+    );
+    await tts.getAudio(line({ text: "I think it's Vesper." }));
+    expect(synthed).toBe("[nervous] I think it's Vesper."); // foreign tags stripped, recognized kept
+    expect(synthed).not.toMatch(/leans in|glances around/);
   });
 
   it("caches by content — identical lines synthesize once", async () => {

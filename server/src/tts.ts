@@ -56,6 +56,12 @@ export interface TtsConfig {
   rateRefillMs?: number;
   /** Max characters accepted for a single line. */
   maxTextLength?: number;
+  /**
+   * Bitrate (kbps) of the mp3 ElevenLabs returns — used to estimate a clip's play length for stage
+   * pacing. We never override `output_format`, so this is the endpoint default (128). Override only if
+   * a custom `output_format` is ever set.
+   */
+  audioBitrateKbps?: number;
 }
 
 /** Inject fakes in tests (no network); production uses the real ElevenLabs + Anthropic calls. */
@@ -72,6 +78,11 @@ export interface Tts {
   handle(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
   /** Synthesize (or return cached) audio for a line. Exposed for tests/reuse. */
   getAudio(input: ToneInput): Promise<Buffer>;
+  /**
+   * Synthesize (or reuse cached) the line and return its approximate play length in ms — so the match
+   * orchestrator can pace the stage to the actual spoken duration. Also warms the cache the client will
+   * hit. Throws on synth failure so the caller can fall back to a text estimate. */
+  durationMs(input: ToneInput): Promise<number>;
   info(): { enabled: boolean; model: string; tagger: "llm" | "heuristic" };
 }
 
@@ -124,6 +135,43 @@ function clientKey(req: IncomingMessage): string {
 // ── tone tagging ─────────────────────────────────────────────────────────────
 
 /**
+ * The ElevenLabs v3 audio tags we allow through to synthesis — the exact set the LLM tagger is told to
+ * use (see the system prompt below). v3 is alpha and will SPEAK ALOUD any bracketed token it does not
+ * recognise as a delivery cue, so this allow-list is the guard that stops the voice from reading a
+ * drifting tagger's "[leans forward]" — or a stage direction leaked out of the player's own dialogue —
+ * out loud. Anything not in here is stripped before the line ever reaches ElevenLabs.
+ */
+export const RECOGNIZED_TAGS: ReadonlySet<string> = new Set([
+  "nervous",
+  "accusing",
+  "whispers",
+  "sarcastic",
+  "serious",
+  "curious",
+  "excited",
+  "angry",
+  "sighs",
+]);
+
+/**
+ * Drop every bracketed segment that is not a recognised v3 audio tag, so nothing unintended is ever
+ * voiced literally. Recognised tags are normalised to their lower-case `[tag]` form and kept inline;
+ * everything else — `[clears throat]`, `[leans in]`, a player-leaked stage direction — is removed, and
+ * the whitespace the removal leaves behind (double spaces, a space before punctuation) is collapsed.
+ * Applied to whatever the tagger returns (LLM or heuristic) as the final step before synthesis.
+ */
+export function sanitizeTaggedLine(text: string): string {
+  const stripped = text.replace(/\[([^\]]*)\]/g, (_whole, inner: string) => {
+    const tag = inner.trim().toLowerCase();
+    return RECOGNIZED_TAGS.has(tag) ? `[${tag}]` : "";
+  });
+  return stripped
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([.,!?;:])/g, "$1")
+    .trim();
+}
+
+/**
  * Heuristic tone tags from the game context already on the wire — no extra LLM call. A day vote is
  * pointed; a question is curious; an exclamation is heated. Tags from ElevenLabs v3's recognised set.
  */
@@ -136,14 +184,34 @@ export function heuristicTaggedText(input: ToneInput): string {
   return tag ? `${tag} ${input.text}` : input.text;
 }
 
+/**
+ * Parse + validate a tone-tagger model reply against the line it was handed. Returns the tagged line on
+ * success; throws when the model returned nothing, or DRIFTED from the original wording (a chatty model
+ * that rewrote or answered the line instead of only inserting tags) so the caller can fall back to the
+ * heuristic. The drift check de-tags the reply and requires it to still contain the start of the line.
+ */
+export function parseTaggerResponse(modelText: string | undefined, originalLine: string): string {
+  const text = modelText?.trim();
+  if (!text) throw new Error("anthropic returned no text");
+  // Guard against a chatty model: keep tags only when the de-tagged line still contains the original —
+  // otherwise discard and let the caller fall back to the heuristic.
+  const stripped = text.replace(/\[[^\]]*\]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+  const original = originalLine.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!stripped.includes(original.slice(0, Math.min(original.length, 24)))) {
+    throw new Error("tagger drifted from the original line");
+  }
+  return text;
+}
+
 /** Call a fast Claude model to insert v3 tone tags. Throws on any failure so the caller can fall back. */
 async function llmTaggedText(input: ToneInput, apiKey: string, model: string): Promise<string> {
   const system =
     "You add ElevenLabs v3 audio tags to a single line of dialogue spoken by an AI playing the " +
     "social-deduction game Mafia, so the voice delivery matches the moment. Insert 1-3 bracketed " +
-    "tags inline at natural points (e.g. [nervous], [accusing], [whispers], [sarcastic], [serious], " +
-    "[curious], [excited], [angry], [sighs]). Do NOT change, add, or remove any words. Return ONLY " +
-    "the same line with tags inserted — no quotes, no preamble, no explanation.";
+    "tags inline at natural points. Use ONLY these tags and NO others: [nervous], [accusing], " +
+    "[whispers], [sarcastic], [serious], [curious], [excited], [angry], [sighs]. Never invent a tag " +
+    "and never write a stage direction in brackets. Do NOT change, add, or remove any spoken words. " +
+    "Return ONLY the same line with tags inserted — no quotes, no preamble, no explanation.";
   const ctx =
     input.kind === "vote"
       ? `Context: this is a VOTE to convict ${input.targetName ?? "another player"}.`
@@ -169,15 +237,7 @@ async function llmTaggedText(input: ToneInput, apiKey: string, model: string): P
   if (!res.ok) throw new Error(`anthropic ${res.status}`);
   const data = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
   const text = data.content?.find((b) => b.type === "text")?.text;
-  if (!text || !text.trim()) throw new Error("anthropic returned no text");
-  // Guard against a chatty model: if the words drifted, keep tags only when the de-tagged line still
-  // contains the original — otherwise discard and let the caller fall back to the heuristic.
-  const stripped = text.replace(/\[[^\]]*\]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
-  const original = input.text.replace(/\s+/g, " ").trim().toLowerCase();
-  if (!stripped.includes(original.slice(0, Math.min(original.length, 24)))) {
-    throw new Error("tagger drifted from the original line");
-  }
-  return text.trim();
+  return parseTaggerResponse(text, input.text);
 }
 
 // ── real ElevenLabs synthesis ──────────────────────────────────────────────────
@@ -197,6 +257,33 @@ async function elevenLabsSynth(apiKey: string, modelId: string, text: string, vo
     throw new Error(`elevenlabs ${res.status}: ${detail.slice(0, 200)}`);
   }
   return Buffer.from(await res.arrayBuffer());
+}
+
+// ── play-length estimation (for stage pacing) ──────────────────────────────────
+
+/** Clamp a pacing duration to a sane window so a stray estimate can't stall or rush the stage. */
+const clampDur = (ms: number): number => Math.min(30_000, Math.max(1_500, Math.round(ms)));
+
+/**
+ * Approximate the play length (ms) of an ElevenLabs mp3 from its byte size. The TTS endpoint returns
+ * CBR mp3 at the default 128 kbps (we never override output_format), so duration ≈ bits / bitrate. The
+ * couple-KB ID3 header makes this a slight OVER-estimate on short clips, which is the safe direction for
+ * pacing (a touch of silence beats a clipped word). Clamped to a sane window.
+ */
+export function estimateMp3DurationMs(byteLength: number, bitrateKbps = 128): number {
+  if (byteLength <= 0 || bitrateKbps <= 0) return 0;
+  return clampDur((byteLength * 8) / bitrateKbps); // bytes*8 bits ÷ kbps = ms
+}
+
+/**
+ * Fallback play-length (ms) estimate from the TEXT alone, for when synthesis is unavailable (TTS off,
+ * or a synth call that timed out/failed). ElevenLabs v3 speaks at ~14 chars/sec; clamped so a stray
+ * very-short or very-long line can't mis-pace the stage.
+ */
+export function estimateSpeechMs(text: string, charsPerSec = 14): number {
+  const chars = text.trim().length;
+  if (chars === 0) return 0;
+  return clampDur((chars / charsPerSec) * 1000);
 }
 
 // ── factory ──────────────────────────────────────────────────────────────────
@@ -242,7 +329,9 @@ export function createTts(cfg: TtsConfig, deps: TtsDeps = {}): Tts {
 
     const p = (async () => {
       const tagged = await tag(input);
-      return synth(tagged, voiceId);
+      // Final guard: strip any bracketed token that isn't a recognised v3 audio tag, so a drifting
+      // tagger (or a stage direction leaked from the player's own line) is never read out loud.
+      return synth(sanitizeTaggedLine(tagged), voiceId);
     })();
     pending.set(key, p);
     try {
@@ -256,6 +345,11 @@ export function createTts(cfg: TtsConfig, deps: TtsDeps = {}): Tts {
     } finally {
       pending.delete(key);
     }
+  }
+
+  async function durationMs(input: ToneInput): Promise<number> {
+    const audio = await getAudio(input);
+    return estimateMp3DurationMs(audio.length, cfg.audioBitrateKbps ?? 128);
   }
 
   function info() {
@@ -307,6 +401,7 @@ export function createTts(cfg: TtsConfig, deps: TtsDeps = {}): Tts {
   return {
     enabled,
     getAudio,
+    durationMs,
     info,
     async handle(req, res) {
       const url = (req.url ?? "").split("?")[0];

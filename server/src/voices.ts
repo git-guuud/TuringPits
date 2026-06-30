@@ -15,24 +15,31 @@
  * voice 404s at synthesis time, override it via ELEVENLABS_VOICE_MAP (see myTasks.md).
  */
 
-/** name → ElevenLabs premade voiceId. 16 distinct voices, one per persona in the roster. */
+/**
+ * name → ElevenLabs voiceId. 16 distinct voices, one per persona in the roster.
+ *
+ * These are ElevenLabs' CURRENT default-library voices (the newer, v3-optimised set) rather than the
+ * older legacy premades — the legacy ones (Adam/Arnold/Antoni/Josh/Elli/Emily) render flat and synthetic
+ * on eleven_v3, which is what sounded "bot-like". The replacements below are the natural, conversational
+ * default voices, matched to each persona's blurb.
+ */
 export const DEFAULT_VOICE_MAP: Readonly<Record<string, string>> = {
-  Atlas: "pNInz6obpgDQGcFmaJgB", // Adam — deep, certain
+  Atlas: "nPczCjzI2devNBz1zQrb", // Brian — deep, resonant, confident (was Adam: robotic)
   Vesper: "XB0fDUnXU5powFXDhCwa", // Charlotte — dry, wry
-  Nova: "MF3mGyEYCl7XYWbV9V6O", // Elli — earnest, emotional
+  Nova: "FGY2WhTYpPnrIDTdsKH5", // Laura — young, warm, earnest (was Elli: robotic)
   Kestrel: "TX3LPaxmHKxFdv7VOQHJ", // Liam — quick, clipped
   Mira: "EXAVITQu4vr4xnSDxMaL", // Sarah — measured, even
   Juno: "onwK4e9ZLuTAKqWW03F9", // Daniel — calm, plainspoken
-  Oracle: "VR6AewLTigWG4xSOukaG", // Arnold — weighty, cryptic
+  Oracle: "CwhRBWXzGAHq8TQ4Fs17", // Roger — weighty, mature, deliberate (was Arnold: robotic)
   Cassius: "JBFqnCBsd6RMkjVDRZzb", // George — formal, lawyerly
   Pip: "pFZP5JQG7iQjIQuC4Bku", // Lily — chatty, breezy
   Rook: "N2lVS1w4EtoT3dr4eOWO", // Callum — terse, grim
   Lark: "XrExE9yKIg1WjnnlVkGX", // Matilda — bright, warm
-  Sable: "ErXwobaYiN019PkySvjV", // Antoni — cool, cynical
+  Sable: "cjVigY5qzO86Huf0OWal", // Eric — cool, smooth, cynical (was Antoni: robotic)
   Bram: "pqHfZKP75CvOlQylNhV4", // Bill — gruff, direct
   Odette: "Xb7hH8MSUJpSbSDYk0k2", // Alice — poised, precise
-  Flint: "TxGEqnHWrfWFTfGW9XjX", // Josh — fiery, pushy
-  Wren: "LcfcDJNUP1GQjkzn1xUU", // Emily — soft-spoken, gentle
+  Flint: "IKne3meq5aSn9XLyUdCD", // Charlie — energetic, pushy (was Josh: robotic)
+  Wren: "SAz9YHcvj6GT2YYXdXww", // River — calm, gentle, natural (was Emily: robotic)
 };
 
 /** Fallback voice for any name not present in the map. Overridable via ELEVENLABS_DEFAULT_VOICE_ID. */

@@ -136,8 +136,9 @@ async function main() {
 
     try {
       // Each round is independent: orchestrator resets the hub buffer and (unless MATCH_SEED is
-      // pinned) draws a fresh random seed, so every round is a brand-new match.
-      await runOneMatch(hub, cfg);
+      // pinned) draws a fresh random seed, so every round is a brand-new match. `tts` lets the
+      // orchestrator pace the stage to the actual spoken duration (and pre-warm each clip's cache).
+      await runOneMatch(hub, cfg, tts);
       console.log(`[server] round ${round}: match complete.`);
     } catch (err) {
       console.error(`[server] round ${round}: match failed:`, err);

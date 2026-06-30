@@ -1,11 +1,17 @@
 /**
- * Reads every past battle straight from the contract for the History screen — no WebSocket, no
- * server. Walks [0, nextMatchId) newest-first, and (when a wallet is connected) annotates each
- * battle with the viewer's own stake and what, if anything, is still reclaimable on it. Reading
- * from chain (rather than a local list) means History is correct on any device and survives a
- * cleared browser. Re-scans on an interval and whenever `refreshSignal` changes (e.g. after a claim).
+ * Reads past battles straight from the contract for the History screen — no WebSocket, no server.
+ * Walks [0, nextMatchId) newest-first, and (when a wallet is connected) annotates each battle with
+ * the viewer's own stake and what, if anything, is still reclaimable on it. Reading from chain
+ * (rather than a local list) means History is correct on any device and survives a cleared browser.
+ *
+ * A settled/refunded match is immutable on-chain, so we cache it by id and never re-read it: each
+ * periodic tick only fetches matches that are new or still live. Crucially, a row is replaced only on
+ * a *successful* read — a transient RPC failure keeps the last-known-good row, so battles never blink
+ * out of the list (the old "scan from scratch, silently skip failures, replace everything" loop
+ * dropped any match whose read happened to fail that pass). A deep refresh (re-read the viewer's claim
+ * state) runs on wallet change and after a tx via `refreshSignal`.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   currentBlock,
   MARKET_ADDRESS,
@@ -46,70 +52,193 @@ export interface HistoryRow {
 }
 
 const MAX_ROWS = 60; // newest battles; plenty for a demo, bounds the read fan-out
+// One cheap eth_call each → read summaries wide so every battle shows fast.
+const SUMMARY_CONCURRENCY = 8;
+// Each viewer-position read fans out to many stake/prop sub-calls; keep it gentle so the public RPC
+// doesn't rate-limit. Anything that still fails just retries next scan — the battle is already shown.
+const MINE_CONCURRENCY = 2;
+const POLL_MS = 30000;
+
+/** SETTLED/REFUND matches are terminal: their summary never changes again on-chain. */
+const isTerminal = (s: MatchSummary) => s.state === "SETTLED" || s.state === "REFUND";
+
+/** Cache entry: the battle (summary) plus whether the viewer's position has been successfully read. */
+type CachedRow = HistoryRow & { mineResolved: boolean };
 
 export function useHistory(account: string | null, refreshSignal: unknown): { rows: HistoryRow[]; loading: boolean } {
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const scan = useCallback(async () => {
-    try {
-      const next = await readNextMatchId();
-      const ids: number[] = [];
-      for (let i = next - 1; i >= 0 && ids.length < MAX_ROWS; i--) ids.push(i);
+  // Persistent across scans: the merge target. Only ever updated on a successful read.
+  const cacheRef = useRef(new Map<number, CachedRow>());
+  const accountRef = useRef<string | null>(account);
+  // Single-flight guard: never let an interval tick race a tx-driven deep refresh.
+  const inFlightRef = useRef(false);
+  const pendingDeepRef = useRef(false);
 
-      let head = 0;
+  // Publish the current cache as the visible list, newest-first.
+  const publish = useCallback((ids: number[]) => {
+    const cache = cacheRef.current;
+    setRows(ids.map((id) => cache.get(id)).filter((r): r is CachedRow => !!r));
+  }, []);
+
+  // The viewer's position on one battle — stake, claim status, and any reclaimable side pots. This is
+  // the expensive read (stakes + a fan-out over every side-market prop), and it's *connected-only*.
+  // It's kept separate from the summary so that when it fails (RPC rate-limit on the prop fan-out), the
+  // battle still renders — only the reclaim annotation is deferred to the next scan.
+  const readMine = useCallback(
+    async (summary: MatchSummary, head: number): Promise<HistoryRow["mine"]> => {
+      if (!account) return undefined;
+      const id = summary.matchId;
+      const st = await readStakesPublic(MARKET_ADDRESS, id, account);
+      const yes = parseFloat(st.yes);
+      const no = parseFloat(st.no);
+      const stake = yes + no;
+      // Survival side pots only become claimable once the match is terminal; read them only then to
+      // bound the per-row RPC fan-out.
+      const props = isTerminal(summary)
+        ? propReclaimsOf(await readPropPositions(MARKET_ADDRESS, id, account), summary.state)
+        : [];
+      const hasProps = props.length > 0;
+      if (stake <= 0 && !hasProps) return undefined;
+      return {
+        stakeYes: yes,
+        stakeNo: no,
+        claimed: st.claimed,
+        reclaim: stake > 0 ? reclaimOf(summary, yes, no, st.claimed, head) : undefined,
+        props: hasProps ? props : undefined,
+      };
+    },
+    [account],
+  );
+
+  const scanOnce = useCallback(
+    async (deep: boolean) => {
+      const cache = cacheRef.current;
       try {
-        head = await currentBlock();
-      } catch {
-        /* no head → can't offer the "enable refund" flip this pass */
-      }
+        const next = await readNextMatchId();
+        const ids: number[] = [];
+        for (let i = next - 1; i >= 0 && ids.length < MAX_ROWS; i--) ids.push(i);
 
-      const out: HistoryRow[] = [];
-      for (const id of ids) {
+        let head = 0;
         try {
-          const summary = await readMatchSummary(id);
-          let mine: HistoryRow["mine"];
-          if (account) {
-            const st = await readStakesPublic(MARKET_ADDRESS, id, account);
-            const yes = parseFloat(st.yes);
-            const no = parseFloat(st.no);
-            const stake = yes + no;
-            // Survival side pots only become claimable once the match is terminal; read them only
-            // then to bound the per-row RPC fan-out.
-            const props =
-              summary.state === "SETTLED" || summary.state === "REFUND"
-                ? propReclaimsOf(await readPropPositions(MARKET_ADDRESS, id, account), summary.state)
-                : [];
-            const hasProps = props.length > 0;
-            if (stake > 0 || hasProps) {
-              mine = {
-                stakeYes: yes,
-                stakeNo: no,
-                claimed: st.claimed,
-                reclaim: stake > 0 ? reclaimOf(summary, yes, no, st.claimed, head) : undefined,
-                props: hasProps ? props : undefined,
-              };
-            }
-          }
-          out.push({ summary, mine });
+          head = await currentBlock();
         } catch {
-          /* skip an unreadable match; the rest still render */
+          /* no head → can't offer the "enable refund" flip this pass */
+        }
+
+        // Forget rows that have scrolled out of the visible window so the cache can't grow unbounded.
+        const visible = new Set(ids);
+        for (const key of [...cache.keys()]) if (!visible.has(key)) cache.delete(key);
+
+        // ── Phase 1 · summaries. The summary *is* the battle, so this must be robust: one cheap call,
+        // read wide. Terminal summaries are immutable → reuse. A fresh/live summary marks mine unresolved
+        // so phase 2 (re)reads the viewer's position for it.
+        const needSummary = ids.filter((id) => {
+          const c = cache.get(id);
+          return !c || !isTerminal(c.summary); // new, or still OPEN/LOCKED (may have advanced)
+        });
+        await mapWithConcurrency(needSummary, SUMMARY_CONCURRENCY, async (id) => {
+          try {
+            const summary = await withRetry(() => readMatchSummary(id));
+            cache.set(id, { summary, mine: cache.get(id)?.mine, mineResolved: false });
+          } catch {
+            /* leave any cached row in place; a brand-new id simply retries next scan */
+          }
+        });
+        publish(ids); // every battle is visible now — connected or not, regardless of phase 2
+
+        // ── Phase 2 · viewer positions (connected only). Best-effort annotation: a failure here never
+        // drops the battle, it just leaves mineResolved=false so the next scan retries it.
+        if (account) {
+          const needMine = ids.filter((id) => {
+            const c = cache.get(id);
+            if (!c) return false; // no summary → nothing to annotate yet
+            if (!c.mineResolved) return true; // never resolved, or summary was just refreshed
+            return deep; // already resolved → only re-read after a wallet tx
+          });
+          await mapWithConcurrency(needMine, MINE_CONCURRENCY, async (id) => {
+            const c = cache.get(id);
+            if (!c) return;
+            try {
+              const mine = await withRetry(() => readMine(c.summary, head));
+              cache.set(id, { summary: c.summary, mine, mineResolved: true });
+              publish(ids); // reclaim buttons pop in as positions resolve
+            } catch {
+              /* keep mineResolved=false → retried next scan; the battle stays visible meanwhile */
+            }
+          });
+          publish(ids);
+        }
+      } finally {
+        setLoading(false);
+      }
+    },
+    [account, readMine, publish],
+  );
+
+  // Single-flight wrapper: coalesce overlapping requests so a tx-driven deep refresh that lands during
+  // an in-flight scan still runs (and wins) instead of being dropped.
+  const runScan = useCallback(
+    async (deep: boolean) => {
+      if (inFlightRef.current) {
+        pendingDeepRef.current = pendingDeepRef.current || deep;
+        return;
+      }
+      inFlightRef.current = true;
+      try {
+        await scanOnce(deep);
+      } finally {
+        inFlightRef.current = false;
+        if (pendingDeepRef.current) {
+          pendingDeepRef.current = false;
+          void runScan(true);
         }
       }
-      setRows(out);
-    } finally {
-      setLoading(false);
-    }
-  }, [account]);
+    },
+    [scanOnce],
+  );
 
   useEffect(() => {
-    setLoading(true);
-    void scan();
-    const id = setInterval(() => void scan(), 30000);
-    return () => clearInterval(id);
-  }, [scan, refreshSignal]);
+    // A wallet switch invalidates every cached `mine`; rebuild from scratch and show the loader.
+    if (accountRef.current !== account) {
+      accountRef.current = account;
+      cacheRef.current.clear();
+      setRows([]);
+    }
+    setLoading(cacheRef.current.size === 0);
+    void runScan(true); // mount / account / post-tx → deep refresh
+    const iv = setInterval(() => void runScan(false), POLL_MS); // tail check: new + live matches only
+    return () => clearInterval(iv);
+  }, [account, refreshSignal, runScan]);
 
   return { rows, loading };
+}
+
+/** Run `fn` over `items` with at most `limit` in flight at once. */
+async function mapWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor++];
+      if (item !== undefined) await fn(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
+/** Retry a read once on a transient RPC failure — recovers the odd dropped call without hammering. */
+async function withRetry<T>(fn: () => Promise<T>, tries = 2, delayMs = 400): Promise<T> {
+  let last: unknown;
+  for (let t = 0; t < tries; t++) {
+    try {
+      return await fn();
+    } catch (e) {
+      last = e;
+      if (t < tries - 1) await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw last;
 }
 
 /** What the viewer can still collect on a battle they wagered on, or undefined if nothing. */
