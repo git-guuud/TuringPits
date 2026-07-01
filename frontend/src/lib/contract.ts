@@ -383,9 +383,9 @@ export async function readMyStakes(address: string, matchId: number, wallet: Wal
 export async function readStakesPublic(address: string, matchId: number, account: string): Promise<MyStakes> {
   const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
   const [yes, no, claimed] = await Promise.all([
-    c.getFunction("stakeYes")(matchId, account) as Promise<bigint>,
-    c.getFunction("stakeNo")(matchId, account) as Promise<bigint>,
-    c.getFunction("claimed")(matchId, account) as Promise<boolean>,
+    readGate(() => c.getFunction("stakeYes")(matchId, account) as Promise<bigint>),
+    readGate(() => c.getFunction("stakeNo")(matchId, account) as Promise<bigint>),
+    readGate(() => c.getFunction("claimed")(matchId, account) as Promise<boolean>),
   ]);
   return { yes: formatEther(yes), no: formatEther(no), claimed };
 }
@@ -520,19 +520,14 @@ export interface PropPosition {
  */
 export async function readPropPositions(address: string, matchId: number, account: string): Promise<PropPosition[]> {
   const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
-  const count = Number((await c.getFunction("propCount")(matchId)) as bigint);
+  const count = Number((await readGate(() => c.getFunction("propCount")(matchId) as Promise<bigint>)));
   return Promise.all(
     Array.from({ length: count }, async (_, i) => {
-      const pr = await c.getFunction("getProp")(matchId, i);
+      const pr = await readGate(() => c.getFunction("getProp")(matchId, i));
       const numOutcomes = Number(pr.numOutcomes);
-      const [claimed, stakeWeis] = await Promise.all([
-        c.getFunction("propClaimed")(matchId, i, account) as Promise<boolean>,
-        Promise.all(
-          Array.from({ length: numOutcomes }, (_, o) => c.getFunction("propStake")(matchId, i, o, account) as Promise<bigint>),
-        ),
-      ]);
+      const pools = (pr.pools as bigint[]).map((p) => p);
       const state = PROP_STATE[Number(pr.state)];
-      return {
+      const base = {
         index: i,
         kind: PROP_KIND[Number(pr.kind)] ?? "PLAYER_FATE",
         param: Number(pr.param),
@@ -541,9 +536,23 @@ export async function readPropPositions(address: string, matchId: number, accoun
         winningOutcome: state === "RESOLVED" ? Number(pr.winningOutcome) : undefined,
         netPot: formatEther(pr.netPot as bigint),
         winningPool: formatEther(pr.winningPool as bigint),
-        stakes: stakeWeis.map((s) => formatEther(s)),
-        claimed,
       };
+      // An outcome with a zero total pool had no bets at all, so the viewer's stake there is provably
+      // zero — skip the propStake read. A prop nobody touched costs just the one getProp above. This is
+      // what keeps the per-match fan-out (and thus the failure surface) small on sparsely-bet markets.
+      const hasAnyPool = pools.some((p) => p > 0n);
+      if (!hasAnyPool) {
+        return { ...base, stakes: pools.map(() => "0"), claimed: false };
+      }
+      const [claimed, stakeWeis] = await Promise.all([
+        readGate(() => c.getFunction("propClaimed")(matchId, i, account) as Promise<boolean>),
+        Promise.all(
+          Array.from({ length: numOutcomes }, (_, o) =>
+            (pools[o] ?? 0n) > 0n ? readGate(() => c.getFunction("propStake")(matchId, i, o, account) as Promise<bigint>) : Promise.resolve(0n),
+          ),
+        ),
+      ]);
+      return { ...base, stakes: stakeWeis.map((s) => formatEther(s)), claimed };
     }),
   );
 }
@@ -632,6 +641,29 @@ const PROP_STATE: Record<number, PropSnapshot["state"]> = { 1: "RESOLVED", 2: "V
 /** Public read-only provider — no wallet needed to read contract state. */
 let publicProvider: JsonRpcProvider | null = null;
 const readProvider = () => (publicProvider ??= new JsonRpcProvider(GALILEO.rpcUrl, GALILEO.chainId));
+
+/**
+ * Caps concurrent read-RPC so the public 0G node doesn't rate-limit a burst. The History position
+ * reads (`readStakesPublic` / `readPropPositions`) fan out over every side-market prop × outcome —
+ * with the per-round RoundVotedOut markets that's ~80+ eth_calls per match — so without a shared gate
+ * a scan floods the node and calls start failing. One module-level singleton means even parallel match
+ * reads share the same budget. Live-match reads don't go through here.
+ */
+function makeLimiter(max: number) {
+  let active = 0;
+  const waiters: (() => void)[] = [];
+  return async function run<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= max) await new Promise<void>((resolve) => waiters.push(resolve));
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      waiters.shift()?.();
+    }
+  };
+}
+const readGate = makeLimiter(6);
 
 export interface MarketRead {
   state: MarketState;

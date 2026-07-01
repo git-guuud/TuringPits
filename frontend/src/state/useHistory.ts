@@ -54,9 +54,10 @@ export interface HistoryRow {
 const MAX_ROWS = 60; // newest battles; plenty for a demo, bounds the read fan-out
 // One cheap eth_call each → read summaries wide so every battle shows fast.
 const SUMMARY_CONCURRENCY = 8;
-// Each viewer-position read fans out to many stake/prop sub-calls; keep it gentle so the public RPC
-// doesn't rate-limit. Anything that still fails just retries next scan — the battle is already shown.
-const MINE_CONCURRENCY = 2;
+// How many matches' positions we orchestrate at once. The real RPC pacing is the shared read-gate in
+// contract.ts (which also skips zero-pool outcomes), so this only bounds queue depth; anything that
+// still fails just retries next scan — the battle is already shown.
+const MINE_CONCURRENCY = 4;
 const POLL_MS = 30000;
 
 /** SETTLED/REFUND matches are terminal: their summary never changes again on-chain. */
