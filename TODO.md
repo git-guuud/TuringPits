@@ -278,6 +278,98 @@ The engine currently runs MAFIA / DOCTOR / DETECTIVE / TOWN.
       port + `_checkComposition` in lockstep — they MUST stay byte-for-byte equivalent or settlement
       breaks. Update commit-reveal composition checks and tests on both sides.
 
+### 6. Game-loop drama — make it play like a game, not a slideshow
+The mechanics are correct but the loop *feels* flat: night is an opaque poem, the day is a fixed
+seat-order round-robin of monologues that never react to each other, and the stage is a single
+centered talking head. Guiding principle for everything here: **a betting product needs a legible,
+anticipatable causal chain** — the viewer must be able to form a thesis ("Nova's Mafia, she hangs
+today"), feel tension about it, and be paid or punished. Each task below exists to make cause →
+effect visible and tense, so odds actually move.
+
+**Hard constraints that shape all of these** (do not answer "boring" with "more model calls"): the
+0G model is weak/greedy and rate-limited (~10 req/min, token bucket — see [[live-rate-limit-pacing]],
+[[game-quality-fallback-cascade-fix]]). The winning pattern is FEWER, more focused, more
+dramatically-framed inference calls, plus off-chain presentation that adds drama with ZERO extra
+player calls. Recommended execution order: 6.1 → 6.2 → 6.3 → 6.4 → 6.5 → 6.6.
+
+- [x] **6.1 — Visible, consequential night** *(off-chain; shipped 2026-07-02).* The night resolution
+      already computed the doctor's save and threw it away, so a blocked kill was mis-narrated as the
+      Mafia whiffing (in the 6-player product config, a save is the ONLY way nobody dies). Now the
+      engine records a public-safe `lastNight: NightOutcome { round, killed, saved }` on `GameState`
+      (`engine/src/moderator.ts` `resolveNight`, `engine/src/types.ts`); the `dawn` wire beat carries
+      `saved` as an ANONYMOUS COUNT — never a seat, so the Doctor can't be triangulated
+      (`server/src/wire.ts`, `night.ts`, `orchestrator.ts`); and the stage branches three ways —
+      a kill landed / a kill was BLOCKED ("A LIFE SHIELDED") / a genuinely quiet night — with a tenser
+      nightfall beat (`frontend/src/components/tribunal/Court.tsx` `sceneFor`). Tests: engine (3 night
+      outcomes + null-before-night), server (anonymous shielded-count on the wire, no-role-leak invariant
+      held). All suites green; server + frontend typecheck clean.
+  - [ ] **6.1b — Night micro-market** *(descoped from 6.1 — needs a contract).* "Who falls before
+        dawn?" — a market that opens at nightfall and settles at the `dawn` beat, so the night's dead
+        zone becomes the tensest betting window. Add a `PropKind` band to `MafiaMarket.sol` resolved
+        from the verified run (mirror the existing `VotedOut`/`Survival` prop lifecycle in the Post-MVP
+        §1 markets), plus the server open/freeze wiring in `orchestrator.ts`. *Exit:* the market opens
+        as the lamp dims, freezes at dawn, and settles from the same verified transcript — no new trust;
+        Hardhat coverage cross-checked vs the engine's night deaths.
+
+- [ ] **6.2 — Broadcast spine: an AI colour-commentator** *(off-chain; highest feel-per-effort).*
+      Add an unsigned narrator/commentator that reacts to the game AND the odds — "The floor's turning
+      on Nova, and the money's moving with it. Nobody's seen the doctor's hand yet." It's the connective
+      tissue that turns a sequence of beats into a *broadcast* and explicitly ties the spectacle to the
+      market. Touches nothing on-chain. New: a server-side commentary generator + a `commentary` wire
+      message + a frontend beat, voiced through the existing TTS path (`server/src/tts.ts`,
+      `voices.ts`, `frontend/src/lib/useVoice.ts` — see [[tts-sync-and-tag-sanitize]]). Keep it to ~1
+      short line at phase boundaries (dawn / vote-lock / settle) so it adds at most a few calls per
+      match; it may key off market state (pools) with no player-inference cost at all.
+      *Exit:* at each key beat a colour line renders (and voices when TTS is on), reads naturally, and
+      references real match state or odds; it never leaks a hidden role; muting/pacing behave like other
+      beats; a unit test covers the beat-selection + role-redaction of the commentary line.
+
+- [ ] **6.3 — The day is a *trial*, not a group chat** *(light version: off-chain).* Replace the
+      fixed seat-order discussion→vote round-robin (`players/src/match.ts` `playMatch`, ~L251-266) with
+      a focused trial spine: a short nomination surfaces a defendant (the seat under most pressure), the
+      loudest accuser prosecutes, **the accused gets a rebuttal slot** (the accusation→defense arc that's
+      completely missing today), then the bench votes. This focuses the weak model on ONE question per
+      beat instead of "say something about the whole table" — the exact trigger for the mode-collapse
+      fought in [[day-speech-angle-divergence]]. Light version KEEPS the free-target plurality vote
+      (zero contract change) and only reshapes/presents the day; reuse the existing angle/self-defense/
+      guard machinery ([[role-strategic-play-prompts]], [[role-rule-guard-layer]]). Frontend: present the
+      accused "in the dock" (lean on the existing tribunal vocabulary — Bench/Court/Verdict).
+      *Exit:* a day runs as nominate → prosecute → **rebuttal** → vote; the accused's rebuttal renders as
+      its own beat; +≤1 inference call vs today; settlement/`MafiaRules` unchanged; `game-probe.mjs`
+      shows a real accusation→defense→swing arc; players + frontend suites green.
+      *(Full version — guilty/not-guilty vote semantics — touches `MafiaRules.sol` + settlement; queue
+      as a separate task under 6.6.)*
+
+- [ ] **6.4 — The reveal economy: claims & counter-claims** *(off-chain speech; builds on 6.3).* Make
+      a **claim** a first-class, specially-tagged discussion beat: a Detective going public (and painting
+      a target on their own back for the night kill) is a momentum-swing moment, not a line buried in a
+      discussion pass; let Mafia **counter-claim** (fake-claim Detective) to muddy it. This is the single
+      most watchable dynamic in social deduction and creates a *fork* the viewer can bet on ("real
+      detective or a bluff?"), with the night kill becoming retaliation they can predict. Wire into the
+      existing reveal/bluff branches (`players/src/prompt.ts` — the `caught` reveal + Mafia bluff already
+      exist per GAME_QUALITY_FINDINGS #3) with a claim tag + a dedicated stage scene.
+      *Exit:* a Detective reveal and a Mafia counter-claim each render as their own labeled beat; the
+      night-1 investigation isn't wasted (see [[game-quality-fallback-cascade-fix]] seat-0 fix); a
+      caught-Detective/bluff probe confirms both fire and survive the guard; no ally leak; suites green.
+
+- [ ] **6.5 — Endgame identity ("final table")** *(mostly frontend + a small loop branch).* Round 1
+      (everyone blind) and the deciding round (every word is lethal) look identical today. When it
+      narrows to 3 seats or Mafia hits parity-minus-one, switch to a "final table": different
+      lighting/tempo/music (`Court.tsx` lamp/veil, `useMusic`), and optionally a mano-a-mano showdown
+      structure (two accusation speeches, one vote) instead of the trial (`players/src/match.ts`).
+      *Exit:* the endgame is visibly distinct (lighting/music/tempo shift on the narrowing threshold),
+      is derived from the live alive-count, and doesn't touch settlement; frontend typecheck + probe.
+
+- [ ] **6.6 — North star (contract-touching): the spectacle *is* the market.** The deepest expression
+      of the thesis — beat-anchored micro-markets that open and close INSIDE the loop ("convict the
+      defendant?", "who dies tonight?" (6.1b), "detective claim: real or bluff?"), so every dramatic
+      moment is a betting moment and odds visibly move as speech happens. Plus the **full trial vote
+      semantics** (guilty/not-guilty on one defendant) from 6.3, which changes `MafiaRules.sol` +
+      settlement. Real contract lift (parimutuel micro-pools with per-beat lifecycle) — treat as the
+      roadmap direction, sequenced after the off-chain feel work above proves the drama lands.
+      *Exit:* at least one in-loop micro-market opens/settles per dramatic beat from the verified run
+      with full Hardhat coverage and no new trust assumptions; UI lists/places/claims it live.
+
 ### Deferred / larger bets
 - [ ] Slashing contract with host bond + refund-mode compensation payout.
 - [ ] Bring-Your-Own-Model: distinct models/providers per seat (GPT vs Claude vs Llama as factions).

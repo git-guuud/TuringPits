@@ -467,6 +467,9 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
           turn.structuredDecision.round,
           toPublicState(state),
           toPublicTurn(turn),
+          // Count of lives shielded in the just-resolved night (a blocked kill). Anonymous — the
+          // gate puts only the COUNT on the dawn beat, never the seat, so the Doctor never leaks.
+          state.lastNight?.saved.length ?? 0,
         );
         for (const m of msgs) await emitPaced(m);
         // After the public death beat lands, freeze the fallen seat's player-fate market on-chain.

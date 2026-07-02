@@ -43,6 +43,22 @@ export interface Investigation {
 }
 
 /**
+ * Public-safe summary of the most recently resolved night. It records only what the table may
+ * legitimately see — WHO fell and HOW MANY lives were shielded — never the actors or their roles.
+ * `saved` lists the seats that were attacked but protected (a kill neutralized by the Doctor); the
+ * server narrates a blocked kill from that COUNT alone (see `server/src/night.ts`), so no night
+ * action or role leaks to spectators. `null` until the first night resolves.
+ */
+export interface NightOutcome {
+  /** The round whose night this summarizes. */
+  readonly round: number;
+  /** Seats killed this night. Also derivable from the alive-set diff — kept here for a self-describing summary. */
+  readonly killed: readonly number[];
+  /** Seats attacked but shielded by a protection: a kill that was neutralized. */
+  readonly saved: readonly number[];
+}
+
+/**
  * A single pending action submitted during the currently-open phase, awaiting resolution.
  */
 export interface PendingAction {
@@ -63,6 +79,8 @@ export interface GameState {
   readonly pending: readonly PendingAction[];
   /** All detective investigation results so far. */
   readonly investigations: readonly Investigation[];
+  /** Summary of the most recently resolved night (who fell, how many lives were shielded). Null until night 1 resolves. */
+  readonly lastNight: NightOutcome | null;
   /** Decided winner, or null while the game is ongoing. */
   readonly winner: Faction | null;
 }

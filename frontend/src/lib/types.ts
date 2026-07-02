@@ -167,9 +167,10 @@ export type WsMessage =
   // pass. Day speech only (never runs at night), so it carries no role.
   | { type: "discussion"; seat: number; round: number; speech: string; state: PublicGameState }
   // Night is never streamed per-actor (it would leak roles). `night` marks nightfall; `dawn`
-  // reports only the publicly-known death at first light. See server/src/orchestrator.ts.
+  // reports the publicly-known death(s) at first light plus `saved` — the COUNT of lives shielded
+  // by a protection (a blocked kill), never the seat. See server/src/orchestrator.ts.
   | { type: "night"; round: number }
-  | { type: "dawn"; round: number; killed: number[]; state: PublicGameState }
+  | { type: "dawn"; round: number; killed: number[]; saved: number; state: PublicGameState }
   | { type: "reveal"; roles: Role[]; winner: Faction }
   | { type: "settled"; outcome: Outcome; winningSide?: Side; feeBpsDraw?: number; txHash?: string; transcriptCID?: string };
 

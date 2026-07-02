@@ -152,8 +152,11 @@ function resolveNight(state: GameState, pending: readonly PendingAction[]): Game
       faction: factionOf(state.players[a.target]!.role),
     }));
 
+  // A kill lands unless the same seat was protected this night; a shielded target survives.
+  const shielded = killTarget !== null && killTarget === saveTarget;
+  const died = killTarget !== null && !shielded;
   let players = state.players;
-  if (killTarget !== null && killTarget !== saveTarget) players = kill(players, killTarget);
+  if (died) players = kill(players, killTarget);
 
   return {
     ...state,
@@ -161,6 +164,13 @@ function resolveNight(state: GameState, pending: readonly PendingAction[]): Game
     phase: "day",
     pending: [],
     investigations: [...state.investigations, ...investigations],
+    // Public-safe night summary. `saved` records the shielded seat so the server can narrate a
+    // blocked kill (from its count) without leaking the Doctor — see NightOutcome / night.ts.
+    lastNight: {
+      round: state.round,
+      killed: died ? [killTarget as number] : [],
+      saved: shielded ? [killTarget as number] : [],
+    },
     winner: computeWinner(players),
   };
 }
@@ -189,6 +199,7 @@ export function initState(seed: string, n: number, nonce: string): GameState {
     round: 1,
     pending: [],
     investigations: [],
+    lastNight: null,
     winner: null,
   };
 }

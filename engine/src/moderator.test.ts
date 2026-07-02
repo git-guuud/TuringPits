@@ -90,6 +90,8 @@ describe("full matches", () => {
     const [afterNight, afterDay] = states;
     expect(afterNight!.phase).toBe("day");
     expect(afterNight!.players.every((p) => p.alive)).toBe(true); // save worked
+    // The night summary records the shielded seat (a blocked kill), no death.
+    expect(afterNight!.lastNight).toEqual({ round: 1, killed: [], saved: [town[0]!] });
     expect(afterNight!.investigations).toEqual([
       { round: 1, detective, target: m, faction: "MAFIA" },
     ]);
@@ -121,7 +123,11 @@ describe("full matches", () => {
     expect(w).toBe("MAFIA");
     expect(states).toHaveLength(3);
     expect(states[0]!.players[town[0]!]!.alive).toBe(false); // night 1 kill
+    // Night 1 summary: a kill LANDED (doctor saved elsewhere), nobody shielded.
+    expect(states[0]!.lastNight).toEqual({ round: 1, killed: [town[0]!], saved: [] });
     expect(states[1]!.players[detective]!.alive).toBe(false); // day 1 misvote
+    // Day resolutions carry the previous night's summary forward unchanged (no night ran).
+    expect(states[1]!.lastNight).toEqual({ round: 1, killed: [town[0]!], saved: [] });
     expect(states[2]!.winner).toBe("MAFIA");
   });
 });
@@ -165,6 +171,45 @@ describe("resolution rules", () => {
     ];
     const { states } = runMatch(SEED, 7, NONCE, decisions);
     expect(states[0]!.players.every((p) => p.alive)).toBe(true); // disagreement -> no kill
+  });
+});
+
+describe("night outcome summary (lastNight)", () => {
+  it("is null before any night resolves", () => {
+    expect(initState(SEED, 5, NONCE).lastNight).toBeNull();
+  });
+
+  it("records a shielded seat (blocked kill) with no death", () => {
+    const { mafia, doctor, detective, town } = seats(SEED, 5);
+    const m = mafia[0]!;
+    let s = initState(SEED, 5, NONCE);
+    s = applyDecision(s, dec({ phase: "night", round: 1, player: m, action: "kill", target: town[0]! }));
+    s = applyDecision(s, dec({ phase: "night", round: 1, player: doctor, action: "save", target: town[0]! }));
+    s = applyDecision(s, dec({ phase: "night", round: 1, player: detective, action: "investigate", target: m }));
+    expect(s.lastNight).toEqual({ round: 1, killed: [], saved: [town[0]!] });
+    expect(s.players.every((p) => p.alive)).toBe(true);
+  });
+
+  it("records a landed kill with nothing shielded", () => {
+    const { mafia, doctor, detective, town } = seats(SEED, 5);
+    const m = mafia[0]!;
+    let s = initState(SEED, 5, NONCE);
+    s = applyDecision(s, dec({ phase: "night", round: 1, player: m, action: "kill", target: town[0]! }));
+    s = applyDecision(s, dec({ phase: "night", round: 1, player: doctor, action: "save", target: doctor }));
+    s = applyDecision(s, dec({ phase: "night", round: 1, player: detective, action: "investigate", target: m }));
+    expect(s.lastNight).toEqual({ round: 1, killed: [town[0]!], saved: [] });
+  });
+
+  it("records neither a death nor a shield when the mafia split their kill (no target)", () => {
+    const { mafia, doctor, detective, town } = seats(SEED, 7); // 2 mafia
+    const [m1, m2] = mafia as [number, number];
+    let s = initState(SEED, 7, NONCE);
+    s = applyDecision(s, dec({ phase: "night", round: 1, player: m1, action: "kill", target: town[0]! }));
+    s = applyDecision(s, dec({ phase: "night", round: 1, player: m2, action: "kill", target: town[1]! }));
+    s = applyDecision(s, dec({ phase: "night", round: 1, player: doctor, action: "save", target: doctor }));
+    s = applyDecision(s, dec({ phase: "night", round: 1, player: detective, action: "investigate", target: m1 }));
+    expect(s.lastNight).toEqual({ round: 1, killed: [], saved: [] }); // genuine miss, not a block
+    expect(s.players.every((p) => p.alive)).toBe(true);
   });
 });
 

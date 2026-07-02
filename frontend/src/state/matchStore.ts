@@ -54,7 +54,7 @@ import type {
 /** One unit of playback. `seats` is the alive/dead snapshot to render while this beat is on stage. */
 export type Beat =
   | { kind: "night"; round: number; seats: PublicSeat[] }
-  | { kind: "dawn"; round: number; killed: number[]; seats: PublicSeat[] }
+  | { kind: "dawn"; round: number; killed: number[]; saved: number; seats: PublicSeat[] }
   | { kind: "discussion"; seat: number; round: number; speech: string; seats: PublicSeat[] }
   | { kind: "turn"; turn: PublicTurn; round: number; phase: Phase; seats: PublicSeat[] };
 
@@ -332,7 +332,8 @@ function reduce(state: ViewState, action: Action): ViewState {
       return pushBeat(state, { kind: "night", round: msg.round, seats: carrySeats(state) });
 
     case "dawn":
-      return pushBeat(state, { kind: "dawn", round: msg.round, killed: msg.killed, seats: [...msg.state.players] });
+      // `saved ?? 0` tolerates an older/replayed dawn message that predates the shielded-lives count.
+      return pushBeat(state, { kind: "dawn", round: msg.round, killed: msg.killed, saved: msg.saved ?? 0, seats: [...msg.state.players] });
 
     case "discussion":
       return pushBeat(state, {

@@ -6,7 +6,8 @@
  *
  * `gateTurn` converts each attested turn into the messages that are SAFE to broadcast:
  *   - night actor turns  → never produce a `turn`; at most a single `night` beat per round, and a
- *                          `dawn` beat (carrying ONLY the publicly-known death) once night resolves.
+ *                          `dawn` beat (carrying ONLY the publicly-known death, plus a COUNT of lives
+ *                          shielded — never a seat) once night resolves.
  *   - day votes          → pass through as `turn` (voting is public and attributable).
  *
  * It is pure over the wire types (no engine state, no `RecordedTurn`) so the invariant is unit-
@@ -32,6 +33,10 @@ const aliveOf = (pub: PublicGameState): Set<number> =>
  * @param pub            the REDACTED public state AFTER the turn applied (the final night action
  *                       flips `pub.phase` to "day" with the kill resolved)
  * @param dayTurn        the redacted public turn — only ever broadcast for a day vote
+ * @param nightSaved     COUNT of lives shielded this night (a blocked kill), from the engine's
+ *                       resolved `lastNight.saved.length`. Anonymous by design — a count, never a
+ *                       seat — so it narrates the Doctor's block without leaking who they are. Only
+ *                       consumed on the night→day (dawn) transition; ignored otherwise.
  * @returns the messages safe to broadcast for this turn (mutates `gate`)
  */
 export function gateTurn(
@@ -40,6 +45,7 @@ export function gateTurn(
   decisionRound: number,
   pub: PublicGameState,
   dayTurn: PublicTurn,
+  nightSaved = 0,
 ): WsMessage[] {
   const out: WsMessage[] = [];
 
@@ -53,7 +59,7 @@ export function gateTurn(
       const aliveNow = aliveOf(pub);
       const killed = [...gate.prevAlive].filter((id) => !aliveNow.has(id));
       gate.prevAlive = aliveNow;
-      out.push({ type: "dawn", round: decisionRound, killed, state: pub });
+      out.push({ type: "dawn", round: decisionRound, killed, saved: nightSaved, state: pub });
     }
     return out; // a night actor turn is NEVER broadcast
   }

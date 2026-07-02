@@ -52,7 +52,7 @@ describe("Hub.snapshot — lobby status from the replay buffer", () => {
       { type: "market", market: { state: "OPEN", bettingLive: false, yesPool: "0", noPool: "0" } },
       { type: "night", round: 1 },
       { type: "market", market: { state: "OPEN", bettingLive: true, yesPool: "5", noPool: "7" } },
-      { type: "dawn", round: 2, killed: [3], state: gameState(2) },
+      { type: "dawn", round: 2, killed: [3], saved: 0, state: gameState(2) },
     ];
     for (const m of msgs) hub.broadcast(m);
     const s = hub.snapshot();

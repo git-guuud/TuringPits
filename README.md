@@ -52,11 +52,19 @@ check runs on-chain; any failure reverts.
 ## The markets
 
 - **Faction-win market:** a binary YES/NO on **"does Mafia win?"** (`YES` = Mafia prevails).
-- **Per-seat Survival side markets:** one auto-created YES/NO market per seat — `YES` = "this seat is
-  still alive when the transcript ends." Each resolves from the same on-chain-verified final game
-  state. A seat's market closes the moment that seat falls.
-- **Mechanism:** parimutuel pools — all YES stakes form one pool, all NO stakes another; winners
-  split the pot pro-rata, minus a small protocol fee. Always solvent regardless of bet skew.
+- **Per-seat Fate side markets (categorical):** one auto-created market per seat asking *"what
+  happens to this seat?"* — five buckets: **Survives**, **Out · R1**, **Out · R2**, **Out · R3**,
+  **Out · R4+**. A seat's market closes the moment that seat falls (its fate is then decided).
+- **Per-round "Who hangs?" side markets (categorical, recurring):** for each day vote, a market over
+  the living seats plus a **"No one"** outcome (a tie / no elimination). Round 1 opens with the match;
+  the host floats a fresh market as each later round begins, and freezes it once that round's vote
+  resolves. Only the currently-bettable round shows live; resolved rounds drop to History.
+- Both side-market kinds resolve from the **same on-chain-verified final game state** as the faction
+  market — no new trust and no extra settlement transaction.
+- **Mechanism:** parimutuel pools. The faction market is binary (one YES pool, one NO pool); each
+  categorical side market holds one pool per outcome. Backers of the resolved (winning) outcome split
+  the pot pro-rata, minus a small protocol fee. Always solvent regardless of bet skew. If nobody
+  backed the winning outcome, that market Voids and every stake is refunded.
 - **Currency:** wagers are placed in **CHIP**, a faucet-mintable mock ERC20 (`MockBetToken`) — test
   money with no value. Tap **"Get test tokens"** in the UI to mint some.
 - **Optional gasless betting (EIP-2771):** if the host runs a funded relayer, a spectator with **zero
@@ -92,7 +100,7 @@ check runs on-chain; any failure reverts.
 
 RPC `https://evmrpc-testnet.0g.ai` · Explorer https://chainscan-galileo.0g.ai · Faucet
 https://faucet.0g.ai (native 0G for gas; CHIP comes from the in-app faucet). `MafiaMarket` is a
-multi-match factory and also hosts the per-seat Survival side markets.
+multi-match factory and also hosts the per-seat Fate and per-round "Who hangs?" categorical side markets.
 
 ---
 

@@ -148,22 +148,39 @@ function sceneFor(s: ViewState): Scene {
       title: "Night falls",
       note: "the table sleeps · the hand moves unseen",
       name: "NIGHTFALL",
-      role: "the night keeps its counsel",
-      body: "Darkness settles over the table. In the dark, the hidden hand makes its choice — and the night keeps its secret. No word is spoken, no hand is named.",
+      role: "somewhere, a choice is being made",
+      body: "Darkness settles over the table. Somewhere in the dark a hand is choosing who will not see the dawn — and another may be moving to stop it. No word is spoken, no name is given. The court holds its breath.",
       lamp: "night",
     };
   if (beat?.kind === "dawn") {
     const nameFor = (id: number) => (s.personas.find((p) => p.seat === id)?.name ?? `Seat ${id}`).toUpperCase();
     const names = beat.killed.map(nameFor);
-    const fell = beat.killed.length > 0;
+    // Three distinct outcomes: a kill landed, a kill was BLOCKED by a protection (the shielded count,
+    // reported anonymously so no role leaks), or the night truly passed with nothing attempted.
+    if (names.length > 0)
+      return {
+        title: "Dawn breaks",
+        note: "the night's work laid bare",
+        name: names.join(" · "),
+        role: "found fallen at first light",
+        body: `Dawn breaks over the table. ${names.join(" and ")} ${beat.killed.length > 1 ? "are" : "is"} found fallen — taken in the night, before a word could be spoken in their defence.`,
+        lamp: "day",
+      };
+    if (beat.saved > 0)
+      return {
+        title: "Dawn breaks",
+        note: "a blade raised — and turned aside",
+        name: "A LIFE SHIELDED",
+        role: "the hand closed on nothing",
+        body: "Dawn breaks over the table. In the dark a blade was raised — and a hand none saw turned it aside. Every seat still draws breath, but the night bared its teeth. The court resumes — wary now, and watchful.",
+        lamp: "day",
+      };
     return {
       title: "Dawn breaks",
-      note: fell ? "the night's work laid bare" : "the night passes, and holds",
-      name: fell ? names.join(" · ") : "ALL SURVIVE",
-      role: fell ? "found fallen at first light" : "the hand reached out and missed",
-      body: fell
-        ? `Dawn breaks over the table. ${names.join(" and ")} ${beat.killed.length > 1 ? "are" : "is"} found fallen — taken in the night, before a word could be spoken in their defence.`
-        : "Dawn breaks over the table. Every seat still draws breath — the hand reached out in the dark and found nothing. The court resumes.",
+      note: "the night passes, and holds",
+      name: "ALL SURVIVE",
+      role: "the hand reached out and missed",
+      body: "Dawn breaks over the table. Every seat still draws breath — the hand reached out in the dark and found nothing. The court resumes.",
       lamp: "day",
     };
   }

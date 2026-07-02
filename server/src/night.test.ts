@@ -56,18 +56,21 @@ describe("night redaction gate", () => {
     expect(wire).not.toContain('"action":"investigate"');
     expect(wire).not.toContain('"action":"save"');
 
-    // Dawn reports ONLY the public death.
-    expect(dawn[0]).toMatchObject({ type: "dawn", round: 1, killed: [3] });
+    // Dawn reports ONLY the public death — and no life was shielded this night.
+    expect(dawn[0]).toMatchObject({ type: "dawn", round: 1, killed: [3], saved: 0 });
   });
 
-  it("reports an empty kill list when the doctor saves the target", () => {
+  it("reports a blocked kill as no death plus an anonymous shielded-life count", () => {
     const gate = newNightGate([0, 1, 2, 3, 4]);
     const out = [
       ...gateTurn(gate, "night", 1, state("night", 1, [0, 1, 2, 3, 4]), nightTurn(0, "kill", 3)),
-      ...gateTurn(gate, "night", 1, state("day", 1, [0, 1, 2, 3, 4]), nightTurn(1, "save", 3)),
+      // The resolving night action flips to day with NOBODY dead; the engine reports 1 life shielded.
+      ...gateTurn(gate, "night", 1, state("day", 1, [0, 1, 2, 3, 4]), nightTurn(1, "save", 3), 1),
     ];
     const dawn = out.find((m) => m.type === "dawn");
-    expect(dawn).toMatchObject({ type: "dawn", killed: [] });
+    expect(dawn).toMatchObject({ type: "dawn", killed: [], saved: 1 });
+    // Anonymity: the shield is a COUNT, never the seat — so the Doctor can't be triangulated.
+    expect(typeof (dawn as { saved: unknown }).saved).toBe("number");
   });
 
   it("passes day votes through as public, attributable turns", () => {

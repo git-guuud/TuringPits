@@ -91,9 +91,11 @@ export type WsMessage =
   // Day speech only (the discussion pass never runs at night), so it leaks no role.
   | { type: "discussion"; seat: number; round: number; speech: string; state: PublicGameState }
   // Night is never streamed per-actor (it would reveal who holds which role). A single `night`
-  // beat marks nightfall; a `dawn` beat reports only the publicly-known death at first light.
+  // beat marks nightfall; a `dawn` beat reports only the publicly-known death at first light, plus
+  // `saved` — the COUNT of lives shielded by a protection (a blocked kill), never the seat, so the
+  // Doctor cannot be triangulated from the stream.
   | { type: "night"; round: number }
-  | { type: "dawn"; round: number; killed: number[]; state: PublicGameState }
+  | { type: "dawn"; round: number; killed: number[]; saved: number; state: PublicGameState }
   | { type: "reveal"; roles: Role[]; winner: Faction }
   // outcome is always present; winningSide only for YES/NO. DRAW/VOID return stakes (claim()).
   | { type: "settled"; outcome: Outcome; winningSide?: Side; feeBpsDraw?: number; txHash?: string; transcriptCID?: string };
