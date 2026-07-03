@@ -499,7 +499,7 @@ export async function readMyPropStakes(address: string, matchId: number, propCou
 export interface PropPosition {
   index: number;
   kind: PropSnapshot["kind"];
-  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT: the 1-based day-vote round. */
+  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. */
   param: number;
   numOutcomes: number;
   /** Settled state (RESOLVED winner / VOID refund), or undefined while unresolved. */
@@ -633,8 +633,8 @@ export async function enterRefundMode(address: string, matchId: number, wallet: 
 
 const MARKET_STATE: Record<number, MarketState> = { 2: "LOCKED", 3: "SETTLED", 4: "REFUND" };
 const OUTCOME: Record<number, Outcome> = { 1: "YES", 2: "NO", 3: "DRAW", 4: "VOID" };
-/** MafiaMarket PropKind enum → wire label (0 = PlayerFate, 1 = RoundVotedOut). */
-const PROP_KIND: Record<number, PropSnapshot["kind"]> = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT" };
+/** MafiaMarket PropKind enum → wire label (0 = PlayerFate, 1 = RoundVotedOut, 2 = NightKill). */
+const PROP_KIND: Record<number, PropSnapshot["kind"]> = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL" };
 /** MafiaMarket PropState enum → wire state (1 = Resolved, 2 = Void; 0 = Unset → undefined). */
 const PROP_STATE: Record<number, PropSnapshot["state"]> = { 1: "RESOLVED", 2: "VOID" };
 

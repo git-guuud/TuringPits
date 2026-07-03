@@ -18,6 +18,9 @@ export const MAFIA_MARKET_ABI = [
   // host-only: float the next round's "voted out" band (one prop per seat) as the match advances — the per-round market re-opens here.
   "function openVotedOutRound(uint256 matchId) returns (uint8 round, uint256 startIdx)",
   "function votedOutRoundsOpened(uint256 matchId) view returns (uint8)",
+  // host-only: float the next round's "night kill" market at nightfall (frozen at dawn via closeProp).
+  "function openNightKillRound(uint256 matchId) returns (uint8 round, uint256 startIdx)",
+  "function nightKillRoundsOpened(uint256 matchId) view returns (uint8)",
   "function settle(uint256 matchId, ((uint8 phase, uint32 round, uint8 player, uint8 action, uint8 target) decision, bytes rawResponseBody, uint256 contentOffset, uint256 contentLen, string reqHashHex, bytes signature)[] moves, uint8[] revealedRoles, bytes32 salt, bytes32 transcriptCID)",
   // reads (pools / state / outcome live in the Match struct)
   "function matches(uint256) view returns (uint8 state, uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot, address teeSigner, string providerType, string providerIdentity, string tlsFingerprint, string nonce, uint8 playerCount, uint128 poolYes, uint128 poolNo, uint8 outcome, uint128 netPot, uint128 winningPool, bytes32 transcriptCID, uint16 feeBps, uint16 feeBpsDraw)",
@@ -31,6 +34,7 @@ export const MAFIA_MARKET_ABI = [
   "event MatchCreated(uint256 indexed matchId, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot, address teeSigner, uint8 playerCount, uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock)",
   "event BettingLocked(uint256 indexed matchId, uint128 finalPoolYes, uint128 finalPoolNo)",
   "event VotedOutRoundOpened(uint256 indexed matchId, uint8 round, uint256 startIdx)",
+  "event NightKillRoundOpened(uint256 indexed matchId, uint8 round, uint256 startIdx)",
   "event MatchSettled(uint256 indexed matchId, uint8 outcome, uint128 netPot, bytes32 transcriptCID)",
 ] as const;
 

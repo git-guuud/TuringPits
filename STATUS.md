@@ -117,6 +117,19 @@ from native 0G to the `MockBetToken` (CHIP) ERC20 with an in-app faucet, the mar
       skipped by default. Uploads paid by the funded `COMPUTE_PRIVATE_KEY` wallet.
 
 ## In progress
+- **Night micro-market — "who falls before dawn?" (TODO 6.1b; code-complete, redeploy pending).**
+  A new categorical `PropKind.NightKill` on `MafiaMarket` — the night-side twin of the per-round
+  RoundVotedOut market — opens at nightfall and freezes at dawn, so the night's dead zone becomes a
+  betting window. Outcomes are the seats + a "no one / all spared". `createMatch` auto-creates round 1
+  (props now number `playerCount + 2`) and the host floats later rounds via `openNightKillRound()`. It
+  resolves inside the SAME verified `settle()` — a night kill is exactly a round death that was NOT a
+  day vote-out (`deathRound[seat] == round && votedOutRound[seat] == 0`), so no new game state, no new
+  trust, no extra tx. The two recurring kinds interleave, so server/UI address markets by `(kind,
+  param)`. Server `orchestrator.ts` (`syncRoundMarkets`) opens/freezes it with pure `round-markets.ts`
+  timing predicates; `Verdict.tsx` renders the active "Night R kill" market. Tests:
+  `MafiaMarket.nightkill.test.ts` (settlement cross-checked vs the engine's night deaths; full Hardhat
+  suite **97 green**) + server `round-markets.test.ts`; type-check + build clean. **Needs a Galileo
+  redeploy** (new bytecode — `openNightKillRound`, +2 props) before it's live (see `myTasks.md`).
 - **Optional spoken-dialogue TTS (code-complete; ElevenLabs key pending).** A server `/tts` endpoint
   voices each player's line: a tone-tag step inserts ElevenLabs v3 audio tags ([nervous]/[accusing]…)
   — via a fast Claude Haiku call when `ANTHROPIC_API_KEY` is set, else a heuristic from the wire

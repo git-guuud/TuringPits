@@ -16,7 +16,7 @@ const NIGHT_ACTION: Record<string, "kill" | "save" | "investigate" | undefined> 
 
 export async function scriptedMatch(
   seed: string, n: number, nonce: string,
-): Promise<{ decisions: EngineDecision[]; mafiaWins: boolean; alive: boolean[]; firstVotedOut: number | null; votedOutRound: number[]; deathRound: number[] }> {
+): Promise<{ decisions: EngineDecision[]; mafiaWins: boolean; alive: boolean[]; firstVotedOut: number | null; votedOutRound: number[]; nightKillRound: number[]; deathRound: number[] }> {
   const engine = await import("@turingpits/engine");
   let state = engine.initState(seed, n, nonce);
   const decisions: EngineDecision[] = [];
@@ -30,6 +30,11 @@ export async function scriptedMatch(
   // never voted out — survived or killed at night). Cross-checks g.votedOutRound on-chain. Recorded
   // only for deaths that happen during a DAY phase, so night kills never set it.
   const votedOutRound: number[] = new Array(n).fill(0);
+  // The per-round "night kill" truth: per seat, the 1-based round whose NIGHT KILL eliminated it (0 =
+  // never night-killed — survived or day-voted). Cross-checks the NightKill prop resolver on-chain.
+  // Recorded only for deaths that happen during a NIGHT phase, so day vote-outs never set it — the
+  // mirror image of votedOutRound.
+  const nightKillRound: number[] = new Array(n).fill(0);
   // The "round of death" truth: per seat, the 1-based round it was eliminated in (0 = survived to the
   // end). Cross-checks g.deathRound on-chain. A death is attributed to the round BEFORE the fatal move
   // is applied — the engine advances `round` only after a day resolves, so the pre-apply round is the
@@ -77,10 +82,13 @@ export async function scriptedMatch(
       for (const q of state.players as any[]) {
         if (aliveById[q.id] && !q.alive && deathRound[q.id] === 0) {
           deathRound[q.id] = roundBefore;
-          // A death during the DAY phase is a vote-out: attribute it to this round's "voted out" band.
+          // A death during the DAY phase is a vote-out; a death at NIGHT is a night kill. Attribute it
+          // to this round's matching band (the two are mutually exclusive — a seat dies once).
           if (isDay) {
             votedOutRound[q.id] = roundBefore;
             if (roundBefore === 1 && firstVotedOut === null) firstVotedOut = q.id;
+          } else {
+            nightKillRound[q.id] = roundBefore;
           }
         }
       }
@@ -93,7 +101,7 @@ export async function scriptedMatch(
     const p = state.players.find((q: any) => q.id === id);
     alive.push(!!p?.alive);
   }
-  return { decisions, mafiaWins: engine.winner(state) === "MAFIA", alive, firstVotedOut, votedOutRound, deathRound };
+  return { decisions, mafiaWins: engine.winner(state) === "MAFIA", alive, firstVotedOut, votedOutRound, nightKillRound, deathRound };
 }
 
 // Map an EngineDecision to the Solidity Decision struct tuple.

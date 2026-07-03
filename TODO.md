@@ -303,13 +303,24 @@ player calls. Recommended execution order: 6.1 → 6.2 → 6.3 → 6.4 → 6.5 �
       nightfall beat (`frontend/src/components/tribunal/Court.tsx` `sceneFor`). Tests: engine (3 night
       outcomes + null-before-night), server (anonymous shielded-count on the wire, no-role-leak invariant
       held). All suites green; server + frontend typecheck clean.
-  - [ ] **6.1b — Night micro-market** *(descoped from 6.1 — needs a contract).* "Who falls before
-        dawn?" — a market that opens at nightfall and settles at the `dawn` beat, so the night's dead
-        zone becomes the tensest betting window. Add a `PropKind` band to `MafiaMarket.sol` resolved
-        from the verified run (mirror the existing `VotedOut`/`Survival` prop lifecycle in the Post-MVP
-        §1 markets), plus the server open/freeze wiring in `orchestrator.ts`. *Exit:* the market opens
-        as the lamp dims, freezes at dawn, and settles from the same verified transcript — no new trust;
-        Hardhat coverage cross-checked vs the engine's night deaths.
+  - [x] **6.1b — Night micro-market** *(descoped from 6.1; code-complete — **redeploy pending**, 2026-07-03).*
+        "Who falls before dawn?" — a per-round market that opens at nightfall and freezes at the `dawn`
+        beat, so the night's dead zone becomes a betting window. Shipped: a new categorical `PropKind.NightKill`
+        on `MafiaMarket.sol` (the night-side twin of `RoundVotedOut`: outcomes = seats + a "no one / all
+        spared") auto-created for round 1 (`createMatch` now mints `playerCount + 2` props) and floated per
+        later round via the new `openNightKillRound()` (+ `nightKillRoundsOpened` / `NightKillRoundOpened`).
+        It resolves inside the SAME verified `settle()` from the already-computed final state — a night kill
+        is exactly a round death that was NOT a day vote-out (`g.deathRound[seat] == round && g.votedOutRound[seat]
+        == 0`), so no new game state and no new trust. The two recurring kinds now interleave in the prop
+        array, so the server/UI address markets by `(kind, param)` (no index formula). Server (`orchestrator.ts`
+        `syncRoundMarkets`) opens the NightKill market as the round begins and freezes it at dawn — timing
+        pinned by pure `round-markets.ts` predicates (`nightKillResolved`/`votedOutResolved`). Frontend
+        `Verdict.tsx` renders the active "Night R kill" market (living seats + "All spared") + History label.
+        Tests: `MafiaMarket.nightkill.test.ts` (creation / open / bet / per-round settlement cross-checked vs
+        the engine's night deaths, incl. "a vote-out is never a night kill" + quiet-night "no one" + claim /
+        void / dawn-freeze) — full Hardhat suite **97 green**; server `round-markets.test.ts` (+10) green;
+        server + frontend type-check + build clean. *Exit met* (contract + wiring + coverage); the live
+        open→freeze→settle run needs a Galileo redeploy (new bytecode — see `myTasks.md`).
 
 - [ ] **6.2 — Broadcast spine: an AI colour-commentator** *(off-chain; highest feel-per-effort).*
       Add an unsigned narrator/commentator that reacts to the game AND the odds — "The floor's turning

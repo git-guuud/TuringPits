@@ -28,10 +28,10 @@ export const MAFIA_MARKET_ABI = [
   "function stakeYes(uint256 matchId, address user) view returns (uint128)",
   "function stakeNo(uint256 matchId, address user) view returns (uint128)",
   "function claimed(uint256 matchId, address user) view returns (bool)",
-  // categorical side markets ("props"): PlayerFate (propIdx == seat) + the per-round RoundVotedOut
-  // markets, resolved from the same verified run at settle(). The wallet bets on ONE outcome and
-  // claims by propIdx (the kind/param/winner are read off getProp); the server is the only caller of
-  // openVotedOutRound.
+  // categorical side markets ("props"): PlayerFate (propIdx == seat) + the per-round RoundVotedOut and
+  // NightKill markets, resolved from the same verified run at settle(). The wallet bets on ONE outcome
+  // and claims by propIdx (the kind/param/winner are read off getProp); the server is the only caller of
+  // openVotedOutRound / openNightKillRound.
   "function betProp(uint256 matchId, uint256 propIdx, uint8 outcome, uint128 amount)",
   "function claimProp(uint256 matchId, uint256 propIdx)",
   "function refundProp(uint256 matchId, uint256 propIdx)",

@@ -338,7 +338,7 @@ function Row({
         )}
       </div>
 
-      {/* Reclaimable side pots on this battle (player-fate per seat + per-round 'voted out', each backed correctly). */}
+      {/* Reclaimable side pots on this battle (player-fate per seat + per-round 'voted out' / 'night kill', each backed correctly). */}
       {props.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 border-t hairline pt-3">
           <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-mute">Side pots ·</span>
@@ -352,7 +352,7 @@ function Row({
             >
               {busy
                 ? "…"
-                : `${p.market === "ROUND_VOTED_OUT" ? `Round ${p.param} vote` : `Seat ${p.param + 1} · fate`} · ${p.kind === "refund" ? "Refund" : p.kind === "return" ? "Reclaim" : "Claim"} ◈ ${p.amount}`}
+                : `${p.market === "ROUND_VOTED_OUT" ? `Round ${p.param} vote` : p.market === "NIGHT_KILL" ? `Night ${p.param} kill` : `Seat ${p.param + 1} · fate`} · ${p.kind === "refund" ? "Refund" : p.kind === "return" ? "Reclaim" : "Claim"} ◈ ${p.amount}`}
             </button>
           ))}
         </div>

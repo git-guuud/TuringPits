@@ -42,8 +42,14 @@ contract MafiaMarket is ERC2771Context {
     ///        one per later round via openVotedOutRound() as the match advances. Outcomes: one per seat
     ///        (0..playerCount-1) plus a final "no one (tie / no elimination)" outcome — playerCount + 1
     ///        in total. Each market settles against THAT round's day-vote elimination.
+    ///      - NightKill    — "who falls before dawn in round R's night?" The night-side twin of
+    ///        RoundVotedOut: a RECURRING per-round market that opens at nightfall and freezes at dawn, so
+    ///        the night's dead zone becomes a betting window. Round 1 is created up front (Prop.param == 1)
+    ///        and the host floats later rounds via openNightKillRound(). Outcomes: one per seat plus a
+    ///        final "no one (kill blocked / a quiet night)" outcome — playerCount + 1 in total. Each
+    ///        market settles against THAT round's NIGHT kill (a seat killed at night, not day-voted).
     ///      The enum can grow further with no storage migration.
-    enum PropKind { PlayerFate, RoundVotedOut }
+    enum PropKind { PlayerFate, RoundVotedOut, NightKill }
     /// @dev A categorical prop's resolution state. Props don't use the YES/NO `Outcome`: at settle a
     ///      single `winningOutcome` is chosen (Resolved), or the market Voids when nobody backed the
     ///      winning outcome → every stake is refunded. Never Draw.
@@ -107,8 +113,8 @@ contract MafiaMarket is ERC2771Context {
     ///         RoundVotedOut: outcomes are the seats + a "no one" outcome for round `param`'s day vote.
     struct Prop {
         PropKind kind;
-        uint8 param;          // PlayerFate: the seat. RoundVotedOut: the 1-based day-vote round.
-        uint8 numOutcomes;    // PlayerFate: FATE_BUCKETS. RoundVotedOut: playerCount + 1.
+        uint8 param;          // PlayerFate: the seat. RoundVotedOut / NightKill: the 1-based round.
+        uint8 numOutcomes;    // PlayerFate: FATE_BUCKETS. RoundVotedOut / NightKill: playerCount + 1.
         bool closed;          // betting frozen mid-match (the outcome became public); see closeProp(). Payout-neutral.
         PropState state;      // Unset until settle; Resolved (winningOutcome valid) or Void (refund all).
         uint8 winningOutcome; // the outcome that won — valid iff state == Resolved.
@@ -152,6 +158,10 @@ contract MafiaMarket is ERC2771Context {
     ///         round 1 (so this starts at 1 once a match exists); openVotedOutRound bumps it as the
     ///         match advances. The per-round VotedOut market re-opens by appending the next band.
     mapping(uint256 => uint8) public votedOutRoundsOpened;
+    /// @notice Highest "night kill" round that has a market on this match — the night-side twin of
+    ///         votedOutRoundsOpened. createMatch seeds round 1; openNightKillRound bumps it as the
+    ///         match advances (a fresh market floated each nightfall).
+    mapping(uint256 => uint8) public nightKillRoundsOpened;
 
     event MatchCreated(
         uint256 indexed matchId, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot,
@@ -159,8 +169,9 @@ contract MafiaMarket is ERC2771Context {
         uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock
     );
     /// @notice Side markets auto-created with the match: one PlayerFate market per seat plus the round-1
-    ///         RoundVotedOut market, so `count` == playerCount + 1 at creation. Later RoundVotedOut
-    ///         rounds are appended on demand (see openVotedOutRound / VotedOutRoundOpened).
+    ///         RoundVotedOut and round-1 NightKill markets, so `count` == playerCount + 2 at creation.
+    ///         Later RoundVotedOut / NightKill rounds are appended on demand (see openVotedOutRound /
+    ///         openNightKillRound and their *RoundOpened events).
     event PropsCreated(uint256 indexed matchId, uint256 count);
 
     modifier onlyOwner() { require(msg.sender == owner, "not owner"); _; }
@@ -224,17 +235,19 @@ contract MafiaMarket is ERC2771Context {
         // Auto-create the side markets, all resolved from the same verified run at settle():
         //   props[0 .. n-1]  PlayerFate,    one per seat (propIdx == seat == param; FATE_BUCKETS outcomes)
         //   props[n]         RoundVotedOut, round 1 (param == 1; playerCount + 1 outcomes)
-        // so propCount(matchId) == playerCount + 1 at creation. RoundVotedOut is the LAST market so the
-        // recurring per-round markets openVotedOutRound() appends stay contiguous after it:
-        //   voIdx(round) == n + (round - 1).
-        // Markets are seat/round-ordered, so the server/UI maps propIdx ⇄ (kind, param) by reading each
-        // Prop's fields without extra index math.
+        //   props[n + 1]     NightKill,     round 1 (param == 1; playerCount + 1 outcomes)
+        // so propCount(matchId) == playerCount + 2 at creation. The two recurring per-round markets each
+        // append their later rounds on demand (openVotedOutRound / openNightKillRound), so once the match
+        // advances the two kinds interleave — DON'T assume a fixed index formula: the server/UI maps
+        // propIdx ⇄ (kind, param) by reading each Prop's fields (kind is the label authority).
         Prop[] storage props = _props[matchId];
         for (uint8 seat = 0; seat < p.playerCount; seat++) {
             props.push(_newProp(PropKind.PlayerFate, seat, FATE_BUCKETS));
         }
         props.push(_newProp(PropKind.RoundVotedOut, 1, p.playerCount + 1));
-        votedOutRoundsOpened[matchId] = 1; // round-1 "voted out" market created up front
+        props.push(_newProp(PropKind.NightKill, 1, p.playerCount + 1));
+        votedOutRoundsOpened[matchId] = 1;  // round-1 "voted out" market created up front
+        nightKillRoundsOpened[matchId] = 1; // round-1 "night kill" market created up front
         emit PropsCreated(matchId, props.length);
     }
 
@@ -380,6 +393,30 @@ contract MafiaMarket is ERC2771Context {
         emit VotedOutRoundOpened(matchId, round, startIdx);
     }
 
+    event NightKillRoundOpened(uint256 indexed matchId, uint8 round, uint256 startIdx);
+
+    /// @notice Open the NEXT round's "night kill" market — the night-side twin of openVotedOutRound.
+    ///         One NightKill prop (playerCount + 1 outcomes) tagged with the new round. The host calls
+    ///         this each nightfall to float a fresh market for the upcoming night; it freezes (closeProp)
+    ///         at dawn once the night's kill is public. onlyOwner and only while betting is open. Always
+    ///         opens `nightKillRoundsOpened + 1` (createMatch seeds round 1), appended at the array tail.
+    /// @dev    Adds NO settlement trust: the new market still resolves from the SAME TEE-verified run at
+    ///         settle() (a seat killed at night in `round`). It only creates the wagering surface.
+    /// @return round    the round the new market targets (1-based).
+    /// @return startIdx the propIdx of the new market.
+    function openNightKillRound(uint256 matchId) external onlyOwner returns (uint8 round, uint256 startIdx) {
+        Match storage m = matches[matchId];
+        require(m.state == MatchState.Created, "not open");
+        uint8 prev = nightKillRoundsOpened[matchId];
+        require(prev > 0, "no match"); // createMatch sets it to 1; 0 means the match doesn't exist
+        round = prev + 1;
+        Prop[] storage props = _props[matchId];
+        startIdx = props.length;
+        props.push(_newProp(PropKind.NightKill, round, m.playerCount + 1));
+        nightKillRoundsOpened[matchId] = round;
+        emit NightKillRoundOpened(matchId, round, startIdx);
+    }
+
     // Optional, owner-only manual close. Betting otherwise stays open until settle(); the host can
     // call this to freeze the pools early (e.g. once the match ends, before submitting settlement).
     // onlyOwner so no third party can close betting ahead of the host (which would break the
@@ -431,6 +468,11 @@ contract MafiaMarket is ERC2771Context {
     ///      vote (g.votedOutRound[seat] == param); if that round took no one (a tie, or the match ended
     ///      before the vote) the last outcome ("no one") wins. votedOutRound is 1-based (0 = never
     ///      day-voted) and param >= 1, so the equality skips un-voted seats without a sentinel check.
+    ///      NightKill: the winning outcome is the seat killed at NIGHT in THIS market's round — died that
+    ///      round (g.deathRound[seat] == param) but was NOT the day vote's casualty (g.votedOutRound[seat]
+    ///      == 0, which stays 0 for a night kill); a blocked kill / quiet night leaves the "no one"
+    ///      outcome. No new game state is needed — a night death is exactly a round death that wasn't a
+    ///      vote-out. At most one seat falls per night, so the first match is unambiguous.
     ///      An empty winning pool → Void (full refund of every outcome). Winners pay the match's standard
     ///      feeBps; Void is fee-free. Props never Draw — each outcome is unambiguous from the verified run.
     function _settleProps(uint256 matchId, Match storage m, MafiaRules.Game memory g) private {
@@ -443,12 +485,21 @@ contract MafiaMarket is ERC2771Context {
                 uint8 dr = g.deathRound[pr.param];
                 uint8 last = FATE_BUCKETS - 1;
                 win = dr >= last ? last : dr; // 0 survives; 1..last-1 the death round; last = round >= last
-            } else {
+            } else if (pr.kind == PropKind.RoundVotedOut) {
                 // RoundVotedOut: outcomes 0..seats-1 are the seats, the last (== seats) is "no one".
                 uint8 seats = pr.numOutcomes - 1;
                 win = seats; // default "no one"; overwritten if a seat fell to this round's vote
                 for (uint8 seat = 0; seat < seats; seat++) {
                     if (g.votedOutRound[seat] == pr.param) { win = seat; break; }
+                }
+            } else {
+                // NightKill: outcomes 0..seats-1 are the seats, the last (== seats) is "no one". The
+                // winner is the seat killed at night in `param` — a death that round that was NOT a
+                // day vote-out (votedOutRound stays 0 for a night kill).
+                uint8 seats = pr.numOutcomes - 1;
+                win = seats; // default "no one" (kill blocked / a quiet night)
+                for (uint8 seat = 0; seat < seats; seat++) {
+                    if (g.deathRound[seat] == pr.param && g.votedOutRound[seat] == 0) { win = seat; break; }
                 }
             }
             uint128 winPool = pr.pools[win];
@@ -706,7 +757,8 @@ contract MafiaMarket is ERC2771Context {
     }
 
     /// @notice Number of side markets attached to a match (one PlayerFate per seat + one RoundVotedOut
-    ///         per opened round — i.e. playerCount + votedOutRoundsOpened at any time).
+    ///         per opened round + one NightKill per opened round — i.e.
+    ///         playerCount + votedOutRoundsOpened + nightKillRoundsOpened at any time).
     function propCount(uint256 matchId) external view returns (uint256) {
         return _props[matchId].length;
     }

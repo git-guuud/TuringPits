@@ -16,6 +16,7 @@ import { withRetry, isTransientError } from "@turingpits/players/dist/retry.js";
 import { MAFIA_MARKET_ABI, ROLE_ENUM, marketStateOf, outcomeOf, propStateOf, winningSideOf } from "./abi.js";
 import { toPublicState, toPublicTurn } from "./redact.js";
 import { gateTurn, newNightGate } from "./night.js";
+import { nightKillResolved, votedOutResolved } from "./round-markets.js";
 import { buildPersonas, buildProvider, runMatch } from "./match-runner.js";
 import type { Hub } from "./broadcast.js";
 import type { PropSnapshot, WsMessage } from "./wire.js";
@@ -238,11 +239,12 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   });
 
   // Read the categorical side markets so the UI can show their live per-outcome pools + settled winner
-  // alongside the faction-win market. createMatch makes n+1 props — PlayerFate (propIdx 0..n-1) + the
-  // round-1 RoundVotedOut market (propIdx n) — and openVotedOutRound appends a fresh RoundVotedOut
-  // market per later round, so the count GROWS during the match: read propCount each pass. The on-chain
-  // `kind` byte is the label authority (0 PlayerFate / 1 RoundVotedOut); `param` is the seat or round.
-  const PROP_KIND = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT" } as const;
+  // alongside the faction-win market. createMatch makes n+2 props — PlayerFate (propIdx 0..n-1) + the
+  // round-1 RoundVotedOut market + the round-1 NightKill market — and openVotedOutRound / openNightKillRound
+  // append a fresh market per later round (so the two recurring kinds interleave), so the count GROWS
+  // during the match: read propCount each pass and address markets by their (kind, param), never a fixed
+  // index. The on-chain `kind` byte is the label authority (0 PlayerFate / 1 RoundVotedOut / 2 NightKill).
+  const PROP_KIND = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL" } as const;
   const readProps = async (): Promise<PropSnapshot[]> => {
     const count = Number(await rpc("propCount", () => market.getFunction("propCount")(matchId)));
     return Promise.all(
@@ -251,7 +253,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
           const state = propStateOf(Number(pr.state));
           return {
             index: i,
-            kind: PROP_KIND[Number(pr.kind) as 0 | 1] ?? "PLAYER_FATE",
+            kind: PROP_KIND[Number(pr.kind) as 0 | 1 | 2] ?? "PLAYER_FATE",
             param: Number(pr.param),
             numOutcomes: Number(pr.numOutcomes),
             pools: (pr.pools as bigint[]).map((p) => formatEther(p)),
@@ -362,42 +364,79 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     if (changed) await pushPools();
   };
 
-  // The RECURRING "voted out" market: ONE market per day-vote round. createMatch floats round 1; as the
-  // match advances we open the NEXT round's market (so it's bettable while that round plays) and freeze
-  // a round's market once ITS day vote has resolved. The market for round R lives at propIdx voIdx(R).
-  const voIdx = (round: number) => n + (round - 1);
-  let votedOutOpened = 1; // round-1 market created in createMatch
-  const syncVotedOutMarkets = async (state: { round: number; winner: unknown }): Promise<void> => {
+  // The two RECURRING per-round markets — "voted out" (the day vote) and "night kill" (before dawn).
+  // createMatch floats round 1 for both; as the match advances we open each new round's pair (so they're
+  // bettable while that round plays) and freeze each once its outcome is public: a VotedOut market when
+  // the round's DAY VOTE has resolved, a NightKill market at DAWN (the moment the night's kill is public,
+  // so the night's dead zone is the betting window). The two kinds INTERLEAVE in the prop array as they
+  // open, so there is no index formula — each market is addressed by its (kind, param) read off-chain.
+  let votedOutOpened = 1; // round-1 markets created in createMatch
+  let nightKillOpened = 1;
+  const voFrozen = new Set<number>(); // rounds whose VotedOut market we've already closed
+  const nkFrozen = new Set<number>(); // rounds whose NightKill market we've already closed
+  const openRound = async (
+    fn: "openVotedOutRound" | "openNightKillRound",
+    round: number,
+    label: string,
+  ): Promise<boolean> => {
+    try {
+      await rpc(`${fn}:${round}`, async () => {
+        const tx = await market.getFunction(fn)(matchId);
+        return tx.wait();
+      });
+      console.log(`[orch] '${label}' round ${round} market opened on-chain matchId=${matchId}`);
+      return true;
+    } catch (e) {
+      console.warn(`[orch] ${fn} ${round} failed:`, (e as Error).message);
+      return false;
+    }
+  };
+  const syncRoundMarkets = async (state: { round: number; phase: "night" | "day"; winner: unknown }): Promise<void> => {
     const over = state.winner != null;
     const cur = state.round; // 1-based current round
     let changed = false;
-    // 1. Open each round's market as the match reaches it — but never ahead of play, and never once the
-    //    match is over (a round with no day vote needs no market). Sequential; retries on a later turn.
+
+    // 1. Open each round's markets as the match reaches it (both float at the round's nightfall). Never
+    //    ahead of play, and never once the match is over. Sequential; a failure just retries next turn.
     if (!over) {
       while (votedOutOpened < cur) {
-        const next = votedOutOpened + 1;
-        try {
-          await rpc(`openVotedOutRound:${next}`, async () => {
-            const tx = await market.getFunction("openVotedOutRound")(matchId);
-            return tx.wait();
-          });
-          votedOutOpened = next;
-          changed = true;
-          console.log(`[orch] 'voted out' round ${next} market opened on-chain matchId=${matchId}`);
-        } catch (e) {
-          console.warn(`[orch] openVotedOutRound ${next} failed:`, (e as Error).message);
-          break;
-        }
+        if (!(await openRound("openVotedOutRound", votedOutOpened + 1, "voted out"))) break;
+        votedOutOpened++;
+        changed = true;
+      }
+      while (nightKillOpened < cur) {
+        if (!(await openRound("openNightKillRound", nightKillOpened + 1, "night kill"))) break;
+        nightKillOpened++;
+        changed = true;
       }
     }
-    // 2. Freeze each round's market once its day vote has resolved (round < current) or the match ended.
-    //    A single market per round, so the whole market closes at once (a night kill mid-round doesn't
-    //    decide the day vote, so the still-live round stays open for the survivors).
-    for (let r = 1; r <= votedOutOpened; r++) {
-      if (over || r < cur) {
-        if (await freeze(voIdx(r), `voted-out:r${r}`)) changed = true;
+
+    // 2. Which markets are due to freeze — VotedOut R once its DAY vote resolved (the match moved past
+    //    round R), NightKill R at DAWN (night R has resolved). Timing lives in ./round-markets predicates.
+    const voDue: number[] = [];
+    for (let r = 1; r <= votedOutOpened; r++) if (votedOutResolved(state, r) && !voFrozen.has(r)) voDue.push(r);
+    const nkDue: number[] = [];
+    for (let r = 1; r <= nightKillOpened; r++) if (nightKillResolved(state, r) && !nkFrozen.has(r)) nkDue.push(r);
+
+    // 3. Freeze the due markets. Look each up by (kind, param) from a fresh props read — the two kinds
+    //    interleave, so there is no index formula. Only read when there's actually something to close.
+    if (voDue.length || nkDue.length) {
+      const props = await readProps();
+      const idxOf = (kind: string, param: number) => props.find((p) => p.kind === kind && p.param === param)?.index;
+      for (const r of voDue) {
+        const i = idxOf("ROUND_VOTED_OUT", r);
+        if (i == null) continue; // not in this (transient) read → retry next turn
+        if (await freeze(i, `voted-out:r${r}`)) changed = true;
+        voFrozen.add(r);
+      }
+      for (const r of nkDue) {
+        const i = idxOf("NIGHT_KILL", r);
+        if (i == null) continue;
+        if (await freeze(i, `night-kill:r${r}`)) changed = true;
+        nkFrozen.add(r);
       }
     }
+
     if (changed) await pushPools();
   };
 
@@ -474,9 +513,9 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
         for (const m of msgs) await emitPaced(m);
         // After the public death beat lands, freeze the fallen seat's player-fate market on-chain.
         await closeFallenProps(state);
-        // The recurring "voted out" market opens the new round's market and freezes already-resolved
-        // ones as the match advances round by round.
-        await syncVotedOutMarkets(state);
+        // The recurring per-round markets ("voted out" + "night kill") open each new round's pair and
+        // freeze already-resolved ones as the match advances (VotedOut at its day vote, NightKill at dawn).
+        await syncRoundMarkets(state);
       },
       // Daytime deliberation streams as-is: it is public day speech (the discussion pass never runs
       // at night), so no role can leak. Paced by its spoken duration so the stage can keep up.

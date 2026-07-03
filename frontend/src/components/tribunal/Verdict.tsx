@@ -575,17 +575,21 @@ export function Verdict({ api }: { api: MatchApi }) {
     };
   };
 
-  // ── categorical side markets (PlayerFate per seat + the active per-round RoundVotedOut market) ──
+  // ── categorical side markets (PlayerFate per seat + the active per-round RoundVotedOut / NightKill markets) ──
   const aliveBySeat = new Map(s.seats.map((seat) => [seat.id, seat.alive]));
   const stakeByIdx = new Map(s.propStakes.map((ps) => [ps.index, ps]));
   const props = s.market.props ?? [];
 
-  // "Voted out" is a RECURRING market — one per round. Show only the ACTIVE one live: the highest round
-  // still open for bets (`closed` is on-chain truth, so this follows what's actually wagerable, not the
-  // lagging playback round). Resolved past-round markets drop off the list and stay claimable in
-  // History. PlayerFate markets always show. Once every round market is closed/settled, none show.
+  // "Voted out" and "night kill" are each RECURRING markets — one per round. Show only the ACTIVE one of
+  // each live: the highest round still open for bets (`closed` is on-chain truth, so this follows what's
+  // actually wagerable, not the lagging playback round). Resolved past-round markets drop off the list
+  // and stay claimable in History. PlayerFate markets always show. Once every round market is
+  // closed/settled, none show.
   const activeVoRound = Math.max(0, ...props.filter((p) => p.kind === "ROUND_VOTED_OUT" && !p.closed).map((p) => p.param));
-  const liveProps = props.filter((p) => p.kind !== "ROUND_VOTED_OUT" || p.param === activeVoRound);
+  const activeNkRound = Math.max(0, ...props.filter((p) => p.kind === "NIGHT_KILL" && !p.closed).map((p) => p.param));
+  const liveProps = props.filter((p) =>
+    p.kind === "ROUND_VOTED_OUT" ? p.param === activeVoRound : p.kind === "NIGHT_KILL" ? p.param === activeNkRound : true,
+  );
 
   const propMarket = (prop: PropSnapshot): BetMarket => {
     const total = prop.pools.reduce((acc, p) => acc + parseFloat(p), 0).toString();
@@ -597,7 +601,7 @@ export function Verdict({ api }: { api: MatchApi }) {
     const isVoid = prop.state === "VOID";
     // A decided market takes no more bets even while the match (and faction market) stays open. The
     // on-chain `closed` flag is authority; for PlayerFate a dead seat is the fallback (its fate is then
-    // public). A single RoundVotedOut market resolves only when the host closes it (the vote is in).
+    // public). A RoundVotedOut / NightKill market resolves only when the host closes it (vote in / dawn broke).
     const decided = prop.closed === true || (prop.kind === "PLAYER_FATE" && !(aliveBySeat.get(prop.param) ?? true));
     const bettable = open && !decided;
     const myWin = win != null && myStakeFor(win) > 0;
@@ -621,10 +625,13 @@ export function Verdict({ api }: { api: MatchApi }) {
         winner: win === o,
       }));
     } else {
-      const r = prop.param; // the day-vote round this market predicts (recurring)
-      const noOne = prop.numOutcomes - 1; // the last outcome — a hung vote
-      title = `Round ${r} vote`;
-      question = `Who hangs in the round ${r} vote?`;
+      // ROUND_VOTED_OUT and NIGHT_KILL share the same shape — outcomes 0..n-1 are the seats, the last is
+      // "no one" — differing only in framing (the day vote vs the night's kill before dawn).
+      const isNight = prop.kind === "NIGHT_KILL";
+      const r = prop.param; // the round this market predicts (recurring)
+      const noOne = prop.numOutcomes - 1; // the last outcome — a hung vote / a quiet night
+      title = isNight ? `Night ${r} kill` : `Round ${r} vote`;
+      question = isNight ? `Who falls before dawn in night ${r}?` : `Who hangs in the round ${r} vote?`;
       choices = [];
       for (let seat = 0; seat < noOne; seat++) {
         const aliveNow = aliveBySeat.get(seat) ?? true;
@@ -647,9 +654,9 @@ export function Verdict({ api }: { api: MatchApi }) {
       }
       choices.push({
         key: `o${noOne}`,
-        eyebrow: "a hung vote",
+        eyebrow: isNight ? "a quiet night" : "a hung vote",
         eyebrowClass: "text-acquit",
-        label: "NO ONE",
+        label: isNight ? "ALL SPARED" : "NO ONE",
         accent: "text-acquit",
         bar: "bg-acquit",
         pool: prop.pools[noOne] ?? "0",
@@ -663,7 +670,9 @@ export function Verdict({ api }: { api: MatchApi }) {
     const closedText =
       prop.kind === "ROUND_VOTED_OUT"
         ? `the round ${prop.param} vote is in · market closed${awaiting}`
-        : `${seatName(prop.param)} fell · market closed${awaiting}`;
+        : prop.kind === "NIGHT_KILL"
+          ? `dawn broke on night ${prop.param} · market closed${awaiting}`
+          : `${seatName(prop.param)} fell · market closed${awaiting}`;
     const wonStatus = isVoid
       ? "Void · stakes returned"
       : win == null
@@ -672,7 +681,11 @@ export function Verdict({ api }: { api: MatchApi }) {
           ? win === prop.numOutcomes - 1
             ? "Hung vote · no one fell"
             : `${seatName(win)} was voted out`
-          : `Fate · ${FATE_COPY[win]?.label ?? "settled"}`;
+          : prop.kind === "NIGHT_KILL"
+            ? win === prop.numOutcomes - 1
+              ? "A quiet night · all spared"
+              : `${seatName(win)} fell in the night`
+            : `Fate · ${FATE_COPY[win]?.label ?? "settled"}`;
     const status = bettable
       ? null
       : settled || refundMode

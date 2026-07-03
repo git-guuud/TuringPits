@@ -416,12 +416,12 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
   addrRef.current = state.marketAddress ?? MARKET_ADDRESS;
   const matchIdRef = useRef<number | null>(null);
   matchIdRef.current = state.matchId;
-  // Number of side markets. It GROWS during the match as each round's "voted out" market opens, so prefer
-  // the pushed props length (the live count). Fall back to the persona roster + 1 — the at-creation count
-  // (one PlayerFate per seat + the round-1 RoundVotedOut market) — so prop-stake reads cover the upfront
-  // markets before the first market push lands.
+  // Number of side markets. It GROWS during the match as each round's "voted out" + "night kill" markets
+  // open, so prefer the pushed props length (the live count). Fall back to the persona roster + 2 — the
+  // at-creation count (one PlayerFate per seat + the round-1 RoundVotedOut + round-1 NightKill markets) —
+  // so prop-stake reads cover the upfront markets before the first market push lands.
   const propCountRef = useRef(0);
-  propCountRef.current = state.market.props?.length ?? state.personas.length + 1;
+  propCountRef.current = state.market.props?.length ?? state.personas.length + 2;
 
   // Gasless is the DEFAULT whenever the server's relayer is live AND still funded — the user signs
   // and the relayer pays. We never gate this on the USER's own 0G balance (a fresh wallet with zero

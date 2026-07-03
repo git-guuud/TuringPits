@@ -66,11 +66,14 @@ export interface MarketSnapshot {
  *   - ROUND_VOTED_OUT : "who is voted out in round `param`'s day vote?" Outcomes 0..n-1 are the seats,
  *                       the last (numOutcomes-1) is "no one (tie / no elimination)". A recurring
  *                       per-round market: one per round, opened as the match advances.
+ *   - NIGHT_KILL      : "who falls before dawn in round `param`'s night?" Same outcome shape as
+ *                       ROUND_VOTED_OUT (seats + a "no one" for a blocked kill / quiet night). Opens at
+ *                       nightfall and freezes at dawn — the night-side twin of ROUND_VOTED_OUT.
  */
 export interface PropSnapshot {
   index: number;
-  kind: "PLAYER_FATE" | "ROUND_VOTED_OUT";
-  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT: the 1-based day-vote round. */
+  kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL";
+  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. */
   param: number;
   numOutcomes: number;
   /** Per-outcome pools (CHIP decimal strings), length == numOutcomes. */

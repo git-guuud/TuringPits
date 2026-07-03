@@ -6,8 +6,8 @@ import { defaultSchedule, createParams, deployMarket, fundBettors, buildSettleme
 const SEED = "0x" + "ab".repeat(32);
 const CID = "0x" + "cd".repeat(32);
 
-// PropKind enum (MafiaMarket.sol): PlayerFate=0, RoundVotedOut=1.
-const KIND = { PlayerFate: 0, RoundVotedOut: 1 } as const;
+// PropKind enum (MafiaMarket.sol): PlayerFate=0, RoundVotedOut=1, NightKill=2.
+const KIND = { PlayerFate: 0, RoundVotedOut: 1, NightKill: 2 } as const;
 // PropState enum (MafiaMarket.sol): Unset=0, Resolved=1, Void=2.
 const PS = { Unset: 0, Resolved: 1, Void: 2 } as const;
 // PlayerFate outcome buckets (MafiaMarket.FATE_BUCKETS == 5):
@@ -40,8 +40,9 @@ async function opened(nonce: string, n = 5) {
 describe("MafiaMarket — player-fate side markets (props): creation", () => {
   it("auto-creates one PlayerFate market per seat (index == seat == param), 5 outcomes, empty/Unset", async () => {
     const { market, n } = await opened("pf-create");
-    // PlayerFate occupies props[0..n-1]; the round-1 RoundVotedOut market at props[n] is its own suite.
-    expect(await market.propCount(0)).to.equal(n + 1);
+    // PlayerFate occupies props[0..n-1]; the round-1 RoundVotedOut (props[n]) + NightKill (props[n+1])
+    // markets are covered by their own suites.
+    expect(await market.propCount(0)).to.equal(n + 2);
     for (let i = 0; i < n; i++) {
       const pr = await market.getProp(0, i);
       expect(pr.kind, `seat ${i}`).to.equal(KIND.PlayerFate);
@@ -54,20 +55,24 @@ describe("MafiaMarket — player-fate side markets (props): creation", () => {
     }
   });
 
-  it("emits PropsCreated with the total side-market count (n PlayerFate + 1 round-1 vote) and scales with playerCount", async () => {
+  it("emits PropsCreated with the total side-market count (n PlayerFate + round-1 vote + round-1 night kill) and scales with playerCount", async () => {
     const { market } = await deploy();
     const teeSigner = ethers.Wallet.createRandom();
     const sched = await defaultSchedule(ethers.provider);
     const commit = "0x" + "aa".repeat(32);
-    // 7 seats → 7 PlayerFate + 1 round-1 RoundVotedOut = 8 side markets at creation.
+    // 7 seats → 7 PlayerFate + 1 round-1 RoundVotedOut + 1 round-1 NightKill = 9 side markets at creation.
     await expect(market.createMatch(createParams({ roleCommit: commit, teeSigner: teeSigner.address, nonce: "pf-7", playerCount: 7, schedule: sched })))
-      .to.emit(market, "PropsCreated").withArgs(0, 8);
-    expect(await market.propCount(0)).to.equal(8);
-    // The round-1 RoundVotedOut market sits last with playerCount + 1 outcomes.
+      .to.emit(market, "PropsCreated").withArgs(0, 9);
+    expect(await market.propCount(0)).to.equal(9);
+    // The round-1 RoundVotedOut market sits right after the fate block, then the round-1 NightKill.
     const vo = await market.getProp(0, 7);
     expect(vo.kind).to.equal(KIND.RoundVotedOut);
     expect(vo.param).to.equal(1);
     expect(vo.numOutcomes).to.equal(8);
+    const nk = await market.getProp(0, 8);
+    expect(nk.kind).to.equal(KIND.NightKill);
+    expect(nk.param).to.equal(1);
+    expect(nk.numOutcomes).to.equal(8);
   });
 });
 

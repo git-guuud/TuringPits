@@ -117,12 +117,15 @@ export interface MarketSnapshot {
  *   - ROUND_VOTED_OUT : "who is voted out in round `param`'s day vote?" Outcomes 0..n-1 are the seats,
  *                       the last (numOutcomes-1) is "no one (tie / no elimination)" — a recurring
  *                       per-round market, one per round, floated as the match advances.
+ *   - NIGHT_KILL      : "who falls before dawn in round `param`'s night?" Same outcome shape as
+ *                       ROUND_VOTED_OUT (seats + a "no one" for a blocked kill / quiet night). Opens at
+ *                       nightfall and freezes at dawn — the night-side twin of ROUND_VOTED_OUT.
  * Mirrors MafiaMarket.getProp() / server wire `PropSnapshot`.
  */
 export interface PropSnapshot {
   readonly index: number;
-  readonly kind: "PLAYER_FATE" | "ROUND_VOTED_OUT";
-  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT: the 1-based day-vote round. */
+  readonly kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL";
+  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. */
   readonly param: number;
   readonly numOutcomes: number;
   /** Per-outcome pools (CHIP decimal strings), length == numOutcomes. */
