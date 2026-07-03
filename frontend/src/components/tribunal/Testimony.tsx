@@ -14,13 +14,15 @@ export function Testimony({ s }: { s: ViewState }) {
     seat: number;
     speech: string;
     round: number;
-    kind: "discussion" | "vote";
+    kind: "discussion" | "claim" | "vote";
     target: number | null;
     source: "0g-tee" | "MOCK-local" | null;
   };
   const shown: Entry[] = s.beats.slice(0, s.cursor + 1).flatMap((b): Entry[] => {
     if (b.kind === "discussion")
       return [{ seat: b.seat, speech: b.speech, round: b.round, kind: "discussion" as const, target: null, source: null }];
+    if (b.kind === "claim")
+      return [{ seat: b.seat, speech: b.speech, round: b.round, kind: "claim" as const, target: null, source: null }];
     if (b.kind === "turn")
       return [
         {
@@ -49,7 +51,7 @@ export function Testimony({ s }: { s: ViewState }) {
           shown.map((entry, i) => {
             const persona = s.personas.find((p) => p.seat === entry.seat);
             const name = (persona?.name ?? `Seat ${entry.seat}`).toUpperCase();
-            const tag = `Day ${entry.round} · ${entry.kind === "discussion" ? "deliberation" : "vote"}`;
+            const tag = `Day ${entry.round} · ${entry.kind === "discussion" ? "deliberation" : entry.kind === "claim" ? "Detective claim" : "vote"}`;
             const targetName =
               entry.target != null
                 ? (s.personas.find((p) => p.seat === entry.target)?.name ?? `Seat ${entry.target}`)

@@ -184,6 +184,19 @@ function sceneFor(s: ViewState): Scene {
       lamp: "day",
     };
   }
+  if (beat?.kind === "claim") {
+    const persona = s.personas.find((p) => p.seat === beat.seat);
+    // A seat stakes its life on a Detective claim — a momentum swing the table (and the market) must
+    // reckon with. Never reveals whether it's true: that is the "real or bluff?" fork bettors take.
+    return {
+      title: beat.counter ? "A rival rises" : "A claim is staked",
+      note: beat.counter ? "detective against detective · one is lying" : "the badge comes out · real or bluff?",
+      name: (persona?.name ?? `Seat ${beat.seat}`).toUpperCase(),
+      role: beat.counter ? "counter-claims the Detective's chair" : "steps forward as the Detective",
+      body: beat.speech,
+      lamp: "day",
+    };
+  }
   if (beat?.kind === "discussion") {
     const persona = s.personas.find((p) => p.seat === beat.seat);
     return {
@@ -279,7 +292,7 @@ export function Court({
   // the AUDIO: wait for the spoken line to finish (then a short tail) instead of a fixed timer, so the
   // clip is neither cut off early nor left hanging in silence. Narration / muted playback keeps the
   // fixed read hold. `kind` check (not `lineForBeat`) so this doesn't re-run on every persona change.
-  const isSpeechBeat = s.currentBeat?.kind === "discussion" || s.currentBeat?.kind === "turn";
+  const isSpeechBeat = s.currentBeat?.kind === "discussion" || s.currentBeat?.kind === "claim" || s.currentBeat?.kind === "turn";
   const audioExpected = voiceAvailable && voiceOn && !!isSpeechBeat && !s.playbackComplete;
   useEffect(() => {
     if (paused || !done || !s.currentBeat || s.reveal) return;
@@ -312,7 +325,7 @@ export function Court({
     if (!b) return null;
     const persona = (seat: number) => s.personas.find((p) => p.seat === seat);
     const nameOf = (seat: number) => persona(seat)?.name ?? `Seat ${seat}`;
-    if (b.kind === "discussion")
+    if (b.kind === "discussion" || b.kind === "claim")
       return { text: b.speech, name: nameOf(b.seat), blurb: persona(b.seat)?.blurb, kind: "discussion" };
     if (b.kind === "turn") {
       const d = b.turn.decision;
@@ -436,7 +449,7 @@ export function Court({
   let shownTurns = 0;
   for (let i = 0; i <= s.cursor; i++) {
     const k = s.beats[i]?.kind;
-    if (k === "turn" || k === "discussion") shownTurns++;
+    if (k === "turn" || k === "discussion" || k === "claim") shownTurns++;
   }
 
   return (

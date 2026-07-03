@@ -120,12 +120,15 @@ export interface MarketSnapshot {
  *   - NIGHT_KILL      : "who falls before dawn in round `param`'s night?" Same outcome shape as
  *                       ROUND_VOTED_OUT (seats + a "no one" for a blocked kill / quiet night). Opens at
  *                       nightfall and freezes at dawn — the night-side twin of ROUND_VOTED_OUT.
+ *   - DETECTIVE_CLAIM : "is seat `param`, who went public as the Detective, telling the truth or bluffing?"
+ *                       A SINGLE binary market — outcome 0 = BLUFF, 1 = REAL DETECTIVE. Floated on the
+ *                       first public claim; stays open until settle (resolves from the revealed roles).
  * Mirrors MafiaMarket.getProp() / server wire `PropSnapshot`.
  */
 export interface PropSnapshot {
   readonly index: number;
-  readonly kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL";
-  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. */
+  readonly kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL" | "DETECTIVE_CLAIM";
+  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. DETECTIVE_CLAIM: the claiming seat. */
   readonly param: number;
   readonly numOutcomes: number;
   /** Per-outcome pools (CHIP decimal strings), length == numOutcomes. */
@@ -169,6 +172,11 @@ export type WsMessage =
   // Daytime deliberation: each living seat's unsigned public discussion, streamed before the vote
   // pass. Day speech only (never runs at night), so it carries no role.
   | { type: "discussion"; seat: number; round: number; speech: string; state: PublicGameState }
+  // A CLAIM beat: a seat goes public as the Detective (a genuine reveal OR a Mafia fake-claim), promoted
+  // from a discussion turn to its own stage scene. Leaks NO role — whether the claim is TRUE settles only
+  // from the revealed roles (the "real or bluff?" market). `counter` is true when a rival claim already
+  // happened this match (a public fork). `role` is always DETECTIVE (the only claim with a market today).
+  | { type: "claim"; seat: number; round: number; role: "DETECTIVE"; counter: boolean; speech: string; state: PublicGameState }
   // Night is never streamed per-actor (it would leak roles). `night` marks nightfall; `dawn`
   // reports the publicly-known death(s) at first light plus `saved` — the COUNT of lives shielded
   // by a protection (a blocked kill), never the seat. See server/src/orchestrator.ts.

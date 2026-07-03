@@ -243,8 +243,10 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   // round-1 RoundVotedOut market + the round-1 NightKill market — and openVotedOutRound / openNightKillRound
   // append a fresh market per later round (so the two recurring kinds interleave), so the count GROWS
   // during the match: read propCount each pass and address markets by their (kind, param), never a fixed
-  // index. The on-chain `kind` byte is the label authority (0 PlayerFate / 1 RoundVotedOut / 2 NightKill).
-  const PROP_KIND = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL" } as const;
+  // index. The on-chain `kind` byte is the label authority (0 PlayerFate / 1 RoundVotedOut / 2 NightKill /
+  // 3 DetectiveClaim). DetectiveClaim is floated on demand (openDetectiveClaim) at the tail on the first
+  // public claim, so it never collides with the PlayerFate propIdx==seat freeze in closeFallenProps.
+  const PROP_KIND = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL", 3: "DETECTIVE_CLAIM" } as const;
   const readProps = async (): Promise<PropSnapshot[]> => {
     const count = Number(await rpc("propCount", () => market.getFunction("propCount")(matchId)));
     return Promise.all(
@@ -253,7 +255,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
           const state = propStateOf(Number(pr.state));
           return {
             index: i,
-            kind: PROP_KIND[Number(pr.kind) as 0 | 1 | 2] ?? "PLAYER_FATE",
+            kind: PROP_KIND[Number(pr.kind) as 0 | 1 | 2 | 3] ?? "PLAYER_FATE",
             param: Number(pr.param),
             numOutcomes: Number(pr.numOutcomes),
             pools: (pr.pools as bigint[]).map((p) => formatEther(p)),
@@ -440,6 +442,28 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     if (changed) await pushPools();
   };
 
+  // The single "Detective claim: real or bluff?" market — floated on the FIRST public claim of the match
+  // (a Detective reveal or a Mafia fake-claim). At most one per match: a later counter-claim renders as
+  // its own beat but reuses this pool (money moves toward BLUFF). Resolves from the revealed roles at
+  // settle(), so opening it adds no trust — it only creates the wagering surface. Non-fatal on failure.
+  let detectiveClaimOpened = false;
+  let claimBeats = 0; // how many claim beats have streamed — a 2nd+ is a public counter-claim
+  const openDetectiveClaim = async (seat: number): Promise<void> => {
+    if (detectiveClaimOpened) return;
+    detectiveClaimOpened = true; // guard even if the tx is in flight, so a same-turn double never races
+    try {
+      await rpc("openDetectiveClaim", async () => {
+        const tx = await market.getFunction("openDetectiveClaim")(matchId, seat);
+        return tx.wait();
+      });
+      console.log(`[orch] 'detective claim' market opened on-chain seat=${seat} matchId=${matchId}`);
+      await pushPools();
+    } catch (e) {
+      detectiveClaimOpened = false; // let a later claim retry — the market never opened
+      console.warn(`[orch] openDetectiveClaim seat=${seat} failed:`, (e as Error).message);
+    }
+  };
+
   // ── voice-paced stage emission ────────────────────────────────────────────────────────────────
   // Beats are released to the stage at the speed they can actually be WATCHED, not the speed they are
   // inferred — otherwise a slow ElevenLabs line (~10s) against a fast emit cadence makes the viewer
@@ -452,7 +476,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   const personaBlurb = (seat: number) => personas.find((p) => p.seat === seat)?.blurb;
   // The spoken line behind a beat (null for night/dawn narration, which carries no audio).
   const speechLineFor = (m: WsMessage): ToneInput | null => {
-    if (m.type === "discussion")
+    if (m.type === "discussion" || m.type === "claim")
       return { text: m.speech, name: personaName(m.seat), blurb: personaBlurb(m.seat), kind: "discussion" };
     if (m.type === "turn") {
       const d = m.turn.decision;
@@ -520,7 +544,16 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
       // Daytime deliberation streams as-is: it is public day speech (the discussion pass never runs
       // at night), so no role can leak. Paced by its spoken duration so the stage can keep up.
       onDiscussion: async (entry, state) => {
-        await emitPaced({ type: "discussion", seat: entry.seat, round: entry.round, speech: entry.speech, state: toPublicState(state) });
+        // A Detective reveal / Mafia fake-claim is promoted to its own labeled `claim` beat + scene;
+        // the FIRST one floats the reveal market. Everything else is ordinary day deliberation.
+        if (entry.claim) {
+          const counter = claimBeats > 0; // a 2nd+ public claim is a counter-claim (a bettable fork)
+          claimBeats++;
+          await emitPaced({ type: "claim", seat: entry.seat, round: entry.round, role: "DETECTIVE", counter, speech: entry.speech, state: toPublicState(state) });
+          await openDetectiveClaim(entry.seat); // self-guards: only the first claim opens the market
+        } else {
+          await emitPaced({ type: "discussion", seat: entry.seat, round: entry.round, speech: entry.speech, state: toPublicState(state) });
+        }
       },
     });
   } finally {

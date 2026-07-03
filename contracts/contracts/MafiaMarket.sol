@@ -48,8 +48,16 @@ contract MafiaMarket is ERC2771Context {
     ///        and the host floats later rounds via openNightKillRound(). Outcomes: one per seat plus a
     ///        final "no one (kill blocked / a quiet night)" outcome — playerCount + 1 in total. Each
     ///        market settles against THAT round's NIGHT kill (a seat killed at night, not day-voted).
+    ///      - DetectiveClaim — "is seat N, who went public as the Detective, telling the truth or bluffing?"
+    ///        A SINGLE per-match binary market (Prop.param == the claiming seat) with exactly two outcomes:
+    ///        0 = BLUFF (a fake claim — Mafia/Town), 1 = REAL DETECTIVE. It is NOT created up front: the
+    ///        host floats it on demand via openDetectiveClaim() the first time a seat publicly claims the
+    ///        Detective role, and it stays open until settle() (roles are hidden until the reveal, so the
+    ///        truth can't be shown mid-match). Settles PURELY from the commit-reveal-verified roles
+    ///        (g.roles[param] == DETECTIVE), so it adds no new game state and no new trust — a Mafia
+    ///        counter-claim only moves money toward BLUFF, it never spawns a second market.
     ///      The enum can grow further with no storage migration.
-    enum PropKind { PlayerFate, RoundVotedOut, NightKill }
+    enum PropKind { PlayerFate, RoundVotedOut, NightKill, DetectiveClaim }
     /// @dev A categorical prop's resolution state. Props don't use the YES/NO `Outcome`: at settle a
     ///      single `winningOutcome` is chosen (Resolved), or the market Voids when nobody backed the
     ///      winning outcome → every stake is refunded. Never Draw.
@@ -113,8 +121,8 @@ contract MafiaMarket is ERC2771Context {
     ///         RoundVotedOut: outcomes are the seats + a "no one" outcome for round `param`'s day vote.
     struct Prop {
         PropKind kind;
-        uint8 param;          // PlayerFate: the seat. RoundVotedOut / NightKill: the 1-based round.
-        uint8 numOutcomes;    // PlayerFate: FATE_BUCKETS. RoundVotedOut / NightKill: playerCount + 1.
+        uint8 param;          // PlayerFate: the seat. RoundVotedOut / NightKill: the 1-based round. DetectiveClaim: the claiming seat.
+        uint8 numOutcomes;    // PlayerFate: FATE_BUCKETS. RoundVotedOut / NightKill: playerCount + 1. DetectiveClaim: 2 (BLUFF / REAL).
         bool closed;          // betting frozen mid-match (the outcome became public); see closeProp(). Payout-neutral.
         PropState state;      // Unset until settle; Resolved (winningOutcome valid) or Void (refund all).
         uint8 winningOutcome; // the outcome that won — valid iff state == Resolved.
@@ -162,6 +170,11 @@ contract MafiaMarket is ERC2771Context {
     ///         votedOutRoundsOpened. createMatch seeds round 1; openNightKillRound bumps it as the
     ///         match advances (a fresh market floated each nightfall).
     mapping(uint256 => uint8) public nightKillRoundsOpened;
+    /// @notice Whether this match's single "Detective claim: real or bluff?" market has been floated
+    ///         yet (openDetectiveClaim). Unlike the round markets it is NOT seeded at createMatch — a
+    ///         claim is an unpredictable speech event — and there is at most ONE per match, so this is a
+    ///         plain open-once guard rather than a counter.
+    mapping(uint256 => bool) public detectiveClaimOpened;
 
     event MatchCreated(
         uint256 indexed matchId, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot,
@@ -417,6 +430,30 @@ contract MafiaMarket is ERC2771Context {
         emit NightKillRoundOpened(matchId, round, startIdx);
     }
 
+    event DetectiveClaimOpened(uint256 indexed matchId, uint256 startIdx, uint8 seat);
+
+    /// @notice Open the single "Detective claim: real or bluff?" market for `seat` — the seat that just
+    ///         went public as the Detective. One binary prop (2 outcomes: 0 = BLUFF, 1 = REAL DETECTIVE)
+    ///         tagged with the claiming seat. The host calls this the first time a claim happens; there is
+    ///         at most ONE per match (a Mafia counter-claim just moves money toward BLUFF on this same
+    ///         pool — see the note in the settle path). onlyOwner and only while betting is open.
+    /// @dev    Adds NO settlement trust: it resolves from the SAME commit-reveal-verified roles at
+    ///         settle() (`g.roles[seat] == DETECTIVE`). It only creates the wagering surface. Stays open
+    ///         until settle — roles are hidden until the reveal, so the truth can't become public
+    ///         mid-match to justify a closeProp freeze.
+    /// @return startIdx the propIdx of the new market.
+    function openDetectiveClaim(uint256 matchId, uint8 seat) external onlyOwner returns (uint256 startIdx) {
+        Match storage m = matches[matchId];
+        require(m.state == MatchState.Created, "not open");
+        require(seat < m.playerCount, "bad seat");
+        require(!detectiveClaimOpened[matchId], "already opened");
+        Prop[] storage props = _props[matchId];
+        startIdx = props.length;
+        props.push(_newProp(PropKind.DetectiveClaim, seat, 2));
+        detectiveClaimOpened[matchId] = true;
+        emit DetectiveClaimOpened(matchId, startIdx, seat);
+    }
+
     // Optional, owner-only manual close. Betting otherwise stays open until settle(); the host can
     // call this to freeze the pools early (e.g. once the match ends, before submitting settlement).
     // onlyOwner so no third party can close betting ahead of the host (which would break the
@@ -492,7 +529,7 @@ contract MafiaMarket is ERC2771Context {
                 for (uint8 seat = 0; seat < seats; seat++) {
                     if (g.votedOutRound[seat] == pr.param) { win = seat; break; }
                 }
-            } else {
+            } else if (pr.kind == PropKind.NightKill) {
                 // NightKill: outcomes 0..seats-1 are the seats, the last (== seats) is "no one". The
                 // winner is the seat killed at night in `param` — a death that round that was NOT a
                 // day vote-out (votedOutRound stays 0 for a night kill).
@@ -501,6 +538,11 @@ contract MafiaMarket is ERC2771Context {
                 for (uint8 seat = 0; seat < seats; seat++) {
                     if (g.deathRound[seat] == pr.param && g.votedOutRound[seat] == 0) { win = seat; break; }
                 }
+            } else {
+                // DetectiveClaim: binary. outcome 1 (REAL) wins iff the claiming seat's verified role is
+                // DETECTIVE, else outcome 0 (BLUFF). A Mafia counter-claim never opened a second market,
+                // so it can only ever tilt this one toward BLUFF; the truth is the role check, nothing else.
+                win = g.roles[pr.param] == Role.DETECTIVE ? 1 : 0;
             }
             uint128 winPool = pr.pools[win];
             uint128 gross = _poolSum(pr.pools);

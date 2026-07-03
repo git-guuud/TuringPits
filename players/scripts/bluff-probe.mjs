@@ -62,9 +62,11 @@ const { speech } = await new players.Player(provider, { decisionRetries: 4 }).di
 console.log("\n==================== Cleo discussion line ====================");
 console.log(speech);
 console.log("==============================================================");
-const claimsDetective = /\b(?:I(?:'| a)?m|as)\s+the\s+detective|I\s+investigated|my\s+investigation/i.test(speech);
+// Use the SAME exported detector the live match keys off to float the "real or bluff?" market (task 6.4),
+// so this probe confirms the bluff both FIRES and would open the market — not a divergent local regex.
+const claimed = players.claimsDetective(speech);
 const framesDmitri = /\bDmitri\b/i.test(speech);
 const namesAlly = /\bEsme\b/i.test(speech);
-console.log(`\nClaims to be the Detective? ${claimsDetective ? "✅ YES (bluff fired)" : "❌ NO (model would not author the lie)"}`);
+console.log(`\nClaims to be the Detective? ${claimed ? "✅ YES (bluff fired → market would open)" : "❌ NO (model would not author the lie)"}`);
 console.log(`Frames a target named Dmitri?  ${framesDmitri ? "✅ YES" : "—"}`);
 console.log(`Leaks/accuses ally Esme?       ${namesAlly ? "❌ YES (BAD)" : "✅ NO"}`);

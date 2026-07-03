@@ -3,6 +3,7 @@ import { Player } from "./player.js";
 import { MockLocalProvider } from "./provider.js";
 import { verifyAttestation } from "./attestation.js";
 import { toSettlementMove } from "./match.js";
+import { claimsDetective } from "./sanitize.js";
 import { wrapResponseBody } from "./envelope.js";
 import type { Attestation, InferenceProvider, SamplingOptions, TurnContext } from "./types.js";
 
@@ -317,6 +318,9 @@ describe("Player.discuss", () => {
     const result = await new Player(provider).discuss(revealCtx);
     expect(result.speech).toContain("I am the Detective");
     expect(result.speech).toContain("Boris"); // survived — not collapsed to a no-name fallback
+    // ...and the cleaned reveal is detected as a claim, so the Sequencer floats the "real or bluff?"
+    // market on it (task 6.4). Detecting on the guard OUTPUT is what the live path does.
+    expect(claimsDetective(result.speech)).toBe(true);
   });
 
   it("converts a stray 'seat N' in a discussion line to the player's name", async () => {

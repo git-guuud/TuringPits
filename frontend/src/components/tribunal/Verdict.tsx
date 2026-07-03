@@ -624,6 +624,24 @@ export function Verdict({ api }: { api: MatchApi }) {
         mine: myStakeFor(o),
         winner: win === o,
       }));
+    } else if (prop.kind === "DETECTIVE_CLAIM") {
+      // Binary reveal fork — outcome 1 = REAL DETECTIVE, 0 = BLUFF. Keyed to the claiming seat; it
+      // resolves from the revealed roles at settle. REAL first (the claim as stated), then BLUFF.
+      const name = seatName(prop.param);
+      title = `${name} · claim`;
+      question = `Is ${name}'s Detective claim real — or a bluff?`;
+      choices = [
+        {
+          key: "o1", eyebrow: "the real detective", eyebrowClass: "text-acquit",
+          label: "REAL", accent: "text-acquit", bar: "bg-acquit",
+          pool: prop.pools[1] ?? "0", total, mine: myStakeFor(1), winner: win === 1,
+        },
+        {
+          key: "o0", eyebrow: "a fake claim", eyebrowClass: "text-convict",
+          label: "BLUFF", accent: "text-convict", bar: "bg-convict",
+          pool: prop.pools[0] ?? "0", total, mine: myStakeFor(0), winner: win === 0,
+        },
+      ];
     } else {
       // ROUND_VOTED_OUT and NIGHT_KILL share the same shape — outcomes 0..n-1 are the seats, the last is
       // "no one" — differing only in framing (the day vote vs the night's kill before dawn).
@@ -672,7 +690,9 @@ export function Verdict({ api }: { api: MatchApi }) {
         ? `the round ${prop.param} vote is in · market closed${awaiting}`
         : prop.kind === "NIGHT_KILL"
           ? `dawn broke on night ${prop.param} · market closed${awaiting}`
-          : `${seatName(prop.param)} fell · market closed${awaiting}`;
+          : prop.kind === "DETECTIVE_CLAIM"
+            ? `${seatName(prop.param)}'s claim · market closed${awaiting}`
+            : `${seatName(prop.param)} fell · market closed${awaiting}`;
     const wonStatus = isVoid
       ? "Void · stakes returned"
       : win == null
@@ -685,7 +705,11 @@ export function Verdict({ api }: { api: MatchApi }) {
             ? win === prop.numOutcomes - 1
               ? "A quiet night · all spared"
               : `${seatName(win)} fell in the night`
-            : `Fate · ${FATE_COPY[win]?.label ?? "settled"}`;
+            : prop.kind === "DETECTIVE_CLAIM"
+              ? win === 1
+                ? `${seatName(prop.param)} was the real Detective`
+                : `${seatName(prop.param)} was bluffing`
+              : `Fate · ${FATE_COPY[win]?.label ?? "settled"}`;
     const status = bettable
       ? null
       : settled || refundMode

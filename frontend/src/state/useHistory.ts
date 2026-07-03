@@ -28,10 +28,10 @@ export type ReclaimKind = "win" | "return" | "refund" | "enable";
 /** A reclaimable side pot (PlayerFate, RoundVotedOut, or NightKill) the viewer holds on a past battle. */
 export interface PropReclaim {
   index: number;
-  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round (for the label). */
+  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. DETECTIVE_CLAIM: the claiming seat. (for the label) */
   param: number;
-  /** Which side market this pot is — drives the History label ("seat N · fate" / "round R vote" / "night R kill"). */
-  market: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL";
+  /** Which side market this pot is — drives the History label ("seat N · fate" / "round R vote" / "night R kill" / "seat N · claim"). */
+  market: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL" | "DETECTIVE_CLAIM";
   /** side markets never need `enable` — they settle/refund with the parent match. */
   kind: "win" | "return" | "refund";
   amount: string;

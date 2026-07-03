@@ -69,11 +69,14 @@ export interface MarketSnapshot {
  *   - NIGHT_KILL      : "who falls before dawn in round `param`'s night?" Same outcome shape as
  *                       ROUND_VOTED_OUT (seats + a "no one" for a blocked kill / quiet night). Opens at
  *                       nightfall and freezes at dawn — the night-side twin of ROUND_VOTED_OUT.
+ *   - DETECTIVE_CLAIM : "is seat `param`, who went public as the Detective, telling the truth or bluffing?"
+ *                       A SINGLE binary market — outcome 0 = BLUFF, 1 = REAL DETECTIVE. Floated on the
+ *                       first public claim; stays open until settle (resolves from the revealed roles).
  */
 export interface PropSnapshot {
   index: number;
-  kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL";
-  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. */
+  kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL" | "DETECTIVE_CLAIM";
+  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. DETECTIVE_CLAIM: the claiming seat. */
   param: number;
   numOutcomes: number;
   /** Per-outcome pools (CHIP decimal strings), length == numOutcomes. */
@@ -93,6 +96,12 @@ export type WsMessage =
   // Daytime deliberation: the unsigned, public discussion each living seat makes before the vote.
   // Day speech only (the discussion pass never runs at night), so it leaks no role.
   | { type: "discussion"; seat: number; round: number; speech: string; state: PublicGameState }
+  // A CLAIM beat: a seat goes public as the Detective (a genuine reveal OR a Mafia fake-claim). Promoted
+  // from a discussion turn so the stage gives it its own scene and the "real or bluff?" market opens.
+  // Leaks NO role — whether the claim is TRUE settles only from the revealed roles. `counter` is true
+  // when an earlier claim already happened this match (a rival Detective-claim = a public fork), which is
+  // itself public. The claimed role is always the Detective (the only claim with a market today).
+  | { type: "claim"; seat: number; round: number; role: "DETECTIVE"; counter: boolean; speech: string; state: PublicGameState }
   // Night is never streamed per-actor (it would reveal who holds which role). A single `night`
   // beat marks nightfall; a `dawn` beat reports only the publicly-known death at first light, plus
   // `saved` — the COUNT of lives shielded by a protection (a blocked kill), never the seat, so the

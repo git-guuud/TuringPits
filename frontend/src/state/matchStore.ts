@@ -56,6 +56,9 @@ export type Beat =
   | { kind: "night"; round: number; seats: PublicSeat[] }
   | { kind: "dawn"; round: number; killed: number[]; saved: number; seats: PublicSeat[] }
   | { kind: "discussion"; seat: number; round: number; speech: string; seats: PublicSeat[] }
+  // A seat going public as the Detective (a real reveal or a Mafia fake-claim), promoted from a
+  // discussion turn to its own scene. `counter` marks a rival claim (a public fork). Leaks no role.
+  | { kind: "claim"; seat: number; round: number; counter: boolean; speech: string; seats: PublicSeat[] }
   | { kind: "turn"; turn: PublicTurn; round: number; phase: Phase; seats: PublicSeat[] };
 
 export interface WalletState {
@@ -224,12 +227,15 @@ function project(s: ViewState): ViewState {
   const seats = beat ? beat.seats : freshSeats(s.personas);
   const currentBeat = beat ?? null;
   const currentTurn = beat && beat.kind === "turn" ? beat.turn : null;
-  // The seat on the floor — a day vote, or an unsigned deliberation contribution.
-  const speaker = beat?.kind === "turn" ? beat.turn.seat : beat?.kind === "discussion" ? beat.seat : null;
+  // The seat on the floor — a day vote, an unsigned deliberation contribution, or a Detective claim.
+  const speaker =
+    beat?.kind === "turn" ? beat.turn.seat
+    : beat?.kind === "discussion" || beat?.kind === "claim" ? beat.seat
+    : null;
   const phase: Phase | null = beat
     ? beat.kind === "night"
       ? "night"
-      : beat.kind === "dawn" || beat.kind === "discussion"
+      : beat.kind === "dawn" || beat.kind === "discussion" || beat.kind === "claim"
         ? "day"
         : beat.phase
     : null;
@@ -340,6 +346,18 @@ function reduce(state: ViewState, action: Action): ViewState {
         kind: "discussion",
         seat: msg.seat,
         round: msg.round,
+        speech: msg.speech,
+        seats: [...msg.state.players],
+      });
+
+    case "claim":
+      // A Detective reveal / Mafia fake-claim, promoted to its own scene. Role-free: whether the claim
+      // is TRUE settles only from the end-of-match reveal (the "real or bluff?" market).
+      return pushBeat(state, {
+        kind: "claim",
+        seat: msg.seat,
+        round: msg.round,
+        counter: msg.counter,
         speech: msg.speech,
         seats: [...msg.state.players],
       });

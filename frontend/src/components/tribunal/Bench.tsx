@@ -247,7 +247,7 @@ function SeatProfile({ s, seatId, onClose }: { s: ViewState; seatId: number; onC
   for (let i = 0; i <= s.cursor; i++) {
     const b = s.beats[i];
     if (b?.kind === "turn" && b.turn.seat === seatId && b.turn.speech.trim()) statements.push(b.turn.speech.trim());
-    else if (b?.kind === "discussion" && b.seat === seatId && b.speech.trim()) statements.push(b.speech.trim());
+    else if ((b?.kind === "discussion" || b?.kind === "claim") && b.seat === seatId && b.speech.trim()) statements.push(b.speech.trim());
   }
   const lastWords = statements[statements.length - 1];
 

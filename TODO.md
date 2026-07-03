@@ -351,17 +351,28 @@ player calls. Recommended execution order: 6.1 → 6.2 → 6.3 → 6.4 → 6.5 �
       *(Full version — guilty/not-guilty vote semantics — touches `MafiaRules.sol` + settlement; queue
       as a separate task under 6.6.)*
 
-- [ ] **6.4 — The reveal economy: claims & counter-claims** *(off-chain speech; builds on 6.3).* Make
-      a **claim** a first-class, specially-tagged discussion beat: a Detective going public (and painting
-      a target on their own back for the night kill) is a momentum-swing moment, not a line buried in a
-      discussion pass; let Mafia **counter-claim** (fake-claim Detective) to muddy it. This is the single
-      most watchable dynamic in social deduction and creates a *fork* the viewer can bet on ("real
-      detective or a bluff?"), with the night kill becoming retaliation they can predict. Wire into the
-      existing reveal/bluff branches (`players/src/prompt.ts` — the `caught` reveal + Mafia bluff already
-      exist per GAME_QUALITY_FINDINGS #3) with a claim tag + a dedicated stage scene.
-      *Exit:* a Detective reveal and a Mafia counter-claim each render as their own labeled beat; the
-      night-1 investigation isn't wasted (see [[game-quality-fallback-cascade-fix]] seat-0 fix); a
-      caught-Detective/bluff probe confirms both fire and survive the guard; no ally leak; suites green.
+- [x] **6.4 — The reveal economy: claims & counter-claims** *(off-chain speech + a new on-chain market;
+      code-complete — **redeploy pending**, 2026-07-03).* A **claim** is now a first-class, specially-tagged
+      beat: a `claimsDetective` detector (`players/src/sanitize.ts`, precision-tuned + adjacency-anchored so
+      it fires on a real reveal / Mafia bluff but not on a negation, hypothetical, third-person, or Doctor
+      claim) flags each discussion turn (`DiscussionEntry.claim`, `players/src/match.ts`); the Sequencer
+      promotes it to a `claim` wire beat with its own Court scene ("A claim is staked" / "A rival rises"
+      on a counter-claim) and floats the **fork the viewer bets on**: a new binary `PropKind.DetectiveClaim`
+      market (param = claiming seat, outcomes 0=BLUFF / 1=REAL) opened on the FIRST claim via
+      `openDetectiveClaim()`. A Mafia counter-claim renders as its own beat and moves money toward BLUFF on
+      the SAME pool — it never spawns a second market. It resolves inside the same verified `settle()` from
+      the revealed roles (`g.roles[seat]==DETECTIVE`), so no new game state and no new trust; it stays open
+      until settle (roles are hidden mid-match). Wired end-to-end: contract + settlement + hand-written ABIs
+      (server+frontend) + orchestrator opener + `Verdict` binary card + History label + `Court`/`Testimony`/
+      `Bench` claim scenes. Tests: `MafiaMarket.detectiveclaim.test.ts` (create-on-demand / open-once /
+      seat-OOB / owner-only / bet / settle REAL vs BLUFF cross-checked vs roles / claim / void / freeze) —
+      full Hardhat suite **109 green**; players `+7` (detector positives/negatives + guard-survival +
+      reveal-detection); server relayer owner-only list `+openDetectiveClaim`; a real mock-match e2e run
+      confirmed a claim fires and propagates as a flagged entry; `bluff-probe.mjs` now keys off the shared
+      detector. Players + server type-check + frontend build clean; no ally leak (claim beat is role-free,
+      state redacted). *Exit met* (labeled reveal + counter-claim beats, night-1 investigation intact via the
+      existing seat shuffle, probe/detector fire + survive the guard, suites green). The live open→settle run
+      needs a Galileo redeploy (new bytecode — same as 6.1b; see `myTasks.md`).
 
 - [ ] **6.5 — Endgame identity ("final table")** *(mostly frontend + a small loop branch).* Round 1
       (everyone blind) and the deciding round (every word is lethal) look identical today. When it

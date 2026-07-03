@@ -21,6 +21,10 @@ export const MAFIA_MARKET_ABI = [
   // host-only: float the next round's "night kill" market at nightfall (frozen at dawn via closeProp).
   "function openNightKillRound(uint256 matchId) returns (uint8 round, uint256 startIdx)",
   "function nightKillRoundsOpened(uint256 matchId) view returns (uint8)",
+  // host-only: float the single "Detective claim: real or bluff?" market for `seat` on the first public
+  // claim (binary: 0=BLUFF, 1=REAL). At most one per match; stays open until settle (roles hidden mid-match).
+  "function openDetectiveClaim(uint256 matchId, uint8 seat) returns (uint256 startIdx)",
+  "function detectiveClaimOpened(uint256 matchId) view returns (bool)",
   "function settle(uint256 matchId, ((uint8 phase, uint32 round, uint8 player, uint8 action, uint8 target) decision, bytes rawResponseBody, uint256 contentOffset, uint256 contentLen, string reqHashHex, bytes signature)[] moves, uint8[] revealedRoles, bytes32 salt, bytes32 transcriptCID)",
   // reads (pools / state / outcome live in the Match struct)
   "function matches(uint256) view returns (uint8 state, uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot, address teeSigner, string providerType, string providerIdentity, string tlsFingerprint, string nonce, uint8 playerCount, uint128 poolYes, uint128 poolNo, uint8 outcome, uint128 netPot, uint128 winningPool, bytes32 transcriptCID, uint16 feeBps, uint16 feeBpsDraw)",
@@ -35,6 +39,7 @@ export const MAFIA_MARKET_ABI = [
   "event BettingLocked(uint256 indexed matchId, uint128 finalPoolYes, uint128 finalPoolNo)",
   "event VotedOutRoundOpened(uint256 indexed matchId, uint8 round, uint256 startIdx)",
   "event NightKillRoundOpened(uint256 indexed matchId, uint8 round, uint256 startIdx)",
+  "event DetectiveClaimOpened(uint256 indexed matchId, uint256 startIdx, uint8 seat)",
   "event MatchSettled(uint256 indexed matchId, uint8 outcome, uint128 netPot, bytes32 transcriptCID)",
 ] as const;
 

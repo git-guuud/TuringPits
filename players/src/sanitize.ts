@@ -55,6 +55,24 @@ export function sentenceHasBadMarker(s: string): boolean {
 }
 
 /**
+ * A first-person public claim to BE the Detective — a genuine reveal or a Mafia's fake claim. Anchored
+ * to first person AND adjacency ("I am the detective", "I investigated X", "my investigation"), so it
+ * does NOT fire on discussing SOMEONE ELSE's claim ("he says he's the detective" — third person), a
+ * negation ("I am not the detective" — "not" breaks the "I am … detective" adjacency), or a hypothetical
+ * ("if I were the detective" — no "I am/I'm" or "I investigated"). Doctor claims are deliberately
+ * excluded (there is no market for them). The {@link DetectiveClaim} market only needs to know THAT a
+ * seat claimed — its TRUTH settles from the revealed roles — so this is tuned for precision on obvious
+ * claims over perfect recall (a miss just means the beat/market doesn't fire; it never mis-settles).
+ */
+const DETECTIVE_CLAIM =
+  /\bI(?:['’]?m| am)\s+(?:the\s+|your\s+)?detective\b|\bI\s+investigated\b|\bmy\s+investigation\b/i;
+
+/** True if this DAY speech is the seat going public as the Detective (a real reveal or a Mafia bluff). */
+export function claimsDetective(text: string): boolean {
+  return DETECTIVE_CLAIM.test(text);
+}
+
+/**
  * Names that the weak model invented behaviour for: a roster name the speech references that is NOT
  * in `allowed` (the players who have actually spoken, plus the speaker and any vote target). Players
  * speak in turn, so attributing words/reads to a seat that has not reached its turn is pure

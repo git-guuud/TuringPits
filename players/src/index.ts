@@ -15,7 +15,7 @@ export { buildReasonPrompt, buildSpeechPrompt, buildDecisionPrompt, buildDiscuss
 export { parseDecision } from "./decision.js";
 export { parseReason, parseVoteSpeech } from "./reason.js";
 export type { ReasonResult, VoteSpeechResult } from "./reason.js";
-export { hasBadMarker, cleanDaySpeech, cleanNightReason, stripSpeakerLabels, isEcho, namifySeats, BAD_SPEECH } from "./sanitize.js";
+export { hasBadMarker, cleanDaySpeech, cleanNightReason, stripSpeakerLabels, isEcho, namifySeats, claimsDetective, BAD_SPEECH } from "./sanitize.js";
 export { Player } from "./player.js";
 export type { PlayerOptions } from "./player.js";
 export { MockLocalProvider } from "./provider.js";

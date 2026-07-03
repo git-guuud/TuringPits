@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { hasBadMarker, hasNonEnglish, cleanDaySpeech, cleanNightReason, stripSpeakerLabels, isEcho, namifySeats, forbiddenNames, stripLeadingEcho, stripEchoedSentences, refersToSelfInThirdPerson, accusesClearedTown, stripMarkedSentences, stripForbiddenNameSentences, sentenceHasBadMarker } from "./sanitize.js";
+import { hasBadMarker, hasNonEnglish, cleanDaySpeech, cleanNightReason, stripSpeakerLabels, isEcho, namifySeats, forbiddenNames, stripLeadingEcho, stripEchoedSentences, refersToSelfInThirdPerson, accusesClearedTown, stripMarkedSentences, stripForbiddenNameSentences, sentenceHasBadMarker, claimsDetective } from "./sanitize.js";
 
 const ROSTER = [
   { seat: 0, name: "Ada" }, { seat: 1, name: "Boris" }, { seat: 2, name: "Cleo" },
@@ -141,6 +141,48 @@ describe("cleanDaySpeech", () => {
     };
     const out = await cleanDaySpeech(provider, "PROMPT", "silence tonight", "SAFE-FALLBACK");
     expect(out).toBe("SAFE-FALLBACK");
+  });
+});
+
+describe("claimsDetective", () => {
+  it("fires on a genuine Detective reveal", () => {
+    expect(claimsDetective("I'm the Detective, and I investigated Boris last night — he's Mafia. Vote him out.")).toBe(true);
+    expect(claimsDetective("Listen: I am the detective. My investigation cleared Ada.")).toBe(true);
+    expect(claimsDetective("I investigated Dmitri and he came back Mafia.")).toBe(true);
+    expect(claimsDetective("Time to come clean — my investigation points straight at Cleo.")).toBe(true);
+  });
+
+  it("fires on a Mafia FAKE claim to be the Detective (same public words — truth settles from roles)", () => {
+    // The bluff is worded identically to a real reveal; the market can't and shouldn't tell them apart
+    // from the speech — that is the whole fork. Both open the market.
+    expect(claimsDetective("You can trust me: I am the Detective, and I investigated Esme — she's Mafia.")).toBe(true);
+  });
+
+  it("does NOT fire on discussing someone ELSE's claim (third person)", () => {
+    expect(claimsDetective("Boris says he's the detective, but I don't buy it.")).toBe(false);
+    expect(claimsDetective("Whoever the real detective is should speak up now.")).toBe(false);
+    expect(claimsDetective("If you were the detective, you'd have said so already.")).toBe(false);
+  });
+
+  it("does NOT fire on a negated or hypothetical self-statement", () => {
+    expect(claimsDetective("I am not the detective, so stop looking at me.")).toBe(false);
+    expect(claimsDetective("If I were the detective I'd have cleared someone by now.")).toBe(false);
+    expect(claimsDetective("I never investigated anyone — I'm just Town.")).toBe(false);
+  });
+
+  it("does NOT fire on a Doctor claim or plain discussion (no Detective market for those)", () => {
+    expect(claimsDetective("I'm the Doctor — I saved someone last night.")).toBe(false);
+    expect(claimsDetective("I lean toward Boris based on how he voted today.")).toBe(false);
+  });
+
+  it("a reveal survives the day guard AND is still detected on the cleaned output", async () => {
+    // The reveal cites its own night investigation — the OWN_NIGHT_CLAIM exemption keeps it out of the
+    // fallback — so the cleaned line still carries the claim the Sequencer keys off.
+    const { provider, prompts } = scripted(["should-not-be-used"]);
+    const raw = "I'm the Detective — I investigated Boris last night and he's Mafia. We hang him today.";
+    const out = await cleanDaySpeech(provider, "PROMPT", raw, "FB", NAMES, [], undefined, NAMES, "Ada");
+    expect(prompts.length).toBe(0); // not nuked to a regeneration/fallback
+    expect(claimsDetective(out)).toBe(true);
   });
 });
 

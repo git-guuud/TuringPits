@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { getBytes } from "ethers";
 import { encodeDecision, initState, applyDecision, winner as winnerOf } from "@turingpits/engine";
 import type { Action, Faction, GameState, Role } from "@turingpits/engine";
+import { claimsDetective } from "./sanitize.js";
 import type { Player } from "./player.js";
 import type { DeathEvent, Persona, PlayerTurn, TurnContext } from "./types.js";
 
@@ -37,6 +38,14 @@ export interface DiscussionEntry {
   readonly seat: number;
   readonly round: number;
   readonly speech: string;
+  /**
+   * True when this speech is the seat going PUBLIC as the Detective — a genuine reveal or a Mafia's
+   * fake claim (detected by {@link claimsDetective} on the cleaned speech). The Sequencer promotes such
+   * a beat to a first-class `claim` stage scene and floats the "Detective claim: real or bluff?" market
+   * on the FIRST one. It carries NO role information — whether the claim is TRUE settles only from the
+   * revealed roles — so streaming it leaks nothing.
+   */
+  readonly claim: boolean;
 }
 
 export interface AttestedMatch {
@@ -257,7 +266,10 @@ export async function playMatch(config: MatchConfig): Promise<AttestedMatch> {
         // vote target; there is no discussion-only action (no DECISION_RULE for one).
         const { speech } = await players[seat]!.discuss(ctxFor(seat, "vote", targets, "discussion"));
         transcript.push([seat, speech]);
-        if (onDiscussion) await onDiscussion({ seat, round: state.round, speech }, state);
+        // Tag a Detective reveal / Mafia fake-claim so the Sequencer can promote it to a claim beat and
+        // float the reveal market. Detected off the CLEANED speech (post-guard), carries no role info.
+        const claim = claimsDetective(speech);
+        if (onDiscussion) await onDiscussion({ seat, round: state.round, speech, claim }, state);
       }
       for (const seat of living) {
         const targets = living.filter((id) => id !== seat);
