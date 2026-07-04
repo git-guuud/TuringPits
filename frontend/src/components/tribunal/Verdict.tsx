@@ -197,6 +197,7 @@ function MarketRow({
   connected,
   connecting,
   connect,
+  connectBurner,
   amount,
   setAmount,
   stepStake,
@@ -214,6 +215,7 @@ function MarketRow({
   connected: boolean;
   connecting: boolean;
   connect: () => void;
+  connectBurner: () => void;
   amount: string;
   setAmount: (a: string) => void;
   stepStake: (dir: number) => void;
@@ -358,14 +360,24 @@ function MarketRow({
                 </div>
 
                 {!connected ? (
-                  <button
-                    type="button"
-                    onClick={() => void connect()}
-                    disabled={busy}
-                    className="mt-3 w-full rounded-sm border border-gilt px-3 py-3 font-mono text-[12.5px] uppercase tracking-[0.16em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
-                  >
-                    {connecting ? "Connecting…" : "Connect wallet to wager"}
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void connect()}
+                      disabled={busy}
+                      className="mt-3 w-full rounded-sm border border-gilt px-3 py-3 font-mono text-[12.5px] uppercase tracking-[0.16em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
+                    >
+                      {connecting ? "Connecting…" : "Connect wallet to wager"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void connectBurner()}
+                      disabled={busy}
+                      className="mt-2 w-full font-mono text-[10.5px] uppercase tracking-[0.14em] text-mute transition-colors hover:text-gilt disabled:opacity-60"
+                    >
+                      or play as guest — no wallet, no pop-ups
+                    </button>
+                  </>
                 ) : (
                   <>
                     <button
@@ -436,7 +448,7 @@ function MarketRow({
 }
 
 export function Verdict({ api }: { api: MatchApi }) {
-  const { state: s, connect, placePropBet, claimProp, refundProp } = api;
+  const { state: s, connect, connectBurner, placePropBet, claimProp, refundProp } = api;
   const [amount, setAmount] = useState("0.01");
   // Faucet mint kicked off from the Wagers panel (the Menu's "Get test CHIP" isn't reachable mid-match).
   // Local flag only drives the button copy; `api.getTestTokens` owns the actual tx/pending state.
@@ -850,6 +862,7 @@ export function Verdict({ api }: { api: MatchApi }) {
             connected={connected}
             connecting={s.wallet.status === "connecting"}
             connect={connect}
+            connectBurner={connectBurner}
             amount={amount}
             setAmount={setAmount}
             stepStake={stepStake}

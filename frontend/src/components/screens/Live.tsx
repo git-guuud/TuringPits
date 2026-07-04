@@ -244,9 +244,10 @@ function WalletCapsule({ s, connect, className }: { s: ViewState; connect: () =>
   const connecting = s.wallet.status === "connecting";
   if (s.wallet.status === "connected") {
     const balance = s.wallet.balance != null ? parseFloat(s.wallet.balance) : null;
+    const guest = s.wallet.mode === "guest";
     return (
       <span
-        title={s.wallet.account ?? undefined}
+        title={`${guest ? "Guest (in-browser) wallet — " : "Session wallet — "}${s.wallet.account ?? ""}`}
         className={[
           "flex h-9 items-center gap-2 rounded-full border border-line-2 bg-ink-2 px-3.5 font-mono text-[12px] tracking-[0.06em] text-cream",
           className ?? "",
@@ -254,6 +255,7 @@ function WalletCapsule({ s, connect, className }: { s: ViewState; connect: () =>
       >
         <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-acquit shadow-[0_0_8px_rgba(127,160,126,0.8)]" />
         {balance != null ? `${balance.toFixed(3)} CHIP` : "wallet"}
+        {guest && <span className="text-[10px] uppercase tracking-[0.12em] text-mute">guest</span>}
       </span>
     );
   }

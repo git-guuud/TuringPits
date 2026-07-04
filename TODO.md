@@ -33,6 +33,32 @@ Breadth + polish — make the spectacle richer and the market deeper. Roughly or
 one bounded task per session. (Completed roadmap sections — new market types, explorer links, SFX —
 now live in `STATUS.md`.)
 
+### Betting UX — fewer wallet pop-ups (session keys)
+The signing pop-up on every wager was the sharpest friction. **Option 1 shipped** (frontend-only, this
+session): an in-browser **session key** is the on-chain bettor and signs relayed `ForwardRequest`s
+LOCALLY (no pop-up); the existing EIP-2771 relayer pays gas, so the key never needs native 0G. Two ways
+to obtain it — both pop-up-free after setup:
+- [x] **Derived session** — one `personal_sign("TuringPits session v1")` by the injected wallet seeds a
+      deterministic key (`keccak256(sig)`), cached per-owner in localStorage → one pop-up ever.
+      (`frontend/src/lib/contract.ts` `connectSessionWallet` / `sessionKeyFromSignature`.)
+- [x] **Guest burner** — a pure random in-browser key for no-wallet / won't-sign visitors, persisted and
+      silently restored on return (`connectBurnerWallet` / `restoreBurnerWallet`). No server/contract
+      change: the relayer already sponsors `betProp/claimProp/faucet/approve` for any signer, and a session
+      sig recovers to `req.from` so `Forwarder.verify()` passes (verified in `.session-check.mjs`).
+      *Caveat:* a session/guest wallet holds no 0G, so it can bet ONLY while the relayer is live+funded
+      (`withGasless` forces the relay path and errors clearly if it's offline — no silent gas fallback).
+
+Deferred — the two "proper" account-abstraction upgrades, if the browser-key trust model is ever too weak
+(e.g. real-value stakes instead of mock CHIP):
+- [ ] **Option 2 — ERC-4337 smart account + scoped session key.** User's smart wallet grants a session
+      key scoped to the market with spend/time limits; the dApp signs userOps silently. The "proper"
+      answer, but heavy: needs a bundler + paymaster + account factory, and it largely re-implements what
+      the Forwarder/relayer already do. Reach for it only if positions must live on the user's *main*
+      account with on-chain-enforced limits.
+- [ ] **Option 3 — EIP-7702 delegation.** The EOA delegates to a contract that authorizes a session key —
+      lighter than 4337, keeps the user's own address as the bettor. Blocked on verifying wallet + 0G
+      Galileo support for `SET_CODE_TX_TYPE` (0x04); confirm before committing.
+
 ### 2. More agent personalities
 The persona pool drives the drama. Deeper, more distinct voices = better television.
 - [ ] Expand the curated persona pool well beyond the current set (distinct voices, tactics, tells).

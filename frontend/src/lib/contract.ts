@@ -6,7 +6,7 @@
  * prop. Pool sizes / market state arrive over the WebSocket (the server reads them from this same
  * contract), so this module stays narrow.
  */
-import { BrowserProvider, Contract, Interface, JsonRpcProvider, MaxUint256, formatEther, parseEther } from "ethers";
+import { BrowserProvider, Contract, Interface, JsonRpcProvider, MaxUint256, Wallet as EthWallet, formatEther, keccak256, parseEther } from "ethers";
 import { MAFIA_MARKET_ABI, MOCK_BET_TOKEN_ABI } from "./abi.js";
 import type { MarketState, PropSnapshot } from "./types.js";
 
@@ -165,7 +165,9 @@ async function signAndRelay(wallet: Wallet, to: string, data: string, gas: bigin
   const info = await relayInfo();
   if (!info || !info.enabled || !info.funded) throw new RelayUnavailable("relayer unavailable");
 
-  const signer = await wallet.provider.getSigner();
+  // A session/guest wallet signs the request with its in-browser key (no pop-up); an injected wallet
+  // asks its provider for the user's signer (which prompts). Either way `from` stays the bettor's address.
+  const signer = wallet.session ?? (await wallet.provider.getSigner());
   const from = wallet.account;
   const fwd = new Contract(info.forwarder, ["function getNonce(address) view returns (uint256)"], readProvider());
   const nonce = (await fwd.getFunction("getNonce")(from)) as bigint;
@@ -193,12 +195,29 @@ async function signAndRelay(wallet: Wallet, to: string, data: string, gas: bigin
 /**
  * Run `relayFn` when gasless, but transparently fall back to `directFn` (a normal user-paid tx) if
  * the relayer is unavailable/out of gas. Any other relay error (e.g. a contract revert) propagates.
+ *
+ * A session/guest wallet holds no native 0G, so it can ONLY transact through the relayer: we force the
+ * relay path for it and never fall through to a (doomed) gas-paying tx — a clear error surfaces instead.
  */
-async function withGasless(gasless: boolean, relayFn: () => Promise<string>, directFn: () => Promise<string>): Promise<string> {
-  if (gasless) {
+async function withGasless(
+  wallet: Wallet,
+  gasless: boolean,
+  relayFn: () => Promise<string>,
+  directFn: () => Promise<string>,
+): Promise<string> {
+  const mustRelay = wallet.kind === "session";
+  if (gasless || mustRelay) {
     try {
       return await relayFn();
     } catch (e) {
+      if (mustRelay) {
+        if (e instanceof RelayUnavailable) {
+          throw new Error(
+            "The gas relayer is offline right now — a session wallet needs it to bet. Try again in a moment, or connect your own wallet.",
+          );
+        }
+        throw e;
+      }
       if (!(e instanceof RelayUnavailable)) throw e;
       // relayer can't sponsor right now → fall through to the user's own wallet
     }
@@ -229,7 +248,7 @@ export function humanizeTxError(e: unknown): string {
     return "Not enough 0G for gas — top up from the faucet (faucet.0g.ai) and try again.";
   }
   if (raw.includes("no wallet found")) {
-    return "No wallet found. Install MetaMask (or any EIP-1193 wallet) to bet.";
+    return "No wallet found — install MetaMask, or tap “Play as guest” to bet with a browser wallet.";
   }
   if (raw.includes("betting not started")) return "Wagers haven't opened yet — hold on a moment.";
   if (raw.includes("betting closed") || raw.includes("betting locked")) return "Wagers just closed for this match.";
@@ -246,7 +265,17 @@ export function humanizeTxError(e: unknown): string {
 export interface Wallet {
   account: string;
   chainId: number;
-  provider: BrowserProvider;
+  /** Read/sign provider. A BrowserProvider for an injected wallet; the public JsonRpcProvider for a session key. */
+  provider: BrowserProvider | JsonRpcProvider;
+  /**
+   * When present, this in-browser key signs relayed ForwardRequests LOCALLY, with NO wallet pop-up —
+   * the whole point of the session/guest path. Its address IS `account`, so it stays the on-chain
+   * bettor. It never holds native 0G (the relayer pays gas), so a session wallet ALWAYS transacts via
+   * the relayer — see `withGasless`, which forces the relay path for it.
+   */
+  session?: EthWallet;
+  /** How the on-chain identity is held: an injected wallet the user signs each tx with, or an in-browser session key. */
+  kind: "injected" | "session";
 }
 
 function injected(): import("ethers").Eip1193Provider {
@@ -280,7 +309,100 @@ export async function connectWallet(): Promise<Wallet> {
   const signer = await provider.getSigner();
   const account = await signer.getAddress();
   const chainId = Number((await provider.getNetwork()).chainId);
-  return { account, chainId, provider };
+  return { account, chainId, provider, kind: "injected" };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Session / guest keys — the pop-up-free betting path (design Option 1). An in-browser key is the
+// on-chain bettor: it signs relayed ForwardRequests LOCALLY (no wallet pop-up) and the relayer pays
+// gas, so the key never needs native 0G. Two ways to obtain it:
+//   • connectSessionWallet() — DERIVE it deterministically from ONE signature by the user's injected
+//     wallet ("TuringPits session v1"). Same user → same betting identity, but one pop-up ever.
+//   • connectBurnerWallet()  — a pure random burner for when there is no wallet, or the user would
+//     rather not sign. Persisted so its CHIP / positions survive a reload.
+// # MOCK-money scope — SECURITY: these private keys live in the browser (localStorage). Acceptable ONLY
+// because the stake is faucet-mintable mock CHIP on a testnet AND the relayer's allowlist restricts a
+// relayed key to bet/claim/faucet/approve on the one market — a leaked key can do nothing else.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The exact message the injected wallet signs to seed a deterministic session key. Bump the suffix to rotate. */
+const SESSION_SIGN_MESSAGE = "TuringPits session v1";
+/** localStorage key for the pure guest burner's private key. */
+const BURNER_STORE_KEY = "turingpits.burner.v1";
+/** localStorage key prefix for a derived session key, namespaced by the owner address (lowercased). */
+const DERIVED_STORE_PREFIX = "turingpits.session.v1:";
+
+function lsGet(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null; // storage blocked (private mode / disabled) — the caller just re-derives instead of caching
+  }
+}
+function lsSet(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* storage may be blocked; the key simply won't persist across reloads */
+  }
+}
+
+/**
+ * Deterministically turn an injected-wallet signature into a secp256k1 private key: keccak256 of the
+ * signature yields 32 bytes that are (overwhelmingly) a valid key. Because signatures are deterministic
+ * (RFC-6979, as MetaMask uses), the same account always reproduces the same session identity — so the
+ * one signature is the only pop-up the user ever sees, even on a fresh device / cleared cache.
+ */
+export function sessionKeyFromSignature(signature: string): string {
+  return keccak256(signature);
+}
+
+/** Wrap an in-browser private key as a session Wallet — the on-chain bettor, reads via the public provider. */
+function sessionWalletFrom(privateKey: string): Wallet {
+  const key = new EthWallet(privateKey, readProvider());
+  return { account: key.address, chainId: GALILEO.chainId, provider: readProvider(), session: key, kind: "session" };
+}
+
+/**
+ * Derive an in-browser session key from the injected wallet with a SINGLE message signature (cached per
+ * owner, so it's one pop-up ever). All betting then routes through the relayer, signed locally — no more
+ * pop-ups. Throws if there is no injected wallet (the caller should offer the guest burner instead).
+ */
+export async function connectSessionWallet(): Promise<Wallet> {
+  const eth = injected();
+  const provider = new BrowserProvider(eth);
+  await provider.send("eth_requestAccounts", []);
+  const signer = await provider.getSigner();
+  const owner = (await signer.getAddress()).toLowerCase();
+
+  const cacheKey = DERIVED_STORE_PREFIX + owner;
+  let pk = lsGet(cacheKey);
+  if (!pk) {
+    // The one and only pop-up: a plain message signature — no gas, no transaction. Deterministic → stable identity.
+    const signature = await signer.signMessage(SESSION_SIGN_MESSAGE);
+    pk = sessionKeyFromSignature(signature);
+    lsSet(cacheKey, pk);
+  }
+  return sessionWalletFrom(pk);
+}
+
+/**
+ * A pure in-browser burner — no injected wallet needed. For visitors with no wallet, or who would
+ * rather not sign. Persisted so a reload keeps the same guest identity (and its CHIP / positions).
+ */
+export function connectBurnerWallet(): Wallet {
+  let pk = lsGet(BURNER_STORE_KEY);
+  if (!pk) {
+    pk = EthWallet.createRandom().privateKey;
+    lsSet(BURNER_STORE_KEY, pk);
+  }
+  return sessionWalletFrom(pk);
+}
+
+/** Silently reconnect a previously-created guest burner if one is stored (null if none) — for a returning guest. */
+export function restoreBurnerWallet(): Wallet | null {
+  const pk = lsGet(BURNER_STORE_KEY);
+  return pk ? sessionWalletFrom(pk) : null;
 }
 
 /**
@@ -318,6 +440,7 @@ export async function getBalance(wallet: Wallet, marketAddress = MARKET_ADDRESS)
 export async function getTestTokens(wallet: Wallet, marketAddress = MARKET_ADDRESS, gasless = false): Promise<string> {
   const tokenAddr = await betTokenAddress(marketAddress);
   return withGasless(
+    wallet,
     gasless,
     () => signAndRelay(wallet, tokenAddr, tokenIface.encodeFunctionData("faucet", [])),
     async () => {
@@ -340,6 +463,7 @@ async function ensureApproval(market: string, wallet: Wallet, value: bigint, gas
   const allowance = (await token.getFunction("allowance")(wallet.account, market)) as bigint;
   if (allowance >= value) return;
   await withGasless(
+    wallet,
     gasless,
     () => signAndRelay(wallet, tokenAddr, tokenIface.encodeFunctionData("approve", [market, MaxUint256])),
     async () => {
@@ -382,6 +506,7 @@ export async function placePropBet(
   const value = parseEther(amount);
   await ensureApproval(address, wallet, value, gasless);
   return withGasless(
+    wallet,
     gasless,
     () => signAndRelay(wallet, address, marketIface.encodeFunctionData("betProp", [matchId, propIdx, outcome, value])),
     async () => {
@@ -396,6 +521,7 @@ export async function placePropBet(
 /** Claim a side-market payout/returned stake from a SETTLED match (RESOLVED pays the winner, VOID refunds). */
 export async function claimPropPayout(address: string, matchId: number, propIdx: number, wallet: Wallet, gasless = false): Promise<string> {
   return withGasless(
+    wallet,
     gasless,
     () => signAndRelay(wallet, address, marketIface.encodeFunctionData("claimProp", [matchId, propIdx])),
     async () => {
@@ -410,6 +536,7 @@ export async function claimPropPayout(address: string, matchId: number, propIdx:
 /** Reclaim a side-market stake from a match in RefundMode (host never settled). */
 export async function refundPropStake(address: string, matchId: number, propIdx: number, wallet: Wallet, gasless = false): Promise<string> {
   return withGasless(
+    wallet,
     gasless,
     () => signAndRelay(wallet, address, marketIface.encodeFunctionData("refundProp", [matchId, propIdx])),
     async () => {
@@ -428,6 +555,7 @@ export async function refundPropStake(address: string, matchId: number, propIdx:
  */
 export async function batchClaimPayout(address: string, matchId: number, propIdxs: number[], wallet: Wallet, gasless = false): Promise<string> {
   return withGasless(
+    wallet,
     gasless,
     () => signAndRelay(wallet, address, marketIface.encodeFunctionData("batchClaim", [matchId, propIdxs]), BATCH_RELAY_GAS),
     async () => {
@@ -442,6 +570,7 @@ export async function batchClaimPayout(address: string, matchId: number, propIdx
 /** Reclaim EVERY listed stake on a RefundMode match in ONE transaction — the batch mirror of refundPropStake. */
 export async function batchRefundStake(address: string, matchId: number, propIdxs: number[], wallet: Wallet, gasless = false): Promise<string> {
   return withGasless(
+    wallet,
     gasless,
     () => signAndRelay(wallet, address, marketIface.encodeFunctionData("batchRefund", [matchId, propIdxs]), BATCH_RELAY_GAS),
     async () => {
@@ -575,6 +704,7 @@ export async function readProps(address: string, matchId: number): Promise<PropS
  */
 export async function enterRefundMode(address: string, matchId: number, wallet: Wallet, gasless = false): Promise<string> {
   return withGasless(
+    wallet,
     gasless,
     () => signAndRelay(wallet, address, marketIface.encodeFunctionData("enterRefundMode", [matchId])),
     async () => {

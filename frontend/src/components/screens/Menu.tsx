@@ -18,8 +18,8 @@ export function Menu({ api }: { api: MatchApi }) {
   const s = api.state;
   const connected = s.wallet.status === "connected";
   const balance = s.wallet.balance != null ? parseFloat(s.wallet.balance) : null;
-  // Gas relayer ("gasless") status. The relayer is optional — only surface the affordance when the
-  // server actually runs one. `api.gasless` is the live decision (enabled + funded + not opted out).
+  // Gas relayer status. Session / guest wallets hold no 0G, so they bet ONLY through the relayer —
+  // these two flags decide whether pop-up-free wagering is available or paused (offline / out of gas).
   const relayLive = !!s.relay?.enabled;
   const relayFunded = !!s.relay?.funded;
   const status = useLiveStatus();
@@ -139,37 +139,52 @@ function WalletCard(p: {
   const { api, connected, balance, relayLive, relayFunded } = p;
   const s = api.state;
 
+  const connecting = s.wallet.status === "connecting";
+
   if (!connected) {
     return (
       <div className="panel hairline mx-auto mt-8 w-full max-w-[440px] border px-6 py-6 text-center">
         <div className="font-display text-[22px] tracking-[0.04em] text-cream">Connect to wager</div>
-        <p className="mx-auto mt-1.5 max-w-[340px] font-body text-[14px] leading-snug text-cream-dim">
-          CHIP is free mock test money — connect a wallet to place a wager on the verdict.
+        <p className="mx-auto mt-1.5 max-w-[360px] font-body text-[14px] leading-snug text-cream-dim">
+          CHIP is free mock test money. Connect once, then place wagers with{" "}
+          <span className="text-cream">no pop-up on every bet</span> — the relayer covers gas.
         </p>
         <button
           type="button"
           onClick={() => void api.connect()}
-          disabled={s.wallet.status === "connecting"}
-          className="mt-5 rounded-sm border border-line-2 px-5 py-2 font-mono text-[12px] uppercase tracking-[0.16em] text-cream-dim transition-colors hover:border-gilt hover:text-gilt disabled:opacity-60"
+          disabled={connecting}
+          className="mt-5 w-full max-w-[300px] rounded-sm border border-gilt px-5 py-2.5 font-mono text-[12px] uppercase tracking-[0.16em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
         >
-          {s.wallet.status === "connecting" ? "Connecting…" : "Connect wallet"}
+          {connecting ? "Connecting…" : "Connect wallet"}
+        </button>
+        <p className="mx-auto mt-2 max-w-[320px] font-body text-[12px] leading-snug text-mute">
+          One signature sets up a session key — then every wager is signed for you, instantly.
+        </p>
+        <button
+          type="button"
+          onClick={() => void api.connectBurner()}
+          disabled={connecting}
+          className="mt-3 font-mono text-[11px] uppercase tracking-[0.14em] text-mute underline decoration-line-2 underline-offset-4 transition-colors hover:text-gilt disabled:opacity-60"
+        >
+          No wallet? Play as guest ›
         </button>
       </div>
     );
   }
 
-  // Gasless explained in plain words — three states the toggle can be in.
-  const gaslessOn = api.gasless && relayFunded;
-  const gaslessExplain = !relayFunded
-    ? "Relayer is out of 0G — wagers use your own wallet for gas."
-    : api.gasless
-      ? "On — the relayer pays gas; just sign to wager, no 0G needed."
-      : "Off — you pay your own gas in 0G when you wager.";
+  const isGuest = s.wallet.mode === "guest";
+  // A session / guest wallet always bets through the relayer (it holds no 0G), so there is no gas toggle —
+  // just the live relayer state, in plain words. Offline/broke is a hard stop for session wagering.
+  const relayExplain = !relayLive
+    ? "Gas relayer is offline — session wagering is paused. Try again shortly."
+    : !relayFunded
+      ? "Relayer is out of 0G — wagering is paused until it's topped up."
+      : "Gas-free & pop-up-free — you're signed in, so the relayer covers gas and every wager is instant.";
 
   return (
     <div className="panel hairline mx-auto mt-8 w-full max-w-[440px] border px-6 py-5 text-left">
       <div className="flex items-center justify-between gap-3">
-        <span className="eyebrow">Wallet</span>
+        <span className="eyebrow">{isGuest ? "Guest wallet" : "Session wallet"}</span>
         <span className="font-mono text-[11px] tracking-[0.1em] text-mute">
           {s.wallet.account?.slice(0, 6)}…{s.wallet.account?.slice(-4)} · 0G Galileo
         </span>
@@ -190,31 +205,25 @@ function WalletCard(p: {
         </button>
       </div>
 
-      {relayLive ? (
-        <div className="mt-4 border-t border-line pt-4">
-          <div className="flex items-center justify-between gap-3">
-            <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim">Gas-free betting</span>
-            <button
-              type="button"
-              onClick={() => api.setGasless(!api.gasless)}
-              disabled={!relayFunded}
-              className={[
-                "rounded-full border px-3 py-1 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors disabled:opacity-50",
-                gaslessOn
-                  ? "border-gilt/60 text-gilt"
-                  : "border-line-2 text-mute hover:border-gilt hover:text-gilt",
-              ].join(" ")}
-            >
-              {gaslessOn ? "On" : "Off"}
-            </button>
-          </div>
-          <p className="mt-1.5 font-body text-[13px] leading-snug text-mute">{gaslessExplain}</p>
+      <div className="mt-4 border-t border-line pt-4">
+        <div className="flex items-center justify-between gap-3">
+          <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim">Gas-free betting</span>
+          <span
+            className={[
+              "rounded-full border px-3 py-1 font-mono text-[10px] uppercase tracking-[0.18em]",
+              relayLive && relayFunded ? "border-gilt/60 text-gilt" : "border-convict/50 text-convict",
+            ].join(" ")}
+          >
+            {relayLive && relayFunded ? "On" : "Paused"}
+          </span>
         </div>
-      ) : (
-        <p className="mt-3 font-body text-[13px] leading-snug text-mute">
-          CHIP is mock test money — wagers settle in it; gas is paid in 0G.
-        </p>
-      )}
+        <p className="mt-1.5 font-body text-[13px] leading-snug text-mute">{relayExplain}</p>
+        {isGuest && (
+          <p className="mt-1.5 font-body text-[12px] leading-snug text-mute/80">
+            Guest keys live in this browser — mock CHIP only. Connect a wallet to carry your identity across devices.
+          </p>
+        )}
+      </div>
     </div>
   );
 }

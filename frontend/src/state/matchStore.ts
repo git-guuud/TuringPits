@@ -23,7 +23,8 @@ import {
   batchClaimPayout,
   batchRefundStake,
   claimPropPayout,
-  connectWallet,
+  connectBurnerWallet,
+  connectSessionWallet,
   enterRefundMode,
   getBalance,
   getTestTokens as getTestTokensTx,
@@ -36,6 +37,7 @@ import {
   readPropPositions,
   refundPropStake,
   relayInfo,
+  restoreBurnerWallet,
 } from "../lib/contract.js";
 import type { MyPropStake, Wallet } from "../lib/contract.js";
 import { propReclaimsOf } from "../lib/reclaims.js";
@@ -79,6 +81,12 @@ export interface WalletState {
   status: "idle" | "connecting" | "connected" | "error";
   /** CHIP (bet token) balance as a decimal string; undefined until first read. */
   balance?: string;
+  /**
+   * How the connected identity was obtained — drives the wallet badge + copy. "session" = an in-browser
+   * key derived from one signature by the user's wallet; "guest" = a pure browser burner (no wallet).
+   * Both are session keys that bet pop-up-free via the relayer; undefined until connected.
+   */
+  mode?: "session" | "guest";
   error?: string;
 }
 
@@ -439,7 +447,10 @@ export interface MatchApi {
   state: ViewState;
   /** True when wallet actions currently route through the gas relayer (user signs, relayer pays gas). */
   gasless: boolean;
+  /** Connect a session key derived from ONE signature by the user's injected wallet — then bet pop-up-free. */
   connect: () => Promise<void>;
+  /** Connect a pure in-browser guest burner (no wallet, no signature) — also bets pop-up-free via the relayer. */
+  connectBurner: () => Promise<void>;
   /** Wager on ANY market (faction + side) by staking on one `outcome`, identified by propIdx. */
   placePropBet: (propIdx: number, outcome: number, amount: string) => Promise<void>;
   /** Claim a SETTLED market payout/return. Defaults to the live match; pass a matchId for a prior round. */
@@ -471,6 +482,10 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
 
   // Non-render refs the async wallet actions need without re-subscribing the feed.
   const walletRef = useRef<Wallet | null>(null);
+  // How the connected identity was obtained ("session"/"guest"). Kept in a ref so the balance refresh
+  // (which re-dispatches the whole WalletState) preserves the badge instead of wiping it. Wallet.kind
+  // can't stand in — it's "session" for BOTH derived and guest keys; this is the finer distinction.
+  const modeRef = useRef<"session" | "guest" | undefined>(undefined);
   const addrRef = useRef<string | null>(null);
   // Fall back to the known deployed market so wallet actions (e.g. reclaiming a past battle from the
   // History screen) work even before the live screen has reported the address via match_init.
@@ -507,7 +522,7 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
     if (!walletRef.current) return;
     try {
       const balance = await getBalance(walletRef.current, addrRef.current ?? undefined);
-      dispatch({ kind: "wallet", wallet: { account: walletRef.current.account, status: "connected", balance } });
+      dispatch({ kind: "wallet", wallet: { account: walletRef.current.account, status: "connected", balance, mode: modeRef.current } });
     } catch {
       /* balance is display-only; ignore read failures */
     }
@@ -583,16 +598,48 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
     void refreshRelay();
   }, [refreshRelay]);
 
+  // Connect the DERIVED session key: the user signs one message with their injected wallet, and every
+  // wager after that is signed locally (no pop-up) and gas-sponsored by the relayer. See connectSessionWallet.
   const connect = useCallback(async () => {
     dispatch({ kind: "wallet", wallet: { account: null, status: "connecting" } });
     try {
-      const w = await connectWallet();
+      const w = await connectSessionWallet();
       walletRef.current = w;
-      dispatch({ kind: "wallet", wallet: { account: w.account, status: "connected" } });
+      modeRef.current = "session";
+      dispatch({ kind: "wallet", wallet: { account: w.account, status: "connected", mode: "session" } });
       await Promise.all([refreshPropStakes(), refreshBalance(), refreshRelay(true)]);
     } catch (e) {
       dispatch({ kind: "wallet", wallet: { account: null, status: "error", error: humanizeTxError(e) } });
     }
+  }, [refreshPropStakes, refreshBalance, refreshRelay]);
+
+  // Connect a pure GUEST burner: no injected wallet, no signature — an in-browser key that bets
+  // pop-up-free via the relayer. For visitors with no wallet, or who'd rather not sign. Persisted so a
+  // reload keeps the same guest identity (and its CHIP / positions).
+  const connectBurner = useCallback(async () => {
+    dispatch({ kind: "wallet", wallet: { account: null, status: "connecting" } });
+    try {
+      const w = connectBurnerWallet();
+      walletRef.current = w;
+      modeRef.current = "guest";
+      dispatch({ kind: "wallet", wallet: { account: w.account, status: "connected", mode: "guest" } });
+      await Promise.all([refreshPropStakes(), refreshBalance(), refreshRelay(true)]);
+    } catch (e) {
+      dispatch({ kind: "wallet", wallet: { account: null, status: "error", error: humanizeTxError(e) } });
+    }
+  }, [refreshPropStakes, refreshBalance, refreshRelay]);
+
+  // Returning guest: silently restore a previously-created burner on mount so its CHIP / open positions
+  // aren't stranded. No wallet interaction, no pop-up. A later connect() (deriving from a real wallet)
+  // simply overrides it. Runs once; a live connection already in `walletRef` short-circuits it.
+  useEffect(() => {
+    if (walletRef.current) return;
+    const w = restoreBurnerWallet();
+    if (!w) return;
+    walletRef.current = w;
+    modeRef.current = "guest";
+    dispatch({ kind: "wallet", wallet: { account: w.account, status: "connected", mode: "guest" } });
+    void Promise.all([refreshPropStakes(), refreshBalance(), refreshRelay(true)]);
   }, [refreshPropStakes, refreshBalance, refreshRelay]);
 
   // Wager on ANY market (the faction headline + the side markets) by staking on one `outcome`; propIdx identifies the market.
@@ -767,5 +814,5 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
   // Let the user opt out of (or back into) the gasless path. "off" forces their own wallet to pay gas.
   const setGasless = useCallback((on: boolean) => dispatch({ kind: "gaslessPref", pref: on ? "auto" : "off" }), []);
 
-  return { state, gasless, connect, placePropBet, claimProp, refundProp, getTestTokens, enterRefund, setGasless, winnings, claimAllWinnings, dismissWinnings, advance, stepBack, skipToPresent };
+  return { state, gasless, connect, connectBurner, placePropBet, claimProp, refundProp, getTestTokens, enterRefund, setGasless, winnings, claimAllWinnings, dismissWinnings, advance, stepBack, skipToPresent };
 }

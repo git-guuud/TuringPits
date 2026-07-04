@@ -129,14 +129,24 @@ export function History({ api }: { api: MatchApi }) {
           Every battle, read straight from the chain · newest first
         </div>
         {!connected && (
-          <button
-            type="button"
-            onClick={() => void api.connect()}
-            disabled={s.wallet.status === "connecting"}
-            className="mt-4 rounded-sm border border-line-2 px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim transition-colors hover:border-gilt hover:text-gilt disabled:opacity-60"
-          >
-            {s.wallet.status === "connecting" ? "Connecting…" : "Connect wallet to see your positions"}
-          </button>
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
+            <button
+              type="button"
+              onClick={() => void api.connect()}
+              disabled={s.wallet.status === "connecting"}
+              className="rounded-sm border border-line-2 px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim transition-colors hover:border-gilt hover:text-gilt disabled:opacity-60"
+            >
+              {s.wallet.status === "connecting" ? "Connecting…" : "Connect wallet to see your positions"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void api.connectBurner()}
+              disabled={s.wallet.status === "connecting"}
+              className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-mute underline decoration-line-2 underline-offset-4 transition-colors hover:text-gilt disabled:opacity-60"
+            >
+              or play as guest ›
+            </button>
+          </div>
         )}
       </header>
 
