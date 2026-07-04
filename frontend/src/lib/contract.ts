@@ -633,8 +633,8 @@ export async function enterRefundMode(address: string, matchId: number, wallet: 
 
 const MARKET_STATE: Record<number, MarketState> = { 2: "LOCKED", 3: "SETTLED", 4: "REFUND" };
 const OUTCOME: Record<number, Outcome> = { 1: "YES", 2: "NO", 3: "DRAW", 4: "VOID" };
-/** MafiaMarket PropKind enum → wire label (0 = PlayerFate, 1 = RoundVotedOut, 2 = NightKill). */
-const PROP_KIND: Record<number, PropSnapshot["kind"]> = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL", 3: "DETECTIVE_CLAIM" };
+/** MafiaMarket PropKind enum → wire label (0 PlayerFate, 1 RoundVotedOut, 2 NightKill, 3 DetectiveClaim, 4 MafiaSeat). */
+const PROP_KIND: Record<number, PropSnapshot["kind"]> = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL", 3: "DETECTIVE_CLAIM", 4: "MAFIA_SEAT" };
 /** MafiaMarket PropState enum → wire state (1 = Resolved, 2 = Void; 0 = Unset → undefined). */
 const PROP_STATE: Record<number, PropSnapshot["state"]> = { 1: "RESOLVED", 2: "VOID" };
 

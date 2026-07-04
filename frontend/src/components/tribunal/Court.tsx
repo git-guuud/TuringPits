@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { CATCHUP_THRESHOLD, type Beat, type ViewState } from "../../state/matchStore.js";
 import { useTypewriter } from "../../lib/useTypewriter.js";
+import { useCountdown } from "../../lib/useCountdown.js";
 import { bodyFall, dayBreak, gavel, loseSting, nightFall, winSting } from "../../lib/typeSound.js";
 import type { VoiceApi } from "../../lib/useVoice.js";
 import type { SpeakLine } from "../../lib/voice.js";
@@ -197,6 +198,37 @@ function sceneFor(s: ViewState): Scene {
       lamp: "day",
     };
   }
+  if (beat?.kind === "bet_window") {
+    // The stream is paused so a dramatic beat can be a betting beat — the stage frames the question,
+    // the Wagers panel takes the money. Copy per market; the on-stage countdown is rendered separately.
+    if (beat.market === "NIGHT_KILL")
+      return {
+        title: "The book opens",
+        note: "back who falls before dawn",
+        name: "WHO DIES TONIGHT?",
+        role: "wager while the hand still moves in the dark",
+        body: "In the dark a name is already being chosen. The book is open — back who you think will not see the dawn. When the window closes, the deed is done and no more wagers are taken.",
+        lamp: "night",
+      };
+    if (beat.market === "ROUND_VOTED_OUT")
+      return {
+        title: "The book opens",
+        note: "back who the bench condemns",
+        name: "WHO HANGS?",
+        role: "wager before a single vote is cast",
+        body: "The floor has had its say. Before one vote is cast, the book is open — back who you think the bench sends to the gallows this round. It closes the moment the voting begins.",
+        lamp: "day",
+      };
+    const name = beat.seat != null ? (s.personas.find((p) => p.seat === beat.seat)?.name ?? `Seat ${beat.seat}`).toUpperCase() : "THE CLAIM";
+    return {
+      title: "The book opens",
+      note: "back the badge — or call the bluff",
+      name: "REAL — OR BLUFF?",
+      role: `${name} has staked their life on the Detective's chair`,
+      body: "A seat has put the Detective's badge on the table. Is it the real thing — or a killer's cover story? The book is open. Money talks now; the truth comes only at the reveal.",
+      lamp: "day",
+    };
+  }
   if (beat?.kind === "discussion") {
     const persona = s.personas.find((p) => p.seat === beat.seat);
     return {
@@ -252,6 +284,18 @@ export function Court({
   voice: VoiceApi;
 }) {
   const scene = sceneFor(s);
+  // The in-loop betting window on stage (if any) — drives the prominent on-stage countdown banner.
+  const betWindow = s.betWindow;
+  const betCountdown = useCountdown(betWindow?.endsAt ?? null);
+  const betClosingSoon = betCountdown != null && betCountdown.ms <= 10000;
+  const betLabel =
+    betWindow?.market === "NIGHT_KILL"
+      ? "Who dies tonight?"
+      : betWindow?.market === "ROUND_VOTED_OUT"
+        ? "Who hangs this round?"
+        : betWindow
+          ? "Detective — real or bluff?"
+          : null;
   // The stage paces each beat (seconds on screen) while the server emits them ~1/s, so the viewer
   // steadily falls behind "live" — and a late joiner replays from the very start. When the backlog
   // is meaningful, offer a prominent jump straight to the newest beat. Hidden once the record is
@@ -298,6 +342,13 @@ export function Court({
     if (paused || !done || !s.currentBeat || s.reveal) return;
     const atLast = s.cursor >= s.beats.length - 1;
     if (atLast && !s.rawReveal) return; // last shown beat, match still going → wait for the next
+    // A betting window holds the stage until it closes (endsAt). Live it IS the last beat, so the guard
+    // above already parks us here until the server sends the post-window beat; only on a replay (buffer
+    // already ahead) do we reach here, where endsAt is in the past → drain promptly to the next beat.
+    if (s.currentBeat.kind === "bet_window") {
+      const t = setTimeout(advance, Math.max(0, Math.min(s.currentBeat.endsAt - Date.now(), AUDIO_MAX_HOLD)));
+      return () => clearTimeout(t);
+    }
     // Behind live (a backlog has queued behind the cursor): drain briskly and DON'T wait on the audio,
     // so the trail is self-limiting rather than widening with every long clip. Caught up: a voiced beat
     // still mid-playback holds until its audio ends (a backstop advances anyway if the clip never signals
@@ -466,6 +517,28 @@ export function Court({
           Replaying · {s.pendingBeats} behind
           <span className="text-[15px] tracking-normal">⏭ Skip to present</span>
         </button>
+      )}
+      {/* Betting-window banner — the stream is paused for a wager, so the call-to-action lands dead
+          centre on the stage with a live countdown. The Wagers panel holds the actual bet. */}
+      {betWindow && betCountdown && (
+        <motion.div
+          key={`${betWindow.market}-${betWindow.round}`}
+          initial={{ opacity: 0, y: -8 }}
+          animate={{ opacity: 1, y: 0 }}
+          className={[
+            "absolute left-1/2 top-3 z-40 flex -translate-x-1/2 items-center gap-3 rounded-full border px-5 py-2.5 backdrop-blur-sm",
+            betClosingSoon ? "border-convict bg-convict/15 shadow-[0_0_24px_rgba(179,58,58,0.3)]" : "border-gilt bg-gilt/15 shadow-[0_0_24px_rgba(240,197,82,0.3)]",
+          ].join(" ")}
+        >
+          <span className={["h-2 w-2 animate-livepulse rounded-full", betClosingSoon ? "bg-convict" : "bg-gilt"].join(" ")} />
+          <span className={["font-mono text-[11px] uppercase tracking-[0.22em]", betClosingSoon ? "text-convict" : "text-gilt"].join(" ")}>
+            Wagers open · {betLabel}
+          </span>
+          <span className={["font-mono text-[17px] tabular-nums tracking-[0.08em]", betClosingSoon ? "animate-livepulse text-convict" : "text-cream"].join(" ")}>
+            {betCountdown.label}
+          </span>
+          <span className="font-mono text-[12px] tracking-normal text-mute">→ The Wagers</span>
+        </motion.div>
       )}
       {/* The vote board — the aggregate climax of a day vote, so the tensest moment lands on the stage
           itself and not only in the bench's per-seat bars. */}

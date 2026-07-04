@@ -120,6 +120,10 @@ export interface RunArgs {
   onTurn: (turn: import("@turingpits/players/dist/match.js").RecordedTurn, state: GameState) => Promise<void>;
   /** Public day-deliberation hook, fired per unsigned discussion contribution before the vote. */
   onDiscussion?: (entry: import("@turingpits/players/dist/match.js").DiscussionEntry, state: GameState) => Promise<void>;
+  /** Nightfall hook (before any night action) — opens the "who dies tonight?" betting window. */
+  onNightfall?: (round: number, state: GameState) => Promise<void>;
+  /** Pre-vote hook (after the discussion pass) — opens the "who hangs this round?" betting window. */
+  onPreVote?: (round: number, state: GameState) => Promise<void>;
 }
 
 /**
@@ -143,5 +147,7 @@ export function runMatch(args: RunArgs): Promise<AttestedMatch> {
     players,
     onTurn: args.onTurn,
     onDiscussion: args.onDiscussion,
+    onNightfall: args.onNightfall,
+    onPreVote: args.onPreVote,
   });
 }

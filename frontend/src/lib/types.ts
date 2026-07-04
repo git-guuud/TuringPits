@@ -123,12 +123,15 @@ export interface MarketSnapshot {
  *   - DETECTIVE_CLAIM : "is seat `param`, who went public as the Detective, telling the truth or bluffing?"
  *                       A SINGLE binary market — outcome 0 = BLUFF, 1 = REAL DETECTIVE. Floated on the
  *                       first public claim; stays open until settle (resolves from the revealed roles).
+ *   - MAFIA_SEAT      : "who is the Mafia?" A SINGLE categorical market — one outcome per seat
+ *                       (numOutcomes == playerCount, param unused). Floated once at match start; stays
+ *                       open until settle (resolves to the Mafia seat from the revealed roles).
  * Mirrors MafiaMarket.getProp() / server wire `PropSnapshot`.
  */
 export interface PropSnapshot {
   readonly index: number;
-  readonly kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL" | "DETECTIVE_CLAIM";
-  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. DETECTIVE_CLAIM: the claiming seat. */
+  readonly kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL" | "DETECTIVE_CLAIM" | "MAFIA_SEAT";
+  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. DETECTIVE_CLAIM: the claiming seat. MAFIA_SEAT: unused. */
   readonly param: number;
   readonly numOutcomes: number;
   /** Per-outcome pools (CHIP decimal strings), length == numOutcomes. */
@@ -182,6 +185,23 @@ export type WsMessage =
   // by a protection (a blocked kill), never the seat. See server/src/orchestrator.ts.
   | { type: "night"; round: number }
   | { type: "dawn"; round: number; killed: number[]; saved: number; state: PublicGameState }
+  // A synchronized IN-LOOP betting window: the match pauses and one side market is spotlighted so a
+  // dramatic moment becomes a betting moment. Rendered as a stage beat (plays in-line with the dialogue)
+  // that holds until `endsAt`; `NIGHT_KILL` opens at nightfall (freezes before dawn), `ROUND_VOTED_OUT`
+  // after the discussion pass (freezes before votes), `DETECTIVE_CLAIM` on a claim (stays open to settle).
+  | {
+      type: "bet_window";
+      market: "NIGHT_KILL" | "ROUND_VOTED_OUT" | "DETECTIVE_CLAIM";
+      round: number;
+      /** On-chain prop index to spotlight/bet on. */
+      propIndex: number;
+      /** Epoch ms the window closes — drives the countdown + the stage hold. */
+      endsAt: number;
+      /** Nominal window length (ms); `endsAt` is the authority. */
+      durationMs: number;
+      /** DETECTIVE_CLAIM: the seat whose claim the market judges. */
+      seat?: number;
+    }
   | { type: "reveal"; roles: Role[]; winner: Faction }
   | { type: "settled"; outcome: Outcome; winningSide?: Side; feeBpsDraw?: number; txHash?: string; transcriptCID?: string };
 

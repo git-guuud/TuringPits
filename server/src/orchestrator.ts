@@ -17,12 +17,13 @@ import { MAFIA_MARKET_ABI, ROLE_ENUM, marketStateOf, outcomeOf, propStateOf, win
 import { toPublicState, toPublicTurn } from "./redact.js";
 import { gateTurn, newNightGate } from "./night.js";
 import { nightKillResolved, votedOutResolved } from "./round-markets.js";
+import { runBetWindow as runBetWindowFn, type BetWindowMarket } from "./bet-windows.js";
 import { buildPersonas, buildProvider, runMatch } from "./match-runner.js";
 import type { Hub } from "./broadcast.js";
 import type { PropSnapshot, WsMessage } from "./wire.js";
 import { estimateSpeechMs, type Tts, type ToneInput } from "./tts.js";
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** Reject a promise that runs past `ms` so a slow synth can never stall the match loop. */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -54,6 +55,11 @@ export interface OrchestratorConfig {
   moveIntervalMs: number;
   feeBps: number;
   feeBpsDraw: number;
+  // In-loop betting windows: the match PAUSES for this long and spotlights one side market so a
+  // dramatic beat becomes a betting beat. Seconds; 0 disables that window (streams straight through).
+  nightKillWindowSeconds: number;      // at nightfall, before the kill is revealed (freezes before dawn)
+  votedOutWindowSeconds: number;       // after the discussion pass, before votes (freezes before the vote)
+  detectiveClaimWindowSeconds: number; // on a public Detective claim (stays open — resolves at settle)
   // Called as soon as a match is created on-chain (before it could fail mid-run), so the caller can
   // track it and guarantee a refund path if the round is later abandoned. See sweepAbandonedMatches.
   onMatchCreated?: (matchId: number, settlementDeadlineBlock: number) => void;
@@ -218,6 +224,20 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   // path even if this round is abandoned after bets are placed.
   cfg.onMatchCreated?.(matchId, settlementDeadlineBlock);
 
+  // Float the single "Who is the Mafia?" market once, at match start, so it's bettable for the whole
+  // match (one outcome per seat; resolves to the Mafia seat from the revealed roles at settle()). Unlike
+  // the round markets it isn't seeded by createMatch — the host opens it here, before the first props
+  // snapshot below, so spectators always see it. Non-fatal: a miss just leaves this one market absent.
+  try {
+    await rpc("openMafiaSeatMarket", async () => {
+      const tx = await market.getFunction("openMafiaSeatMarket")(matchId);
+      return tx.wait();
+    });
+    console.log(`[orch] 'who is the mafia?' market opened on-chain matchId=${matchId}`);
+  } catch (e) {
+    console.warn(`[orch] openMafiaSeatMarket failed:`, (e as Error).message);
+  }
+
   // 4. match_init + open market.
   hub.broadcast({
     type: "match_init",
@@ -246,7 +266,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   // index. The on-chain `kind` byte is the label authority (0 PlayerFate / 1 RoundVotedOut / 2 NightKill /
   // 3 DetectiveClaim). DetectiveClaim is floated on demand (openDetectiveClaim) at the tail on the first
   // public claim, so it never collides with the PlayerFate propIdx==seat freeze in closeFallenProps.
-  const PROP_KIND = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL", 3: "DETECTIVE_CLAIM" } as const;
+  const PROP_KIND = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL", 3: "DETECTIVE_CLAIM", 4: "MAFIA_SEAT" } as const;
   const readProps = async (): Promise<PropSnapshot[]> => {
     const count = Number(await rpc("propCount", () => market.getFunction("propCount")(matchId)));
     return Promise.all(
@@ -255,7 +275,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
           const state = propStateOf(Number(pr.state));
           return {
             index: i,
-            kind: PROP_KIND[Number(pr.kind) as 0 | 1 | 2 | 3] ?? "PLAYER_FATE",
+            kind: PROP_KIND[Number(pr.kind) as 0 | 1 | 2 | 3 | 4] ?? "PLAYER_FATE",
             param: Number(pr.param),
             numOutcomes: Number(pr.numOutcomes),
             pools: (pr.pools as bigint[]).map((p) => formatEther(p)),
@@ -515,6 +535,42 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     freeAt = Date.now() + dur; // the next beat waits out THIS beat's playback
   };
 
+  // ── synchronized in-loop betting windows ───────────────────────────────────────────────────────
+  // The whole point of this feature: at a dramatic beat, PAUSE the stream and spotlight ONE side market
+  // so "a market exists" becomes "a betting MOMENT". The window is emitted as a `bet_window` beat (so the
+  // stage plays it in-line with the dialogue and counts down to `endsAt`) AND the loop actually holds for
+  // its duration — that hold is what gives spectators room to wager. For the round markets we freeze the
+  // prop on-chain the instant the window closes, BEFORE the outcome is revealed (the vote is cast / dawn
+  // breaks), so there is no last-look on a decided market. DetectiveClaim never freezes: roles stay hidden
+  // mid-match, so it resolves only from the revealed roles at settle — the window is a spotlight, not a close.
+  const WINDOW_MS = {
+    NIGHT_KILL: cfg.nightKillWindowSeconds * 1000,
+    ROUND_VOTED_OUT: cfg.votedOutWindowSeconds * 1000,
+    DETECTIVE_CLAIM: cfg.detectiveClaimWindowSeconds * 1000,
+  } as const;
+  // Address a market by its (kind, param) off a fresh read — the recurring kinds interleave, so there is
+  // no index formula. DetectiveClaim is looked up by kind alone (there is at most one per match).
+  const findPropIdx = async (kind: PropSnapshot["kind"], param?: number): Promise<PropSnapshot | undefined> => {
+    const props = await readProps();
+    return props.find((p) => p.kind === kind && (param == null || p.param === param));
+  };
+  // Thin wrapper over the pure `runBetWindow` (server/src/bet-windows.ts): thread the pacing cursor and
+  // inject the chain/broadcast deps. Advancing `freeAt` here keeps the window in lockstep with emitPaced.
+  const runBetWindow = async (
+    market: BetWindowMarket,
+    round: number,
+    prop: PropSnapshot,
+    opts: { freezeOnClose: boolean; seat?: number },
+  ): Promise<void> => {
+    const durationMs = WINDOW_MS[market];
+    if (durationMs > 0)
+      console.log(`[orch] bet window '${market}' round=${round} prop=${prop.index} for ${Math.round(durationMs / 1000)}s`);
+    freeAt = await runBetWindowFn(
+      { broadcast: (m) => hub.broadcast(m), pushPools, freeze, sleep, now: Date.now },
+      { market, round, propIndex: prop.index, durationMs, freezeOnClose: opts.freezeOnClose, seat: opts.seat, freeAt },
+    );
+  };
+
   let result;
   try {
     result = await runMatch({
@@ -551,9 +607,29 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
           claimBeats++;
           await emitPaced({ type: "claim", seat: entry.seat, round: entry.round, role: "DETECTIVE", counter, speech: entry.speech, state: toPublicState(state) });
           await openDetectiveClaim(entry.seat); // self-guards: only the first claim opens the market
+          // Pause on the claim: spotlight the "real or bluff?" market. Look it up by kind (one per match,
+          // param == the FIRST claimant), so a counter-claim spotlights the SAME open market. No freeze —
+          // it stays open until settle (roles are hidden mid-match, so the outcome can never leak here).
+          const prop = await findPropIdx("DETECTIVE_CLAIM");
+          if (prop) await runBetWindow("DETECTIVE_CLAIM", entry.round, prop, { freezeOnClose: false, seat: prop.param });
         } else {
           await emitPaced({ type: "discussion", seat: entry.seat, round: entry.round, speech: entry.speech, state: toPublicState(state) });
         }
+      },
+      // Nightfall: narrate it HERE (claim the gate's night beat so it isn't emitted twice in onTurn),
+      // then open the "who dies tonight?" window and freeze it before the night resolves — so the betting
+      // window IS the night's dead zone and the market closes before dawn ever names the fallen.
+      onNightfall: async (round) => {
+        gate.announcedNightRound = round; // pre-claim so gateTurn skips its own `night` push this round
+        await emitPaced({ type: "night", round });
+        const prop = await findPropIdx("NIGHT_KILL", round); // opened by createMatch (R1) / syncRoundMarkets (later)
+        if (prop) await runBetWindow("NIGHT_KILL", round, prop, { freezeOnClose: true });
+      },
+      // After the floor has spoken and before the first vote lands: open the "who hangs this round?" window
+      // and freeze it as voting begins, so nobody can bet a plurality that's already forming in the tally.
+      onPreVote: async (round) => {
+        const prop = await findPropIdx("ROUND_VOTED_OUT", round);
+        if (prop) await runBetWindow("ROUND_VOTED_OUT", round, prop, { freezeOnClose: true });
       },
     });
   } finally {

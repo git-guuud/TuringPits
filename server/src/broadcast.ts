@@ -101,6 +101,7 @@ export class Hub {
         case "night":
         case "dawn":
         case "discussion":
+        case "bet_window":
           round = Math.max(round, m.round);
           break;
         case "turn":

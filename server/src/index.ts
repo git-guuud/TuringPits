@@ -61,6 +61,11 @@ async function main() {
     storagePrivateKey: process.env.STORAGE_PRIVATE_KEY ?? process.env.HOST_PRIVATE_KEY ?? "",
     bettingWindowSeconds: Number(process.env.BETTING_WINDOW_SECONDS ?? 90),
     openLeadSeconds: Number(process.env.OPEN_LEAD_SECONDS ?? 12),
+    // In-loop betting windows (the match pauses to spotlight one side market). Seconds; 0 disables one.
+    // Set short for local iteration so you don't sit through the full pause every round.
+    nightKillWindowSeconds: Number(process.env.NIGHT_KILL_WINDOW_SECONDS ?? 30),
+    votedOutWindowSeconds: Number(process.env.VOTED_OUT_WINDOW_SECONDS ?? 60),
+    detectiveClaimWindowSeconds: Number(process.env.DETECTIVE_CLAIM_WINDOW_SECONDS ?? 30),
     // Generous by default so the slow, rate-limited live match settles in time (~30 min budget).
     settlementDeadlineSeconds: Number(process.env.SETTLEMENT_DEADLINE_SECONDS ?? 1800),
     onMatchCreated: (matchId, deadline) => pending.set(matchId, deadline),

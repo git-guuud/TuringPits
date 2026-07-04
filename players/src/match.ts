@@ -26,6 +26,19 @@ export interface MatchConfig {
    * (before any vote). Discussion is public speech but never signed and never settles. Awaited.
    */
   readonly onDiscussion?: (entry: DiscussionEntry, state: GameState) => void | Promise<void>;
+  /**
+   * Optional hook fired ONCE at the start of each night phase, BEFORE any night actor acts — the cue
+   * to open the "who dies tonight?" betting window while the kill is still hidden. Awaited, so a
+   * consumer can pause the loop for the window's duration (the market stream is deliberately blocked
+   * on this, so the pause is real). Receives the 1-based round and the current (pre-night) state.
+   */
+  readonly onNightfall?: (round: number, state: GameState) => void | Promise<void>;
+  /**
+   * Optional hook fired ONCE per day, AFTER the discussion pass and BEFORE the vote pass — the cue to
+   * open the "who hangs this round?" betting window before any vote is cast (so the outcome can't leak
+   * from an in-progress tally). Awaited (pauses the loop). Receives the 1-based round and the state.
+   */
+  readonly onPreVote?: (round: number, state: GameState) => void | Promise<void>;
 }
 
 /** A recorded turn: the seat, its speech, structured decision, and TEE attestation. */
@@ -201,7 +214,7 @@ export async function playMatch(config: MatchConfig): Promise<AttestedMatch> {
   if (players.length !== n) throw new Error(`expected ${n} players, got ${players.length}`);
   if (personas.length !== n) throw new Error(`expected ${n} personas, got ${personas.length}`);
 
-  const { onTurn, onDiscussion } = config;
+  const { onTurn, onDiscussion, onNightfall, onPreVote } = config;
   let state = initState(seed, n, nonce);
   const turns: RecordedTurn[] = [];
   const transcript: [number, string][] = [];
@@ -254,6 +267,8 @@ export async function playMatch(config: MatchConfig): Promise<AttestedMatch> {
     if (state.round > maxRounds) throw new Error(`match exceeded ${maxRounds} rounds without a winner`);
 
     if (state.phase === "night") {
+      // Nightfall: open the "who dies tonight?" window BEFORE any night action, while the kill is hidden.
+      if (onNightfall) await onNightfall(state.round, state);
       for (const { seat, action, legalTargets } of phaseActors(state)) {
         if (await applySignedTurn(ctxFor(seat, action, legalTargets, "night"))) break;
       }
@@ -271,6 +286,8 @@ export async function playMatch(config: MatchConfig): Promise<AttestedMatch> {
         const claim = claimsDetective(speech);
         if (onDiscussion) await onDiscussion({ seat, round: state.round, speech, claim }, state);
       }
+      // The floor has spoken — open the "who hangs this round?" window before the first vote is cast.
+      if (onPreVote) await onPreVote(state.round, state);
       for (const seat of living) {
         const targets = living.filter((id) => id !== seat);
         if (await applySignedTurn(ctxFor(seat, "vote", targets, "vote"))) break;

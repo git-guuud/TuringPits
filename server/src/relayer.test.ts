@@ -17,8 +17,8 @@ describe("relayer — sponsored-selector allowlist", () => {
     expect([...allow.values()]).toContain("approve");
   });
 
-  it("never sponsors owner/host functions (createMatch, settle, lockBetting, openVotedOutRound, openNightKillRound, openDetectiveClaim, closeProp)", () => {
-    for (const fn of ["createMatch", "settle", "lockBetting", "openVotedOutRound", "openNightKillRound", "openDetectiveClaim", "closeProp"]) {
+  it("never sponsors owner/host functions (createMatch, settle, lockBetting, openVotedOutRound, openNightKillRound, openDetectiveClaim, openMafiaSeatMarket, closeProp)", () => {
+    for (const fn of ["createMatch", "settle", "lockBetting", "openVotedOutRound", "openNightKillRound", "openDetectiveClaim", "openMafiaSeatMarket", "closeProp"]) {
       expect(allow.has(host.getFunction(fn)!.selector), fn).toBe(false);
     }
   });

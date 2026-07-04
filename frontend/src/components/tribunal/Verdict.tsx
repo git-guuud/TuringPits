@@ -457,6 +457,9 @@ export function Verdict({ api }: { api: MatchApi }) {
   const open = live; // bets are only accepted on-chain while live
   const countdown = useCountdown(live ? s.market.closesAt : null);
   const closingSoon = countdown != null && countdown.ms <= 15000;
+  // The synchronized in-loop betting window on stage (if any) — spotlights ONE market with its own countdown.
+  const windowCountdown = useCountdown(s.betWindow?.endsAt ?? null);
+  const windowClosing = windowCountdown != null && windowCountdown.ms <= 10000;
   const settled = s.market.state === "SETTLED";
   const refundMode = s.market.state === "REFUND";
   const connected = s.wallet.status === "connected";
@@ -642,6 +645,26 @@ export function Verdict({ api }: { api: MatchApi }) {
           pool: prop.pools[0] ?? "0", total, mine: myStakeFor(0), winner: win === 0,
         },
       ];
+    } else if (prop.kind === "MAFIA_SEAT") {
+      // "Who is the Mafia?" — one outcome per seat, resolved to the Mafia seat from the revealed roles at
+      // settle. A dead seat can still be unmasked as the Mafia, so every seat stays shown the whole match.
+      title = "Who is the Mafia?";
+      question = "Which player is secretly the Mafia?";
+      choices = [];
+      for (let seat = 0; seat < prop.numOutcomes; seat++) {
+        choices.push({
+          key: `o${seat}`,
+          eyebrow: `seat ${seat + 1}`,
+          eyebrowClass: "text-convict",
+          label: seatName(seat),
+          accent: "text-convict",
+          bar: "bg-convict",
+          pool: prop.pools[seat] ?? "0",
+          total,
+          mine: myStakeFor(seat),
+          winner: win === seat,
+        });
+      }
     } else {
       // ROUND_VOTED_OUT and NIGHT_KILL share the same shape — outcomes 0..n-1 are the seats, the last is
       // "no one" — differing only in framing (the day vote vs the night's kill before dawn).
@@ -692,7 +715,9 @@ export function Verdict({ api }: { api: MatchApi }) {
           ? `dawn broke on night ${prop.param} · market closed${awaiting}`
           : prop.kind === "DETECTIVE_CLAIM"
             ? `${seatName(prop.param)}'s claim · market closed${awaiting}`
-            : `${seatName(prop.param)} fell · market closed${awaiting}`;
+            : prop.kind === "MAFIA_SEAT"
+              ? `the Mafia stands unmasked · market closed${awaiting}`
+              : `${seatName(prop.param)} fell · market closed${awaiting}`;
     const wonStatus = isVoid
       ? "Void · stakes returned"
       : win == null
@@ -709,7 +734,9 @@ export function Verdict({ api }: { api: MatchApi }) {
               ? win === 1
                 ? `${seatName(prop.param)} was the real Detective`
                 : `${seatName(prop.param)} was bluffing`
-              : `Fate · ${FATE_COPY[win]?.label ?? "settled"}`;
+              : prop.kind === "MAFIA_SEAT"
+                ? `${seatName(win)} was the Mafia`
+                : `Fate · ${FATE_COPY[win]?.label ?? "settled"}`;
     const status = bettable
       ? null
       : settled || refundMode
@@ -759,14 +786,25 @@ export function Verdict({ api }: { api: MatchApi }) {
     };
   };
 
-  const markets: BetMarket[] = [factionMarket(), ...liveProps.map(propMarket)];
+  // "Who is the Mafia?" is the marquee side market — surface it right under the faction verdict, ahead
+  // of the per-seat / per-round props (which otherwise precede it in prop-array order).
+  const mafiaProps = liveProps.filter((p) => p.kind === "MAFIA_SEAT");
+  const otherProps = liveProps.filter((p) => p.kind !== "MAFIA_SEAT");
+  const markets: BetMarket[] = [factionMarket(), ...mafiaProps.map(propMarket), ...otherProps.map(propMarket)];
 
-  // Which market is expanded. Default to the one that wants attention (a claim), else the first that
-  // takes bets, else the first market. Follows the data if the open market drops off the list; the
-  // "__none__" sentinel lets the user collapse everything.
+  // Which market is expanded. An active betting window FORCES its market open (that's the point of the
+  // window — the spotlighted market is front-and-centre). Otherwise: the one that wants attention (a claim),
+  // else the first that takes bets, else the first market. The "__none__" sentinel lets the user collapse.
+  const windowKey = s.betWindow ? `prop-${s.betWindow.propIndex}` : null;
   const defaultKey = (markets.find((mk) => mk.canClaim) ?? markets.find((mk) => mk.bettable) ?? markets[0])?.key ?? null;
   const effectiveOpen =
-    openKey === "__none__" ? null : openKey && markets.some((mk) => mk.key === openKey) ? openKey : defaultKey;
+    windowKey && markets.some((mk) => mk.key === windowKey)
+      ? windowKey
+      : openKey === "__none__"
+        ? null
+        : openKey && markets.some((mk) => mk.key === openKey)
+          ? openKey
+          : defaultKey;
   const toggle = (key: string) => setOpenKey(key === effectiveOpen ? "__none__" : key);
 
   // Clear the staged pick whenever the open market changes.
@@ -796,6 +834,41 @@ export function Verdict({ api }: { api: MatchApi }) {
       <div className="eyebrow mb-4 border-b hairline pb-0">Wagers&#x20;
         <StateBadge s={s} />
       </div>
+
+      {/* Synchronized betting-window banner — the match is paused on a dramatic beat and this market is
+          spotlighted (auto-expanded below). Its own countdown; turns urgent as it closes. */}
+      {s.betWindow && windowCountdown && (
+        <div
+          className={[
+            "mb-4 border-l-2 px-3 py-2.5 transition-colors",
+            windowClosing ? "border-convict bg-convict/[0.07]" : "border-gilt bg-gilt/[0.06]",
+          ].join(" ")}
+        >
+          <div className="flex items-center justify-between">
+            <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-gilt">◈ Betting window</span>
+            <span
+              className={[
+                "font-mono text-[20px] tabular-nums tracking-[0.08em]",
+                windowClosing ? "animate-livepulse text-convict" : "text-gilt",
+              ].join(" ")}
+            >
+              {windowCountdown.label}
+            </span>
+          </div>
+          <div className="mt-1 font-display text-[15px] leading-tight text-cream">
+            {s.betWindow.market === "NIGHT_KILL"
+              ? "Who falls before dawn?"
+              : s.betWindow.market === "ROUND_VOTED_OUT"
+                ? "Who hangs in this round's vote?"
+                : `Is ${seatName(s.betWindow.seat ?? 0)}'s claim real — or a bluff?`}
+          </div>
+          <div className="mt-0.5 font-body text-[12px] italic leading-snug text-mute">
+            {s.betWindow.market === "DETECTIVE_CLAIM"
+              ? "back it below — the market stays open until the reveal"
+              : "back it below before the window closes"}
+          </div>
+        </div>
+      )}
 
       {/* Live betting countdown — turns urgent in the final seconds. */}
       {live && countdown && (

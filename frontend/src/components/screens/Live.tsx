@@ -529,8 +529,11 @@ function MobileHeader({
 /** The persistent wager dock — reads the live market state, surfaces the countdown, opens the sheet. */
 function BottomDock({ s, onOpen }: { s: ViewState; onOpen: () => void }) {
   const live = s.market.state === "OPEN" && s.market.bettingLive === true;
-  const countdown = useCountdown(live ? s.market.closesAt : null);
-  const closingSoon = countdown != null && countdown.ms <= 15000;
+  // An in-loop window (its own countdown) takes precedence over the ever-open faction countdown.
+  const windowCountdown = useCountdown(s.betWindow?.endsAt ?? null);
+  const factionCountdown = useCountdown(live && !s.betWindow ? s.market.closesAt : null);
+  const countdown = s.betWindow ? windowCountdown : factionCountdown;
+  const closingSoon = countdown != null && countdown.ms <= (s.betWindow ? 10000 : 15000);
   const hasWager =
     parseFloat(s.stakes.yes) + parseFloat(s.stakes.no) > 0 ||
     s.propStakes.some((ps) => ps.stakes.some((v) => parseFloat(v) > 0));
@@ -540,7 +543,16 @@ function BottomDock({ s, onOpen }: { s: ViewState; onOpen: () => void }) {
   let label: string;
   let cta: string;
   let tone: "live" | "soft" | "mute" | "claim";
-  if (live) {
+  if (s.betWindow) {
+    label =
+      s.betWindow.market === "NIGHT_KILL"
+        ? "Betting window · who dies tonight?"
+        : s.betWindow.market === "ROUND_VOTED_OUT"
+          ? "Betting window · who hangs?"
+          : "Betting window · real or bluff?";
+    cta = "Bet now";
+    tone = "live";
+  } else if (live) {
     label = "Wagers open · bet now";
     cta = "Wager";
     tone = "live";
@@ -587,7 +599,7 @@ function BottomDock({ s, onOpen }: { s: ViewState; onOpen: () => void }) {
           </div>
         </div>
 
-        {live && countdown && (
+        {countdown && (
           <span
             className={[
               "shrink-0 font-mono text-[18px] tabular-nums tracking-[0.06em]",

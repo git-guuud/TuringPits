@@ -275,6 +275,45 @@ describe("playMatch (Day 2 exit criteria)", () => {
     expect(round1Discussion.every((d) => d.speech.length > 0)).toBe(true);
   });
 
+  it("fires onNightfall before any night action, and onPreVote after discussion / before the vote", async () => {
+    // One ordered log across all hooks so we can assert the RELATIVE order the betting windows depend on.
+    const log: { ev: string; round: number }[] = [];
+    await playMatch({
+      seed: SEED, n: 5, nonce: NONCE, personas, players: buildPlayers(),
+      onNightfall: (round) => { log.push({ ev: "nightfall", round }); },
+      onPreVote: (round) => { log.push({ ev: "prevote", round }); },
+      onDiscussion: (e) => { log.push({ ev: "discussion", round: e.round }); },
+      onTurn: (t) => {
+        log.push({ ev: t.structuredDecision.phase === "night" ? "nightturn" : "vote", round: t.structuredDecision.round });
+      },
+    });
+
+    const rounds = (ev: string) => [...new Set(log.filter((l) => l.ev === ev).map((l) => l.round))];
+    const nightRounds = rounds("nightturn");
+    const voteRounds = rounds("vote");
+    expect(nightRounds.length).toBeGreaterThan(0); // the match had at least one night…
+    expect(voteRounds.length).toBeGreaterThan(0);  // …and at least one day vote
+
+    // onNightfall fires exactly once per night round, BEFORE that round's first night action.
+    for (const r of nightRounds) {
+      expect(log.filter((l) => l.ev === "nightfall" && l.round === r).length).toBe(1);
+      const nightfall = log.findIndex((l) => l.ev === "nightfall" && l.round === r);
+      const firstNightTurn = log.findIndex((l) => l.ev === "nightturn" && l.round === r);
+      expect(nightfall).toBeGreaterThanOrEqual(0);
+      expect(nightfall).toBeLessThan(firstNightTurn);
+    }
+
+    // onPreVote fires exactly once per day round, AFTER the last discussion and BEFORE the first vote.
+    for (const r of voteRounds) {
+      expect(log.filter((l) => l.ev === "prevote" && l.round === r).length).toBe(1);
+      const prevote = log.findIndex((l) => l.ev === "prevote" && l.round === r);
+      const firstVote = log.findIndex((l) => l.ev === "vote" && l.round === r);
+      const lastDiscussion = log.reduce((acc, l, i) => (l.ev === "discussion" && l.round === r ? i : acc), -1);
+      expect(prevote).toBeGreaterThan(lastDiscussion);
+      expect(prevote).toBeLessThan(firstVote);
+    }
+  });
+
   it("keeps discussion speech out of the settlement turns but inside the transcript", async () => {
     const prompts: string[] = [];
     const discussionSpeeches: string[] = [];

@@ -59,7 +59,19 @@ export type Beat =
   // A seat going public as the Detective (a real reveal or a Mafia fake-claim), promoted from a
   // discussion turn to its own scene. `counter` marks a rival claim (a public fork). Leaks no role.
   | { kind: "claim"; seat: number; round: number; counter: boolean; speech: string; seats: PublicSeat[] }
+  // A synchronized betting window: the match pauses and one side market is spotlighted with a countdown.
+  | { kind: "bet_window"; market: BetWindowMarket; round: number; propIndex: number; endsAt: number; seat?: number; seats: PublicSeat[] }
   | { kind: "turn"; turn: PublicTurn; round: number; phase: Phase; seats: PublicSeat[] };
+
+export type BetWindowMarket = "NIGHT_KILL" | "ROUND_VOTED_OUT" | "DETECTIVE_CLAIM";
+/** The active in-loop betting window, derived from the beat under the cursor (null when none is on stage). */
+export interface BetWindow {
+  market: BetWindowMarket;
+  round: number;
+  propIndex: number;
+  endsAt: number;
+  seat?: number;
+}
 
 export interface WalletState {
   account: string | null;
@@ -136,6 +148,9 @@ export interface ViewState {
   speakingSeat: number | null;
   currentBeat: Beat | null;
   currentTurn: PublicTurn | null;
+  /** The betting window on stage right now (a `bet_window` beat under the cursor), else null. Drives
+   *  the Verdict spotlight + the on-stage countdown. Cleared once playback moves off the beat / completes. */
+  betWindow: BetWindow | null;
   attestedCount: number;
   reveal: { roles: Role[]; winner: Faction } | null;
   /** Live day-vote tally for the active round: seat id → votes received so far (up to the cursor). */
@@ -184,6 +199,7 @@ const baseState: ViewState = {
   speakingSeat: null,
   currentBeat: null,
   currentTurn: null,
+  betWindow: null,
   attestedCount: 0,
   reveal: null,
   votes: {},
@@ -237,8 +253,15 @@ function project(s: ViewState): ViewState {
       ? "night"
       : beat.kind === "dawn" || beat.kind === "discussion" || beat.kind === "claim"
         ? "day"
-        : beat.phase
+        : beat.kind === "bet_window"
+          ? beat.market === "NIGHT_KILL" ? "night" : "day" // the night-kill window IS the night; the rest are day
+          : beat.phase
     : null;
+  // The window on stage right now — cleared once playback moves off it or the record closes.
+  const betWindow =
+    beat?.kind === "bet_window" && !s.playbackComplete
+      ? { market: beat.market, round: beat.round, propIndex: beat.propIndex, endsAt: beat.endsAt, seat: beat.seat }
+      : null;
   const reveal = s.playbackComplete ? s.rawReveal : null;
 
   // attested day testimonies shown so far (night/dawn carry no signed move).
@@ -266,6 +289,7 @@ function project(s: ViewState): ViewState {
     speakingSeat: speaker != null && !s.playbackComplete ? speaker : null,
     currentBeat,
     currentTurn,
+    betWindow,
     attestedCount: attested,
     reveal,
     votes,
@@ -360,6 +384,18 @@ function reduce(state: ViewState, action: Action): ViewState {
         counter: msg.counter,
         speech: msg.speech,
         seats: [...msg.state.players],
+      });
+
+    case "bet_window":
+      // A synchronized betting window — a stage beat that pauses playback and spotlights one market.
+      return pushBeat(state, {
+        kind: "bet_window",
+        market: msg.market,
+        round: msg.round,
+        propIndex: msg.propIndex,
+        endsAt: msg.endsAt,
+        seat: msg.seat,
+        seats: carrySeats(state),
       });
 
     case "turn":

@@ -72,11 +72,14 @@ export interface MarketSnapshot {
  *   - DETECTIVE_CLAIM : "is seat `param`, who went public as the Detective, telling the truth or bluffing?"
  *                       A SINGLE binary market — outcome 0 = BLUFF, 1 = REAL DETECTIVE. Floated on the
  *                       first public claim; stays open until settle (resolves from the revealed roles).
+ *   - MAFIA_SEAT      : "who is the Mafia?" A SINGLE categorical market with one outcome per seat
+ *                       (numOutcomes == playerCount, param unused). Floated once at match start; stays
+ *                       open until settle (resolves to the Mafia seat from the revealed roles).
  */
 export interface PropSnapshot {
   index: number;
-  kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL" | "DETECTIVE_CLAIM";
-  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. DETECTIVE_CLAIM: the claiming seat. */
+  kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL" | "DETECTIVE_CLAIM" | "MAFIA_SEAT";
+  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. DETECTIVE_CLAIM: the claiming seat. MAFIA_SEAT: unused. */
   param: number;
   numOutcomes: number;
   /** Per-outcome pools (CHIP decimal strings), length == numOutcomes. */
@@ -108,6 +111,25 @@ export type WsMessage =
   // Doctor cannot be triangulated from the stream.
   | { type: "night"; round: number }
   | { type: "dawn"; round: number; killed: number[]; saved: number; state: PublicGameState }
+  // A synchronized IN-LOOP betting window — the match PAUSES and one side market is spotlighted so a
+  // dramatic beat becomes a betting beat. Emitted in-line with the dialogue (it is a stage beat), and
+  // the loop actually holds until `endsAt`. `NIGHT_KILL` opens at nightfall and freezes before dawn;
+  // `ROUND_VOTED_OUT` opens after the discussion pass and freezes before votes are cast; `DETECTIVE_CLAIM`
+  // opens on a public claim and stays open (it resolves only from the revealed roles at settle). Betting
+  // is still gated on the live market snapshot (`props[].closed`), so `endsAt` is presentation, not a lock.
+  | {
+      type: "bet_window";
+      market: "NIGHT_KILL" | "ROUND_VOTED_OUT" | "DETECTIVE_CLAIM";
+      round: number;
+      /** On-chain prop index to bet on (the recurring kinds interleave — address by index, not a formula). */
+      propIndex: number;
+      /** Epoch ms the window closes — drives the countdown and the stage hold. */
+      endsAt: number;
+      /** Nominal window length (ms); `endsAt` is the authority. */
+      durationMs: number;
+      /** DETECTIVE_CLAIM: the seat whose claim the market judges (for copy). */
+      seat?: number;
+    }
   | { type: "reveal"; roles: Role[]; winner: Faction }
   // outcome is always present; winningSide only for YES/NO. DRAW/VOID return stakes (claim()).
   | { type: "settled"; outcome: Outcome; winningSide?: Side; feeBpsDraw?: number; txHash?: string; transcriptCID?: string };

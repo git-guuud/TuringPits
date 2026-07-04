@@ -352,7 +352,7 @@ function Row({
             >
               {busy
                 ? "…"
-                : `${p.market === "ROUND_VOTED_OUT" ? `Round ${p.param} vote` : p.market === "NIGHT_KILL" ? `Night ${p.param} kill` : p.market === "DETECTIVE_CLAIM" ? `Seat ${p.param + 1} · claim` : `Seat ${p.param + 1} · fate`} · ${p.kind === "refund" ? "Refund" : p.kind === "return" ? "Reclaim" : "Claim"} ◈ ${p.amount}`}
+                : `${p.market === "ROUND_VOTED_OUT" ? `Round ${p.param} vote` : p.market === "NIGHT_KILL" ? `Night ${p.param} kill` : p.market === "DETECTIVE_CLAIM" ? `Seat ${p.param + 1} · claim` : p.market === "MAFIA_SEAT" ? "Who is the Mafia?" : `Seat ${p.param + 1} · fate`} · ${p.kind === "refund" ? "Refund" : p.kind === "return" ? "Reclaim" : "Claim"} ◈ ${p.amount}`}
             </button>
           ))}
         </div>
