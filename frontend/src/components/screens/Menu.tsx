@@ -83,7 +83,7 @@ function LiveChip({ status }: { status: MatchStatus | null }) {
       </span>
     );
   }
-  const pot = parseFloat(status.yesPool) + parseFloat(status.noPool);
+  const pot = parseFloat(status.pot);
   const potLabel = pot > 0 && pot < 10 ? pot.toFixed(1) : Math.round(pot).toString();
   const round = status.round > 0 ? `round ${status.round}` : "opening";
   const tail = status.bettingLive ? `◈${potLabel} pot · wagers open` : "wagers open soon";

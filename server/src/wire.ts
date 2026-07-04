@@ -8,9 +8,6 @@ import type { Faction, Phase, Role } from "@turingpits/engine";
 export interface Persona { seat: number; name: string; blurb: string }
 export type AttestationSource = "0g-tee" | "MOCK-local";
 export type MarketState = "OPEN" | "LOCKED" | "SETTLED" | "REFUND";
-export type Side = "YES" | "NO";
-/** Resolved market outcome. YES/NO pay the winners; DRAW/VOID return stakes (via claim()). */
-export type Outcome = "YES" | "NO" | "DRAW" | "VOID";
 
 export interface RecordCommit {
   roleCommit: string;
@@ -38,7 +35,7 @@ export interface PublicTurn {
 }
 export interface MarketSnapshot {
   state: MarketState;
-  /** True only while the chain is actually in [open, close) — i.e. when _bet() is accepted. */
+  /** True only while the chain is actually in [open, close) — i.e. when a bet is accepted. */
   bettingLive?: boolean;
   /**
    * Epoch ms when betting is projected to close, derived from the remaining blocks to
@@ -46,13 +43,11 @@ export interface MarketSnapshot {
    * client can render a smooth countdown between the (coarse) market pushes. An estimate.
    */
   closesAt?: number;
-  yesPool: string;
-  noPool: string;
-  /** Set when SETTLED. YES/NO only; DRAW/VOID carry no winning side. */
-  winningSide?: Side;
-  /** Set when SETTLED — the full resolution (incl. DRAW/VOID refund outcomes). */
-  outcome?: Outcome;
-  /** Per-match categorical side markets (one PlayerFate per seat + one RoundVotedOut per opened round). Absent until the server has read them. */
+  /**
+   * Every market (the headline FACTION market included) is a categorical prop — there is no separate
+   * faction pool/outcome on the market. The faction verdict is the FACTION prop's `state`/`winningOutcome`.
+   * Absent until the server has read the props.
+   */
   props?: PropSnapshot[];
 }
 
@@ -75,11 +70,14 @@ export interface MarketSnapshot {
  *   - MAFIA_SEAT      : "who is the Mafia?" A SINGLE categorical market with one outcome per seat
  *                       (numOutcomes == playerCount, param unused). Floated once at match start; stays
  *                       open until settle (resolves to the Mafia seat from the revealed roles).
+ *   - FACTION         : "which faction wins?" The headline market — a SINGLE binary market (outcome
+ *                       0 = TOWN wins, 1 = MAFIA wins, param unused). Floated once at match start; stays
+ *                       open until settle (resolves to the winning faction; a mistrial Voids → refund).
  */
 export interface PropSnapshot {
   index: number;
-  kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL" | "DETECTIVE_CLAIM" | "MAFIA_SEAT";
-  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. DETECTIVE_CLAIM: the claiming seat. MAFIA_SEAT: unused. */
+  kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL" | "DETECTIVE_CLAIM" | "MAFIA_SEAT" | "FACTION";
+  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. DETECTIVE_CLAIM: the claiming seat. MAFIA_SEAT / FACTION: unused. */
   param: number;
   numOutcomes: number;
   /** Per-outcome pools (CHIP decimal strings), length == numOutcomes. */
@@ -131,5 +129,6 @@ export type WsMessage =
       seat?: number;
     }
   | { type: "reveal"; roles: Role[]; winner: Faction }
-  // outcome is always present; winningSide only for YES/NO. DRAW/VOID return stakes (claim()).
-  | { type: "settled"; outcome: Outcome; winningSide?: Side; feeBpsDraw?: number; txHash?: string; transcriptCID?: string };
+  // Match finalized on-chain. The faction verdict (and every market's payout) is carried by the final
+  // `market` snapshot's props — the FACTION prop resolves to MAFIA/TOWN, or Voids on a mistrial.
+  | { type: "settled"; txHash?: string; transcriptCID?: string };

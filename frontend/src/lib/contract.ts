@@ -1,13 +1,14 @@
 /**
  * The real contract layer (v3 multi-match MafiaMarket). Connects an injected wallet to the
  * deployed contract on 0G Galileo and performs the only on-chain actions a spectator takes for
- * a given `matchId`: bet YES/NO, claim a payout, and read their own stake. Pool sizes / market
- * state / outcome arrive over the WebSocket (the server reads them from this same contract), so
- * this module stays narrow.
+ * a given `matchId`: stake on a market outcome (betProp), claim/refund (claimProp/refundProp),
+ * and read their own stake. EVERY market — the headline faction market included — is a categorical
+ * prop. Pool sizes / market state arrive over the WebSocket (the server reads them from this same
+ * contract), so this module stays narrow.
  */
 import { BrowserProvider, Contract, Interface, JsonRpcProvider, MaxUint256, formatEther, parseEther } from "ethers";
 import { MAFIA_MARKET_ABI, MOCK_BET_TOKEN_ABI } from "./abi.js";
-import type { MarketState, Outcome, PropSnapshot, Side } from "./types.js";
+import type { MarketState, PropSnapshot } from "./types.js";
 
 /**
  * Display symbol for the betting currency. Wagers are denominated in CHIP (MockBetToken), a
@@ -119,8 +120,8 @@ export interface MatchStatus {
   round: number;
   state: string;
   bettingLive: boolean;
-  yesPool: string;
-  noPool: string;
+  /** Total staked on the headline FACTION market (CHIP decimal string) — the lobby's "pot" figure. */
+  pot: string;
   isMock: boolean;
 }
 
@@ -148,6 +149,8 @@ const FORWARDER_TYPES = {
 
 /** Gas forwarded to each relayed inner call — comfortably covers approve/bet/claim, under the server cap. */
 const RELAY_GAS = 600_000n;
+/** A collect-all sweeps several markets in one call, so it gets the full headroom (== the server gas cap). */
+const BATCH_RELAY_GAS = 700_000n;
 
 // Pure encoders (no provider) for building the calldata we relay.
 const marketIface = new Interface(MAFIA_MARKET_ABI);
@@ -158,7 +161,7 @@ const tokenIface = new Interface(MOCK_BET_TOKEN_ABI);
  * pays gas. Resolves to the inner tx hash once mined. Throws RelayUnavailable if the relayer is
  * absent/broke so the caller can fall back to a normal (user-paid) transaction.
  */
-async function signAndRelay(wallet: Wallet, to: string, data: string): Promise<string> {
+async function signAndRelay(wallet: Wallet, to: string, data: string, gas: bigint = RELAY_GAS): Promise<string> {
   const info = await relayInfo();
   if (!info || !info.enabled || !info.funded) throw new RelayUnavailable("relayer unavailable");
 
@@ -169,11 +172,11 @@ async function signAndRelay(wallet: Wallet, to: string, data: string): Promise<s
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
 
   const domain = { name: "TuringPitsForwarder", version: "1", chainId: info.chainId, verifyingContract: info.forwarder };
-  const message = { from, to, value: 0n, gas: RELAY_GAS, nonce, deadline, data };
+  const message = { from, to, value: 0n, gas, nonce, deadline, data };
   const signature = await signer.signTypedData(domain, FORWARDER_TYPES, message);
 
   // Serialize the bigints as strings for JSON; the server parses them back with BigInt(...).
-  const request = { from, to, value: "0", gas: RELAY_GAS.toString(), nonce: nonce.toString(), deadline: deadline.toString(), data };
+  const request = { from, to, value: "0", gas: gas.toString(), nonce: nonce.toString(), deadline: deadline.toString(), data };
   const res = await fetch(`${resolveRelayBase()}/relay`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -358,65 +361,14 @@ async function writeContract(address: string, wallet: Wallet) {
   return new Contract(address, MAFIA_MARKET_ABI, signer);
 }
 
-export interface MyStakes {
-  yes: string; // 0G decimal string
-  no: string;
-  claimed: boolean;
-}
-
-/** Read the connected wallet's own stake + claimed flag for this match. */
-export async function readMyStakes(address: string, matchId: number, wallet: Wallet): Promise<MyStakes> {
-  const c = readContract(address, wallet);
-  const [yes, no, claimed] = await Promise.all([
-    c.getFunction("stakeYes")(matchId, wallet.account) as Promise<bigint>,
-    c.getFunction("stakeNo")(matchId, wallet.account) as Promise<bigint>,
-    c.getFunction("claimed")(matchId, wallet.account) as Promise<boolean>,
-  ]);
-  return { yes: formatEther(yes), no: formatEther(no), claimed };
-}
+// The faction market is now a normal categorical prop — there is no bespoke faction stake read or
+// betYes/betNo. Wager on it via placePropBet, read the viewer's position via readMyPropStakes /
+// readPropPositions (which cover every market), and claim/refund via claimPropPayout / refundPropStake.
 
 /**
- * Read any account's stake on any match via the public provider (no connected wallet needed). Used
- * by the prior-positions tracker to scan past matches the bettor wagered on after the live view has
- * moved on to a new round.
- */
-export async function readStakesPublic(address: string, matchId: number, account: string): Promise<MyStakes> {
-  const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
-  const [yes, no, claimed] = await Promise.all([
-    readGate(() => c.getFunction("stakeYes")(matchId, account) as Promise<bigint>),
-    readGate(() => c.getFunction("stakeNo")(matchId, account) as Promise<bigint>),
-    readGate(() => c.getFunction("claimed")(matchId, account) as Promise<boolean>),
-  ]);
-  return { yes: formatEther(yes), no: formatEther(no), claimed };
-}
-
-/**
- * Place a real wager on a match. `amount` is a decimal string of CHIP (e.g. "0.01"). Bets are pulled
- * via ERC20 transferFrom, so this first ensures the market is approved to spend at least `amount`
- * CHIP (a one-time max approval), then stakes. When `gasless`, both the approval and the bet are
- * relayed (no native 0G needed), with an automatic fallback to a normal tx if the relayer is down.
- * Returns the bet tx hash.
- */
-export async function placeBet(address: string, matchId: number, wallet: Wallet, side: Side, amount: string, gasless = false): Promise<string> {
-  const value = parseEther(amount);
-  await ensureApproval(address, wallet, value, gasless);
-  const fn = side === "YES" ? "betYes" : "betNo";
-  return withGasless(
-    gasless,
-    () => signAndRelay(wallet, address, marketIface.encodeFunctionData(fn, [matchId, value])),
-    async () => {
-      const c = await writeContract(address, wallet);
-      const tx = await c.getFunction(fn)(matchId, value);
-      const receipt = await tx.wait();
-      return receipt?.hash ?? tx.hash;
-    },
-  );
-}
-
-/**
- * Place a wager on a categorical side market by staking on ONE `outcome` (PlayerFate: a death-round
- * bucket; RoundVotedOut: a seat or "no one"). Mirrors placeBet: ensures the market is approved to spend
- * CHIP, then stakes via betProp. Returns the bet tx hash.
+ * Place a wager on a categorical market by staking on ONE `outcome` (PlayerFate: a death-round bucket;
+ * RoundVotedOut: a seat or "no one"; Faction: 0 = TOWN / 1 = MAFIA). Ensures the market is approved to
+ * spend CHIP, then stakes via betProp. Returns the bet tx hash.
  */
 export async function placePropBet(
   address: string,
@@ -469,6 +421,38 @@ export async function refundPropStake(address: string, matchId: number, propIdx:
   );
 }
 
+/**
+ * Collect EVERY listed winning market on a SETTLED match in ONE transaction — the "Claim all" primitive.
+ * The contract skips indices the caller can't collect (already claimed / losing / out of range) and pays
+ * the rest in a single transfer, so passing the full believed-winning set is safe even if some are stale.
+ */
+export async function batchClaimPayout(address: string, matchId: number, propIdxs: number[], wallet: Wallet, gasless = false): Promise<string> {
+  return withGasless(
+    gasless,
+    () => signAndRelay(wallet, address, marketIface.encodeFunctionData("batchClaim", [matchId, propIdxs]), BATCH_RELAY_GAS),
+    async () => {
+      const c = await writeContract(address, wallet);
+      const tx = await c.getFunction("batchClaim")(matchId, propIdxs);
+      const receipt = await tx.wait();
+      return receipt?.hash ?? tx.hash;
+    },
+  );
+}
+
+/** Reclaim EVERY listed stake on a RefundMode match in ONE transaction — the batch mirror of refundPropStake. */
+export async function batchRefundStake(address: string, matchId: number, propIdxs: number[], wallet: Wallet, gasless = false): Promise<string> {
+  return withGasless(
+    gasless,
+    () => signAndRelay(wallet, address, marketIface.encodeFunctionData("batchRefund", [matchId, propIdxs]), BATCH_RELAY_GAS),
+    async () => {
+      const c = await writeContract(address, wallet);
+      const tx = await c.getFunction("batchRefund")(matchId, propIdxs);
+      const receipt = await tx.wait();
+      return receipt?.hash ?? tx.hash;
+    },
+  );
+}
+
 export interface MyPropStake {
   index: number;
   numOutcomes: number;
@@ -514,9 +498,10 @@ export interface PropPosition {
 }
 
 /**
- * Read the connected account's positions across every categorical side market of a match (PlayerFate +
- * RoundVotedOut), via the public provider (no wallet) — used by the History screen to surface
- * reclaimable side pots on past battles. Only call this for terminal (settled/refund) matches.
+ * Read the connected account's positions across EVERY market of a match — the headline FACTION market
+ * and all the side markets — via the public provider (no wallet). Used by the History screen to detect
+ * what the viewer wagered and surface any reclaimable pots. Safe to call on non-terminal matches too
+ * (a zero-pool outcome is skipped, so an untouched market costs just its one getProp).
  */
 export async function readPropPositions(address: string, matchId: number, account: string): Promise<PropPosition[]> {
   const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
@@ -583,40 +568,10 @@ export async function readProps(address: string, matchId: number): Promise<PropS
 }
 
 /**
- * Claim from a SETTLED match. The same call covers a winning payout (Yes/No) and a returned stake
- * (Draw = stake less the draw fee, Void = full stake) — the contract pays per the resolved outcome.
- */
-export async function claimPayout(address: string, matchId: number, wallet: Wallet, gasless = false): Promise<string> {
-  return withGasless(
-    gasless,
-    () => signAndRelay(wallet, address, marketIface.encodeFunctionData("claim", [matchId])),
-    async () => {
-      const c = await writeContract(address, wallet);
-      const tx = await c.getFunction("claim")(matchId);
-      const receipt = await tx.wait();
-      return receipt?.hash ?? tx.hash;
-    },
-  );
-}
-
-/** Reclaim stake from a match in RefundMode (host never settled past the deadline). */
-export async function refundStake(address: string, matchId: number, wallet: Wallet, gasless = false): Promise<string> {
-  return withGasless(
-    gasless,
-    () => signAndRelay(wallet, address, marketIface.encodeFunctionData("refund", [matchId])),
-    async () => {
-      const c = await writeContract(address, wallet);
-      const tx = await c.getFunction("refund")(matchId);
-      const receipt = await tx.wait();
-      return receipt?.hash ?? tx.hash;
-    },
-  );
-}
-
-/**
  * Flip an abandoned match (Created/Locked, past its settlement deadline) into RefundMode so its
  * stakes become refundable. Permissionless — normally the server does this automatically, but the
- * UI exposes it as a self-serve fallback. After this confirms, the bettor can call refundStake.
+ * UI exposes it as a self-serve fallback. After this confirms, the bettor can call refundProp on
+ * each market they staked.
  */
 export async function enterRefundMode(address: string, matchId: number, wallet: Wallet, gasless = false): Promise<string> {
   return withGasless(
@@ -632,9 +587,12 @@ export async function enterRefundMode(address: string, matchId: number, wallet: 
 }
 
 const MARKET_STATE: Record<number, MarketState> = { 2: "LOCKED", 3: "SETTLED", 4: "REFUND" };
-const OUTCOME: Record<number, Outcome> = { 1: "YES", 2: "NO", 3: "DRAW", 4: "VOID" };
-/** MafiaMarket PropKind enum → wire label (0 PlayerFate, 1 RoundVotedOut, 2 NightKill, 3 DetectiveClaim, 4 MafiaSeat). */
-const PROP_KIND: Record<number, PropSnapshot["kind"]> = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL", 3: "DETECTIVE_CLAIM", 4: "MAFIA_SEAT" };
+/** MafiaMarket PropKind enum → wire label (0 PlayerFate, 1 RoundVotedOut, 2 NightKill, 3 DetectiveClaim, 4 MafiaSeat, 5 Faction). */
+const PROP_KIND: Record<number, PropSnapshot["kind"]> = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL", 3: "DETECTIVE_CLAIM", 4: "MAFIA_SEAT", 5: "FACTION" };
+/** The FACTION prop is opened first at match start, right after createMatch's `playerCount + 2` base props. */
+const FACTION_PROP_INDEX = (playerCount: number) => playerCount + 2;
+/** FACTION outcome index → winning faction. 1 = MAFIA wins (Acquitted), 0 = TOWN wins (Convicted). */
+export const FACTION_OUTCOME = { TOWN: 0, MAFIA: 1 } as const;
 /** MafiaMarket PropState enum → wire state (1 = Resolved, 2 = Void; 0 = Unset → undefined). */
 const PROP_STATE: Record<number, PropSnapshot["state"]> = { 1: "RESOLVED", 2: "VOID" };
 
@@ -644,8 +602,8 @@ const readProvider = () => (publicProvider ??= new JsonRpcProvider(GALILEO.rpcUr
 
 /**
  * Caps concurrent read-RPC so the public 0G node doesn't rate-limit a burst. The History position
- * reads (`readStakesPublic` / `readPropPositions`) fan out over every side-market prop × outcome —
- * with the per-round RoundVotedOut markets that's ~80+ eth_calls per match — so without a shared gate
+ * reads (`readPropPositions`) fan out over every market prop × outcome — with the per-round
+ * RoundVotedOut markets that's ~80+ eth_calls per match — so without a shared gate
  * a scan floods the node and calls start failing. One module-level singleton means even parallel match
  * reads share the same budget. Live-match reads don't go through here.
  */
@@ -670,38 +628,23 @@ export interface MarketRead {
   /** Raw on-chain MatchState enum (0 None,1 Created,2 Locked,3 Settled,4 RefundMode). Lets callers
    *  distinguish Created vs. Locked, which both collapse to "OPEN"/"LOCKED" in `state`. */
   rawState: number;
-  outcome?: Outcome;
-  winningSide?: Side;
-  yesPool: string;
-  noPool: string;
-  /** Net pot (gross − fee) and winning-pool size — set once SETTLED; used to size a winning claim. */
-  netPot: string;
-  winningPool: string;
   /** Block after which an unsettled match may be flipped to RefundMode. */
   settlementDeadlineBlock: number;
-  feeBpsDraw: number;
 }
 
 /**
- * Read the match's on-chain state directly (no wallet). A liveness fallback: if the server stops
- * pushing — crashed mid-match, or someone moved the match into RefundMode after the deadline — the
- * client can still discover the terminal state and guide the bettor to claim/refund.
+ * Read the match's on-chain lifecycle state directly (no wallet). A liveness fallback: if the server
+ * stops pushing — crashed mid-match, or someone moved the match into RefundMode after the deadline —
+ * the client can still discover the terminal state and guide the bettor to claim/refund. Pools and
+ * verdicts live in the props (read via readProps), not the Match struct.
  */
 export async function readMarketState(address: string, matchId: number): Promise<MarketRead> {
   const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
   const m = await c.getFunction("matches")(matchId);
-  const outcome = OUTCOME[Number(m.outcome)];
   return {
     state: MARKET_STATE[Number(m.state)] ?? "OPEN",
     rawState: Number(m.state),
-    outcome,
-    winningSide: outcome === "YES" || outcome === "NO" ? outcome : undefined,
-    yesPool: formatEther(m.poolYes as bigint),
-    noPool: formatEther(m.poolNo as bigint),
-    netPot: formatEther(m.netPot as bigint),
-    winningPool: formatEther(m.winningPool as bigint),
     settlementDeadlineBlock: Number(m.settlementDeadlineBlock),
-    feeBpsDraw: Number(m.feeBpsDraw),
   };
 }
 
@@ -716,31 +659,55 @@ export async function readNextMatchId(address = MARKET_ADDRESS): Promise<number>
   return Number((await c.getFunction("nextMatchId")()) as bigint);
 }
 
-/** A past battle as the History screen lists it — outcome, pools, and the bits a card renders. */
+/** A past battle as the History screen lists it — the headline faction verdict, pot, and card bits. */
 export interface MatchSummary extends MarketRead {
   matchId: number;
   playerCount: number;
   nonce: string;
+  /** Headline FACTION market verdict, from its prop: RESOLVED (winner set) / VOID (mistrial) / undefined while unresolved. */
+  factionState?: PropSnapshot["state"];
+  /** The winning FACTION outcome when RESOLVED: 1 = MAFIA (Acquitted), 0 = TOWN (Convicted). */
+  factionWinner?: number;
+  /** Total staked on the FACTION market (CHIP decimal string) — the battle's headline pot. */
+  pot: string;
+}
+
+/**
+ * Read the headline FACTION prop for a match. It's opened first at match start, so it sits at the
+ * deterministic index `playerCount + 2` (right after createMatch's base props). Guarded: if that prop
+ * isn't the faction market (a malformed/legacy match), the verdict is left unresolved with a zero pot.
+ */
+async function readFactionProp(
+  c: Contract,
+  matchId: number,
+  playerCount: number,
+): Promise<{ state?: PropSnapshot["state"]; winner?: number; pot: string }> {
+  try {
+    const pr = await c.getFunction("getProp")(matchId, FACTION_PROP_INDEX(playerCount));
+    if (Number(pr.kind) !== 5) return { pot: "0" }; // not the FACTION prop → treat as unresolved
+    const pot = formatEther((pr.pools as bigint[]).reduce((a, p) => a + p, 0n));
+    const state = PROP_STATE[Number(pr.state)];
+    return { state, winner: state === "RESOLVED" ? Number(pr.winningOutcome) : undefined, pot };
+  } catch {
+    return { pot: "0" };
+  }
 }
 
 /** Read one match's summary (no wallet) for the History list. */
 export async function readMatchSummary(matchId: number, address = MARKET_ADDRESS): Promise<MatchSummary> {
   const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
   const m = await c.getFunction("matches")(matchId);
-  const outcome = OUTCOME[Number(m.outcome)];
+  const playerCount = Number(m.playerCount);
+  const faction = await readFactionProp(c, matchId, playerCount);
   return {
     matchId,
     state: MARKET_STATE[Number(m.state)] ?? "OPEN",
     rawState: Number(m.state),
-    outcome,
-    winningSide: outcome === "YES" || outcome === "NO" ? outcome : undefined,
-    yesPool: formatEther(m.poolYes as bigint),
-    noPool: formatEther(m.poolNo as bigint),
-    netPot: formatEther(m.netPot as bigint),
-    winningPool: formatEther(m.winningPool as bigint),
     settlementDeadlineBlock: Number(m.settlementDeadlineBlock),
-    feeBpsDraw: Number(m.feeBpsDraw),
-    playerCount: Number(m.playerCount),
+    playerCount,
     nonce: m.nonce as string,
+    factionState: faction.state,
+    factionWinner: faction.winner,
+    pot: faction.pot,
   };
 }

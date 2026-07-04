@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { mineUpTo } from "@nomicfoundation/hardhat-network-helpers";
-import { buildSettlement, defaultSchedule, createParams, deployMarket, fundBettors } from "./helpers/market";
+import { buildSettlement, defaultSchedule, createParams, deployMarket, fundBettors, openFaction, FACTION_OUT } from "./helpers/market";
 
 // Cross-layer proof: a match driven by the real players/ layer (scripted transcript via
 // buildSettlement — same envelope shape MockLocalProvider / ZeroGDirectProvider produce) settles
@@ -49,21 +49,24 @@ describe("players ↔ MafiaMarket integration", () => {
       schedule: sched,
     }));
     const matchId = 0;
+    // The headline "which faction wins?" market is a normal Prop, floated at match start.
+    const faction = await openFaction(market, owner, matchId);
 
-    // 4. Open betting and place a bet on the engine-winning side.
+    // 4. Open betting and place a bet on the engine-winning faction (Faction outcome 1 = MAFIA, 0 = TOWN).
     await mineUpTo(sched.bettingOpenBlock);
-    await market.connect(alice)[fx.mafiaWins ? "betYes" : "betNo"](matchId, ethers.parseEther("1"));
+    const winOut = fx.mafiaWins ? FACTION_OUT.MAFIA : FACTION_OUT.TOWN;
+    await market.connect(alice).betProp(matchId, faction, winOut, ethers.parseEther("1"));
 
     // 5. Close betting then settle with the player-produced calldata.
     await mineUpTo(sched.bettingCloseBlock);
     await market.settle(matchId, fx.moves, fx.roles, fx.salt, CID);
 
-    // 6. Assert the on-chain outcome matches the engine-declared winner.
-    //    Outcome.Yes = 1 (Mafia wins), Outcome.No = 2 (Town wins).
-    const m = await market.matches(matchId);
-    expect(m.outcome).to.equal(fx.mafiaWins ? 1 : 2);
+    // 6. Assert the faction market resolved to the engine-declared winner.
+    const pr = await market.getProp(matchId, faction);
+    expect(pr.state).to.equal(1); // Resolved
+    expect(pr.winningOutcome).to.equal(winOut);
 
     // 7. Alice (winning side) can claim her payout.
-    await market.connect(alice).claim(matchId);
+    await market.connect(alice).claimProp(matchId, faction);
   });
 });

@@ -18,7 +18,7 @@ contract Forwarder {
         uint256 gas;      // gas to forward to the inner call
         uint256 nonce;    // must equal nonces[from]
         uint48 deadline;  // unix seconds; request is invalid after this
-        bytes data;       // ABI-encoded call (e.g. betYes(matchId, amount))
+        bytes data;       // ABI-encoded call (e.g. betProp(matchId, propIdx, outcome, amount))
     }
 
     string public constant name = "TuringPitsForwarder";

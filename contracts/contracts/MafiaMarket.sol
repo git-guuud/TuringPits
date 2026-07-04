@@ -13,8 +13,9 @@ interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
 
-/// @title MafiaMarket — multi-match parimutuel YES/NO faction-win market factory with
-///        fully on-chain, TEE-verified, trust-minimized settlement for AI-Mafia matches.
+/// @title MafiaMarket — multi-match parimutuel prediction-market factory (one uniform categorical
+///        market type — the faction-win market and every side market are the same `Prop`) with fully
+///        on-chain, TEE-verified, trust-minimized settlement for AI-Mafia matches.
 /// @dev Settlement is trust-MINIMIZED, not trustless. It assumes (a) `teeSigner` is the genuine
 ///      0G-TEE provider key (the host sets it per match) and (b) the host's committed roles are
 ///      honest. The contract enforces everything it can on-chain — commit-reveal of roles,
@@ -30,9 +31,8 @@ interface IERC20 {
 ///      — so the relayer is purely additive.
 contract MafiaMarket is ERC2771Context {
     enum MatchState { None, Created, Locked, Settled, RefundMode }
-    enum Outcome { Unset, Yes, No, Draw, Void }
     /// @dev Side-market ("prop") variety — CATEGORICAL (multi-outcome) parimutuel markets, all resolved
-    ///      from the SAME verified run as the faction market:
+    ///      from the SAME verified run:
     ///      - PlayerFate    — "what happens to seat N?" Bucketed by death round: outcome 0 = survives,
     ///        outcome k = out in round k (1..FATE_BUCKETS-2), and the last bucket (FATE_BUCKETS-1)
     ///        catches death in round >= FATE_BUCKETS-1 ("out in round 4+"). Subsumes the old Survival +
@@ -63,11 +63,17 @@ contract MafiaMarket is ERC2771Context {
     ///        Settles PURELY from the commit-reveal-verified roles: the winning outcome is the seat whose
     ///        role is MAFIA (the lowest-index Mafia seat if a larger composition seats more than one), so
     ///        it adds no new game state and no new trust.
+    ///      - Faction — "which faction wins?" The headline market, now a normal 2-outcome prop:
+    ///        outcome 0 = TOWN wins, 1 = MAFIA wins (preserving the old YES=Mafia / NO=Town convention).
+    ///        Floated ONCE at match start via openFactionMarket() (numOutcomes == 2, Prop.param unused).
+    ///        Settles from the verified run: winner = MAFIA(1) if g.mafiaWins else TOWN(0); a MISTRIAL
+    ///        (g.over == false — the game hit max rounds with no winner) Voids the market (full refund).
+    ///        There is NO separate Draw outcome or draw fee — a mistrial is just a Void like any other prop.
     ///      The enum can grow further with no storage migration.
-    enum PropKind { PlayerFate, RoundVotedOut, NightKill, DetectiveClaim, MafiaSeat }
-    /// @dev A categorical prop's resolution state. Props don't use the YES/NO `Outcome`: at settle a
-    ///      single `winningOutcome` is chosen (Resolved), or the market Voids when nobody backed the
-    ///      winning outcome → every stake is refunded. Never Draw.
+    enum PropKind { PlayerFate, RoundVotedOut, NightKill, DetectiveClaim, MafiaSeat, Faction }
+    /// @dev A market's resolution state. At settle a single `winningOutcome` is chosen (Resolved), or the
+    ///      market Voids — when nobody backed the winning outcome, OR (Faction) the game was a mistrial —
+    ///      and every stake is refunded. There is no Draw state: a mistrial is just a Void.
     enum PropState { Unset, Resolved, Void }
 
     struct Move {
@@ -93,7 +99,6 @@ contract MafiaMarket is ERC2771Context {
         uint64 matchStartBlock;
         uint64 settlementDeadlineBlock;
         uint16 feeBps;
-        uint16 feeBpsDraw;
     }
 
     struct Match {
@@ -111,25 +116,19 @@ contract MafiaMarket is ERC2771Context {
         string tlsFingerprint;
         string nonce;
         uint8 playerCount;
-        uint128 poolYes;
-        uint128 poolNo;
-        Outcome outcome;
-        uint128 netPot;
-        uint128 winningPool;
         bytes32 transcriptCID;
         uint16 feeBps;
-        uint16 feeBpsDraw;
     }
 
-    /// @notice A per-match CATEGORICAL side market resolved from the SAME TEE-verified MafiaRules run as
-    ///         the faction-win market — no new trust assumption. Bettors stake on ONE of `numOutcomes`
-    ///         outcomes; at settle exactly one outcome wins (or the market Voids) and its backers split
-    ///         the net pot pro-rata. PlayerFate: outcomes are death-round buckets of seat `param`.
-    ///         RoundVotedOut: outcomes are the seats + a "no one" outcome for round `param`'s day vote.
+    /// @notice A per-match CATEGORICAL market resolved from the TEE-verified MafiaRules run — EVERY market
+    ///         (the headline Faction market included) is one of these; there is no separate market type.
+    ///         Bettors stake on ONE of `numOutcomes` outcomes; at settle exactly one outcome wins (or the
+    ///         market Voids) and its backers split the net pot pro-rata. PlayerFate: outcomes are
+    ///         death-round buckets of seat `param`. RoundVotedOut: seats + a "no one" for round `param`'s vote.
     struct Prop {
         PropKind kind;
-        uint8 param;          // PlayerFate: the seat. RoundVotedOut / NightKill: the 1-based round. DetectiveClaim: the claiming seat. MafiaSeat: unused (0).
-        uint8 numOutcomes;    // PlayerFate: FATE_BUCKETS. RoundVotedOut / NightKill: playerCount + 1. DetectiveClaim: 2 (BLUFF / REAL). MafiaSeat: playerCount (one per seat).
+        uint8 param;          // PlayerFate: the seat. RoundVotedOut / NightKill: the 1-based round. DetectiveClaim: the claiming seat. MafiaSeat / Faction: unused (0).
+        uint8 numOutcomes;    // PlayerFate: FATE_BUCKETS. RoundVotedOut / NightKill: playerCount + 1. DetectiveClaim: 2 (BLUFF / REAL). MafiaSeat: playerCount. Faction: 2 (TOWN / MAFIA).
         bool closed;          // betting frozen mid-match (the outcome became public); see closeProp(). Payout-neutral.
         PropState state;      // Unset until settle; Resolved (winningOutcome valid) or Void (refund all).
         uint8 winningOutcome; // the outcome that won — valid iff state == Resolved.
@@ -158,15 +157,13 @@ contract MafiaMarket is ERC2771Context {
     uint128 public protocolFeeAccrued;
 
     mapping(uint256 => Match) public matches;
-    mapping(uint256 => mapping(address => uint128)) public stakeYes;
-    mapping(uint256 => mapping(address => uint128)) public stakeNo;
-    mapping(uint256 => mapping(address => bool)) public claimed;
 
-    // Per-match side markets ("props"), e.g. one Survival market per seat. Created alongside the
-    // match and settled from the same verified run; keyed matchId => propIdx => user.
+    // Per-match markets ("props"): the headline Faction market + one PlayerFate per seat + the recurring
+    // round markets + the on-demand singles. ALL wagers flow through the one categorical path below,
+    // keyed matchId => propIdx => user; there is no separate faction stake pair anymore.
     mapping(uint256 => Prop[]) internal _props;
-    /// @notice Per-outcome stake: matchId => propIdx => outcome => user => amount. (Replaces the old
-    ///         YES/NO stake pair — a categorical market has one pool/stake per outcome.)
+    /// @notice Per-outcome stake: matchId => propIdx => outcome => user => amount. The single stake ledger
+    ///         for every market (a categorical market has one pool/stake per outcome).
     mapping(uint256 => mapping(uint256 => mapping(uint8 => mapping(address => uint128)))) public propStake;
     mapping(uint256 => mapping(uint256 => mapping(address => bool))) public propClaimed;
     /// @notice Highest "voted out" round that has a band of props on this match. createMatch opens
@@ -187,6 +184,10 @@ contract MafiaMarket is ERC2771Context {
     ///         most ONE per match, so this is a plain open-once guard. The host opens it at match start so
     ///         it is bettable for the whole match.
     mapping(uint256 => bool) public mafiaSeatOpened;
+    /// @notice Whether this match's headline "which faction wins?" market has been floated yet
+    ///         (openFactionMarket). Like the other singles it is NOT seeded at createMatch; the host opens
+    ///         it at match start (mandatory — the match's core market) so it is bettable for the whole match.
+    mapping(uint256 => bool) public factionMarketOpened;
 
     event MatchCreated(
         uint256 indexed matchId, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot,
@@ -227,7 +228,6 @@ contract MafiaMarket is ERC2771Context {
         require(p.matchStartBlock >= p.bettingCloseBlock + LOCK_BUFFER, "no lock buffer");
         require(p.settlementDeadlineBlock > p.matchStartBlock + MIN_MATCH_DURATION, "deadline too soon");
         require(p.feeBps <= MAX_FEE_BPS, "fee too high");
-        require(p.feeBpsDraw <= p.feeBps, "draw fee > fee");
         require(p.teeSigner != address(0), "zero signer");
         require(p.roleCommit != bytes32(0), "zero role commit");
         require(p.playerCount >= 5 && p.playerCount <= 7, "bad player count");
@@ -250,7 +250,6 @@ contract MafiaMarket is ERC2771Context {
         m.nonce = p.nonce;
         m.playerCount = p.playerCount;
         m.feeBps = p.feeBps;
-        m.feeBpsDraw = p.feeBpsDraw;
 
         emit MatchCreated(
             matchId, p.roleCommit, m.entropySeed, p.personaPoolRoot, p.teeSigner, p.playerCount,
@@ -311,52 +310,21 @@ contract MafiaMarket is ERC2771Context {
         }
     }
 
-    event BetPlaced(uint256 indexed matchId, address indexed user, bool isYes, uint128 amount, uint128 newPoolYes, uint128 newPoolNo);
-    event BettingLocked(uint256 indexed matchId, uint128 finalPoolYes, uint128 finalPoolNo);
-
-    // Bets are denominated in the bet token (CHIP). The bettor must `approve` this contract for at
-    // least `amount` first; the wager is pulled via transferFrom (the ERC20 analog of the old
-    // payable msg.value). `amount` is token base units (<= MAX_BET_PER_TX << 2^128).
-    function betYes(uint256 matchId, uint128 amount) external { _bet(matchId, true, amount); }
-    function betNo(uint256 matchId, uint128 amount) external { _bet(matchId, false, amount); }
-
-    function _bet(uint256 matchId, bool isYes, uint128 amount) private {
-        Match storage m = matches[matchId];
-        // Betting stays OPEN until the match is settled (state leaves Created) — there is no early
-        // block-based close. The only bounds are: betting has opened, the match isn't already
-        // settled/locked/refunding, and the settlement deadline hasn't lapsed (past it the match is
-        // refund-eligible, so new stakes are refused).
-        require(m.state == MatchState.Created, "not open");
-        require(block.number >= m.bettingOpenBlock, "betting not started");
-        require(block.number <= m.settlementDeadlineBlock, "betting closed");
-        require(amount >= MIN_BET, "below min bet");
-        require(amount <= MAX_BET_PER_TX, "above max bet");
-        address user = _msgSender(); // EIP-2771: the relayed bettor (== msg.sender on direct calls)
-        // Pull the stake into escrow; reverts (no state change) on insufficient balance/allowance.
-        require(betToken.transferFrom(user, address(this), amount), "token transfer failed");
-        if (isYes) {
-            m.poolYes += amount;
-            stakeYes[matchId][user] += amount;
-        } else {
-            m.poolNo += amount;
-            stakeNo[matchId][user] += amount;
-        }
-        emit BetPlaced(matchId, user, isYes, amount, m.poolYes, m.poolNo);
-    }
+    event BettingLocked(uint256 indexed matchId);
 
     event PropBetPlaced(
         uint256 indexed matchId, uint256 indexed propIdx, address indexed user,
         uint8 outcome, uint128 amount, uint128 newPool
     );
 
-    /// @notice Wager on a categorical side market by staking on one `outcome` (e.g. PlayerFate: outcome
-    ///         2 = "out in round 2"; RoundVotedOut: outcome == a seat, or the last outcome = "no one").
-    ///         Same CHIP approve+transferFrom flow and open window as the faction market. `propIdx`
-    ///         indexes the match's props (PlayerFate: propIdx == seat); `outcome` must be < numOutcomes.
+    /// @notice Wager on ANY market by staking on one `outcome` (Faction: 1 = MAFIA wins; PlayerFate:
+    ///         outcome 2 = "out in round 2"; RoundVotedOut: outcome == a seat, or the last = "no one").
+    ///         This is the single bet entrypoint for every market — headline and side alike. CHIP is pulled
+    ///         via approve+transferFrom. `propIdx` indexes the match's props; `outcome` must be < numOutcomes.
     function betProp(uint256 matchId, uint256 propIdx, uint8 outcome, uint128 amount) external {
         Match storage m = matches[matchId];
-        // Identical window to the faction-win market: open from bettingOpenBlock until the match
-        // leaves Created (settle/lock) and only while the settlement deadline hasn't lapsed.
+        // Betting is open from bettingOpenBlock until the match leaves Created (settle/lock) and only while
+        // the settlement deadline hasn't lapsed.
         require(m.state == MatchState.Created, "not open");
         require(block.number >= m.bettingOpenBlock, "betting not started");
         require(block.number <= m.settlementDeadlineBlock, "betting closed");
@@ -488,6 +456,28 @@ contract MafiaMarket is ERC2771Context {
         emit MafiaSeatMarketOpened(matchId, startIdx);
     }
 
+    event FactionMarketOpened(uint256 indexed matchId, uint256 startIdx);
+
+    /// @notice Open the headline "which faction wins?" market — one binary prop (2 outcomes: 0 = TOWN
+    ///         wins, 1 = MAFIA wins), param unused. NOT seeded at createMatch; the host floats it once at
+    ///         match start (open-once via factionMarketOpened) so it is bettable the whole match. This is
+    ///         the match's core market, so the host treats the open as MANDATORY. onlyOwner and only while
+    ///         betting is open (state == Created).
+    /// @dev    Resolves from the SAME verified run at settle(): MAFIA(1) if g.mafiaWins else TOWN(0); a
+    ///         mistrial (g.over == false) Voids the market (full refund) — there is no draw fee.
+    /// @return startIdx the propIdx of the new market.
+    function openFactionMarket(uint256 matchId) external onlyOwner returns (uint256 startIdx) {
+        Match storage m = matches[matchId];
+        require(m.state == MatchState.Created, "not open");
+        require(m.playerCount > 0, "no match");
+        require(!factionMarketOpened[matchId], "already opened");
+        Prop[] storage props = _props[matchId];
+        startIdx = props.length;
+        props.push(_newProp(PropKind.Faction, 0, 2));
+        factionMarketOpened[matchId] = true;
+        emit FactionMarketOpened(matchId, startIdx);
+    }
+
     // Optional, owner-only manual close. Betting otherwise stays open until settle(); the host can
     // call this to freeze the pools early (e.g. once the match ends, before submitting settlement).
     // onlyOwner so no third party can close betting ahead of the host (which would break the
@@ -497,10 +487,10 @@ contract MafiaMarket is ERC2771Context {
         require(m.state == MatchState.Created, "not lockable");
         require(block.number >= m.bettingCloseBlock, "betting still open");
         m.state = MatchState.Locked;
-        emit BettingLocked(matchId, m.poolYes, m.poolNo);
+        emit BettingLocked(matchId);
     }
 
-    event MatchSettled(uint256 indexed matchId, Outcome outcome, uint128 netPot, bytes32 transcriptCID);
+    event MatchSettled(uint256 indexed matchId, bytes32 transcriptCID);
 
     /// @dev onlyOwner: the host is the only party that holds the reveal (salt) until it
     ///      broadcasts, so permissionless settlement added no liveness — it only opened a
@@ -525,9 +515,10 @@ contract MafiaMarket is ERC2771Context {
         // 2. Verify each move's TEE envelope + bind its decision, then run the rules engine.
         MafiaRules.Game memory g = _verifyAndApply(m, moves, revealedRoles);
 
-        _writeResult(matchId, m, g, transcriptCID);
-        // 3. Resolve every side market from the SAME verified final state — no extra trust, no extra tx.
+        // Resolve EVERY market (the headline Faction market included) from the SAME verified final state,
+        // then finalize the match — no extra trust, no extra tx.
         _settleProps(matchId, m, g);
+        _writeResult(matchId, m, transcriptCID);
     }
 
     event PropSettled(uint256 indexed matchId, uint256 indexed propIdx, PropState state, uint8 winningOutcome, uint128 netPot);
@@ -544,14 +535,17 @@ contract MafiaMarket is ERC2771Context {
     ///      == 0, which stays 0 for a night kill); a blocked kill / quiet night leaves the "no one"
     ///      outcome. No new game state is needed — a night death is exactly a round death that wasn't a
     ///      vote-out. At most one seat falls per night, so the first match is unambiguous.
-    ///      An empty winning pool → Void (full refund of every outcome). Winners pay the match's standard
-    ///      feeBps; Void is fee-free. Props never Draw — each outcome is unambiguous from the verified run.
+    ///      Faction: the winning outcome is MAFIA(1) if g.mafiaWins else TOWN(0); a mistrial (g.over ==
+    ///      false) forces Void (no winning faction). An empty winning pool → Void (full refund of every
+    ///      outcome). Winners pay the match's standard feeBps; Void is fee-free. Markets never Draw — each
+    ///      outcome is unambiguous from the verified run (a mistrial is just a Void).
     function _settleProps(uint256 matchId, Match storage m, MafiaRules.Game memory g) private {
         Prop[] storage props = _props[matchId];
         uint16 feeBps = m.feeBps;
         for (uint256 i = 0; i < props.length; i++) {
             Prop storage pr = props[i];
             uint8 win;
+            bool voidIt; // force Void regardless of pools (a mistrial has no winning outcome)
             if (pr.kind == PropKind.PlayerFate) {
                 uint8 dr = g.deathRound[pr.param];
                 uint8 last = FATE_BUCKETS - 1;
@@ -577,7 +571,7 @@ contract MafiaMarket is ERC2771Context {
                 // DETECTIVE, else outcome 0 (BLUFF). A Mafia counter-claim never opened a second market,
                 // so it can only ever tilt this one toward BLUFF; the truth is the role check, nothing else.
                 win = g.roles[pr.param] == Role.DETECTIVE ? 1 : 0;
-            } else {
+            } else if (pr.kind == PropKind.MafiaSeat) {
                 // MafiaSeat: "who is the Mafia?" — outcomes 0..playerCount-1 are the seats. The winning
                 // outcome is the seat whose verified role is MAFIA; the lowest-index Mafia seat wins if a
                 // larger composition seats more than one. Resolves purely from the commit-reveal-verified
@@ -586,10 +580,16 @@ contract MafiaMarket is ERC2771Context {
                 for (uint8 seat = 0; seat < pr.numOutcomes; seat++) {
                     if (g.roles[seat] == Role.MAFIA) { win = seat; break; }
                 }
+            } else {
+                // Faction: the headline market. outcome 1 = MAFIA wins, 0 = TOWN wins. A mistrial
+                // (g.over == false — the game hit max rounds with no winner) has no winning faction, so
+                // the market Voids (full refund); otherwise it resolves to the winning faction.
+                if (!g.over) { voidIt = true; }
+                win = g.mafiaWins ? 1 : 0;
             }
             uint128 winPool = pr.pools[win];
             uint128 gross = _poolSum(pr.pools);
-            PropState st = winPool == 0 ? PropState.Void : PropState.Resolved;
+            PropState st = (winPool == 0 || voidIt) ? PropState.Void : PropState.Resolved;
             uint128 fee = st == PropState.Void ? 0 : uint128((uint256(gross) * feeBps) / 10000);
             pr.state = st;
             pr.winningOutcome = win;
@@ -636,41 +636,13 @@ contract MafiaMarket is ERC2771Context {
         );
     }
 
-    function _writeResult(uint256 matchId, Match storage m, MafiaRules.Game memory g, bytes32 transcriptCID) private {
-        // 3. Resolve outcome: unresolved -> Draw; resolved but empty winning pool -> Void.
-        Outcome outcome;
-        uint128 winningPool;
-        if (!g.over) {
-            outcome = Outcome.Draw;
-        } else if (g.mafiaWins) {
-            winningPool = m.poolYes;
-            outcome = winningPool == 0 ? Outcome.Void : Outcome.Yes;
-        } else {
-            winningPool = m.poolNo;
-            outcome = winningPool == 0 ? Outcome.Void : Outcome.No;
-        }
-
-        // 4. Fees + net pot.
-        // If total stake ever exceeded uint128 (≈3.4e20 ether, economically unreachable), this checked add would revert settle — funds remain recoverable via enterRefundMode/refund after the deadline (never trapped).
-        uint128 gross = m.poolYes + m.poolNo;
-        uint128 fee;
-        if (outcome == Outcome.Yes || outcome == Outcome.No) {
-            fee = uint128((uint256(gross) * m.feeBps) / 10000);
-        } else if (outcome == Outcome.Draw) {
-            fee = uint128((uint256(gross) * m.feeBpsDraw) / 10000);
-        } // Void: fee stays 0
-
-        m.outcome = outcome;
-        m.winningPool = winningPool;
-        // netPot is the pre-distribution figure (gross - fee). For Yes/No it is distributed
-        // pro-rata; for Draw the actual sum paid is marginally lower because each bettor's refund
-        // is floored independently (the remainder stays as wei-dust). Never an over-payment.
-        m.netPot = gross - fee;
+    // Finalize the match: record the transcript pointer and flip to Settled. The faction result and every
+    // market's payout are resolved by _settleProps (called right after) from the SAME verified run — there
+    // is no longer a bespoke faction settlement here.
+    function _writeResult(uint256 matchId, Match storage m, bytes32 transcriptCID) private {
         m.transcriptCID = transcriptCID;
-        protocolFeeAccrued += fee;
         m.state = MatchState.Settled;
-
-        emit MatchSettled(matchId, outcome, m.netPot, transcriptCID);
+        emit MatchSettled(matchId, transcriptCID);
     }
 
     /// @dev Verification context cached from storage once to avoid repeated SLOAD in the loop.
@@ -732,8 +704,9 @@ contract MafiaMarket is ERC2771Context {
     }
 
     event RefundModeEntered(uint256 indexed matchId);
-    event Refunded(uint256 indexed matchId, address indexed user, uint256 payout);
 
+    // Flip an abandoned match (host never settled by the deadline) to RefundMode, after which every
+    // bettor reclaims their stake per market via refundProp() — there is no bespoke faction refund.
     function enterRefundMode(uint256 matchId) external {
         Match storage m = matches[matchId];
         require(m.state == MatchState.Created || m.state == MatchState.Locked, "not refundable");
@@ -742,58 +715,11 @@ contract MafiaMarket is ERC2771Context {
         emit RefundModeEntered(matchId);
     }
 
-    function refund(uint256 matchId) external {
-        Match storage m = matches[matchId];
-        require(m.state == MatchState.RefundMode, "not refund mode");
-        address user = _msgSender(); // EIP-2771: the relayed bettor (== msg.sender on direct calls)
-        require(!claimed[matchId][user], "already refunded");
-        uint256 s = uint256(stakeYes[matchId][user]) + stakeNo[matchId][user];
-        require(s > 0, "no stake");
-        claimed[matchId][user] = true;
-        require(betToken.transfer(user, s), "transfer failed");
-        emit Refunded(matchId, user, s);
-    }
-
     function withdrawProtocolFees() external onlyTreasury {
         uint128 amt = protocolFeeAccrued;
         require(amt > 0, "nothing to withdraw");
         protocolFeeAccrued = 0;
         require(betToken.transfer(protocolTreasury, amt), "transfer failed");
-    }
-
-    event Claimed(uint256 indexed matchId, address indexed user, uint256 payout);
-
-    function claim(uint256 matchId) external {
-        Match storage m = matches[matchId];
-        require(m.state == MatchState.Settled, "not settled");
-        address user = _msgSender(); // EIP-2771: the relayed bettor (== msg.sender on direct calls)
-        require(!claimed[matchId][user], "already claimed");
-
-        uint256 payout;
-        Outcome o = m.outcome;
-        if (o == Outcome.Yes) {
-            uint256 s = stakeYes[matchId][user];
-            require(s > 0, "no winning stake");
-            payout = (uint256(m.netPot) * s) / m.winningPool;
-        } else if (o == Outcome.No) {
-            uint256 s = stakeNo[matchId][user];
-            require(s > 0, "no winning stake");
-            payout = (uint256(m.netPot) * s) / m.winningPool;
-        } else if (o == Outcome.Draw) {
-            uint256 s = uint256(stakeYes[matchId][user]) + stakeNo[matchId][user];
-            require(s > 0, "no stake");
-            payout = (s * (10000 - m.feeBpsDraw)) / 10000;
-        } else if (o == Outcome.Void) {
-            uint256 s = uint256(stakeYes[matchId][user]) + stakeNo[matchId][user];
-            require(s > 0, "no stake");
-            payout = s;
-        } else {
-            revert("unexpected outcome");
-        }
-
-        claimed[matchId][user] = true;
-        require(betToken.transfer(user, payout), "transfer failed");
-        emit Claimed(matchId, user, payout);
     }
 
     event PropClaimed(uint256 indexed matchId, uint256 indexed propIdx, address indexed user, uint256 payout);
@@ -839,6 +765,76 @@ contract MafiaMarket is ERC2771Context {
         propClaimed[matchId][propIdx][user] = true;
         require(betToken.transfer(user, s), "transfer failed");
         emit PropRefunded(matchId, propIdx, user, s);
+    }
+
+    event BatchClaimed(uint256 indexed matchId, address indexed user, uint256 marketsPaid, uint256 total);
+
+    /// @notice Claim EVERY listed side-market payout from a SETTLED match in a single tx — the one-tap
+    ///         "collect my winnings" primitive. Semantics match claimProp() per index (Resolved pays the
+    ///         winning outcome pro-rata; Void returns the stake), but instead of reverting on an index the
+    ///         caller can't collect (out of range, already claimed, or a losing bet) it SKIPS it and moves
+    ///         on. That lets a client pass its whole believed-winning set without a stale index or a
+    ///         mid-flight double-claim aborting the batch. Duplicated indices are paid once (the first pass
+    ///         marks them claimed). Reverts only if nothing at all was collectable. Payouts are summed into
+    ///         a single token transfer; a PropClaimed event still fires per collected market.
+    function batchClaim(uint256 matchId, uint256[] calldata propIdxs) external {
+        require(matches[matchId].state == MatchState.Settled, "not settled");
+        address user = _msgSender(); // EIP-2771: the relayed bettor (== msg.sender on direct calls)
+        uint256 len = _props[matchId].length;
+        uint256 total;
+        uint256 paid;
+        for (uint256 k = 0; k < propIdxs.length; k++) {
+            uint256 propIdx = propIdxs[k];
+            if (propIdx >= len) continue;                       // stale/garbage index
+            if (propClaimed[matchId][propIdx][user]) continue;  // already collected (or a dup earlier in this batch)
+            Prop storage pr = _props[matchId][propIdx];
+
+            uint256 payout;
+            if (pr.state == PropState.Resolved) {
+                uint256 s = propStake[matchId][propIdx][pr.winningOutcome][user];
+                if (s == 0) continue;                            // backed a losing outcome — nothing here
+                payout = (uint256(pr.netPot) * s) / pr.winningPool;
+            } else if (pr.state == PropState.Void) {
+                uint256 s = _userPropTotal(matchId, propIdx, user, pr.numOutcomes);
+                if (s == 0) continue;
+                payout = s;
+            } else {
+                continue;                                        // Unset (never settled) — skip
+            }
+
+            propClaimed[matchId][propIdx][user] = true;
+            total += payout;
+            paid++;
+            emit PropClaimed(matchId, propIdx, user, payout);
+        }
+        require(total > 0, "nothing to claim");
+        require(betToken.transfer(user, total), "transfer failed");
+        emit BatchClaimed(matchId, user, paid, total);
+    }
+
+    /// @notice Reclaim EVERY listed side-market stake from an abandoned (RefundMode) match in one tx —
+    ///         the batch mirror of refundProp(), with the same skip-don't-revert semantics as batchClaim().
+    function batchRefund(uint256 matchId, uint256[] calldata propIdxs) external {
+        require(matches[matchId].state == MatchState.RefundMode, "not refund mode");
+        address user = _msgSender(); // EIP-2771: the relayed bettor (== msg.sender on direct calls)
+        uint256 len = _props[matchId].length;
+        uint256 total;
+        uint256 paid;
+        for (uint256 k = 0; k < propIdxs.length; k++) {
+            uint256 propIdx = propIdxs[k];
+            if (propIdx >= len) continue;
+            if (propClaimed[matchId][propIdx][user]) continue;
+            Prop storage pr = _props[matchId][propIdx];
+            uint256 s = _userPropTotal(matchId, propIdx, user, pr.numOutcomes);
+            if (s == 0) continue;
+            propClaimed[matchId][propIdx][user] = true;
+            total += s;
+            paid++;
+            emit PropRefunded(matchId, propIdx, user, s);
+        }
+        require(total > 0, "nothing to refund");
+        require(betToken.transfer(user, total), "transfer failed");
+        emit BatchClaimed(matchId, user, paid, total);
     }
 
     /// @notice Number of side markets attached to a match (one PlayerFate per seat + one RoundVotedOut

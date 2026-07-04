@@ -8,8 +8,10 @@ describe("relayer — sponsored-selector allowlist", () => {
   const relay = new Interface(MARKET_RELAY_ABI);
   const host = new Interface(MAFIA_MARKET_ABI); // server/abi.ts: the owner/host surface
 
-  it("sponsors exactly the bettor actions (bet/claim/refund) + faucet/approve", () => {
-    for (const fn of ["betYes", "betNo", "betProp", "claim", "claimProp", "refund", "refundProp", "enterRefundMode"]) {
+  it("sponsors exactly the bettor actions (betProp/claimProp/refundProp/batchClaim/batchRefund/enterRefundMode) + faucet/approve", () => {
+    // Every market is a categorical prop, so there is ONE bet/claim/refund surface to sponsor — plus the
+    // batch collect-all mirrors so a one-tap "Collect all" can be relayed gaslessly too.
+    for (const fn of ["betProp", "claimProp", "refundProp", "batchClaim", "batchRefund", "enterRefundMode"]) {
       expect(allow.get(relay.getFunction(fn)!.selector), fn).toBe(fn);
     }
     // faucet + approve are token selectors — present by label.
@@ -17,8 +19,8 @@ describe("relayer — sponsored-selector allowlist", () => {
     expect([...allow.values()]).toContain("approve");
   });
 
-  it("never sponsors owner/host functions (createMatch, settle, lockBetting, openVotedOutRound, openNightKillRound, openDetectiveClaim, openMafiaSeatMarket, closeProp)", () => {
-    for (const fn of ["createMatch", "settle", "lockBetting", "openVotedOutRound", "openNightKillRound", "openDetectiveClaim", "openMafiaSeatMarket", "closeProp"]) {
+  it("never sponsors owner/host functions (createMatch, settle, lockBetting, open*Round, openDetectiveClaim, openMafiaSeatMarket, openFactionMarket, closeProp)", () => {
+    for (const fn of ["createMatch", "settle", "lockBetting", "openVotedOutRound", "openNightKillRound", "openDetectiveClaim", "openMafiaSeatMarket", "openFactionMarket", "closeProp"]) {
       expect(allow.has(host.getFunction(fn)!.selector), fn).toBe(false);
     }
   });

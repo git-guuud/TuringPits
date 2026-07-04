@@ -103,7 +103,6 @@ export function createParams(opts: {
   playerCount: number;
   schedule: { bettingOpenBlock: number; bettingCloseBlock: number; matchStartBlock: number; settlementDeadlineBlock: number };
   feeBps?: number;
-  feeBpsDraw?: number;
   personaPoolRoot?: string;
 }) {
   return {
@@ -120,6 +119,18 @@ export function createParams(opts: {
     matchStartBlock: opts.schedule.matchStartBlock,
     settlementDeadlineBlock: opts.schedule.settlementDeadlineBlock,
     feeBps: opts.feeBps ?? 200,
-    feeBpsDraw: opts.feeBpsDraw ?? 50,
   };
+}
+
+/** Faction market outcomes (MafiaMarket PropKind.Faction): 0 = TOWN wins, 1 = MAFIA wins. */
+export const FACTION_OUT = { TOWN: 0, MAFIA: 1 } as const;
+
+/**
+ * Open the headline faction market on `matchId` and return its propIdx (the array tail at open time).
+ * The orchestrator does this once at match start; tests that exercise faction betting call it directly.
+ */
+export async function openFaction(market: any, owner: any, matchId: number | bigint = 0): Promise<number> {
+  const idx = Number(await market.propCount(matchId));
+  await market.connect(owner).openFactionMarket(matchId);
+  return idx;
 }

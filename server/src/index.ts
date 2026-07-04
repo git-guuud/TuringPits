@@ -9,7 +9,7 @@
  *
  * Required env: MAFIA_MARKET_ADDRESS, HOST_PRIVATE_KEY.
  * Optional: PORT, INTERMISSION_SECONDS, ZEROG_RPC_URL, CHAIN_ID, PLAYER_COUNT, MATCH_SEED,
- *           BETTING_WINDOW_BLOCKS, MOVE_INTERVAL_MS, FEE_BPS, FEE_BPS_DRAW, COMPUTE_PRIVATE_KEY,
+ *           BETTING_WINDOW_BLOCKS, MOVE_INTERVAL_MS, FEE_BPS, COMPUTE_PRIVATE_KEY,
  *           COMPUTE_PROVIDER_ADDRESS.
  *           (Note: pin MATCH_SEED only for repro — it makes every round play out identically.)
  */
@@ -54,7 +54,6 @@ async function main() {
     bettingWindowBlocks: Number(process.env.BETTING_WINDOW_BLOCKS ?? 101),
     moveIntervalMs: Number(process.env.MOVE_INTERVAL_MS ?? 1000),
     feeBps: Number(process.env.FEE_BPS ?? 200),
-    feeBpsDraw: Number(process.env.FEE_BPS_DRAW ?? 50),
     enableStorage: (process.env.ENABLE_STORAGE ?? "false").toLowerCase() === "true",
     storageIndexerUrl: process.env.ZEROG_STORAGE_INDEXER_URL ?? "https://indexer-storage-testnet-turbo.0g.ai",
     storageRpcUrl: process.env.ZEROG_STORAGE_RPC_URL ?? process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai",

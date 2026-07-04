@@ -534,9 +534,8 @@ function BottomDock({ s, onOpen }: { s: ViewState; onOpen: () => void }) {
   const factionCountdown = useCountdown(live && !s.betWindow ? s.market.closesAt : null);
   const countdown = s.betWindow ? windowCountdown : factionCountdown;
   const closingSoon = countdown != null && countdown.ms <= (s.betWindow ? 10000 : 15000);
-  const hasWager =
-    parseFloat(s.stakes.yes) + parseFloat(s.stakes.no) > 0 ||
-    s.propStakes.some((ps) => ps.stakes.some((v) => parseFloat(v) > 0));
+  // Every market (the faction headline included) is a prop, so one scan over propStakes covers them all.
+  const hasWager = s.propStakes.some((ps) => ps.stakes.some((v) => parseFloat(v) > 0));
 
   // Status line + call-to-action, mapped from the real market lifecycle. The CTA always raises the
   // full Wagers sheet — the dock surfaces *state*, the sheet holds the actions.
@@ -569,7 +568,8 @@ function BottomDock({ s, onOpen }: { s: ViewState; onOpen: () => void }) {
     cta = "Reclaim";
     tone = "claim";
   } else {
-    label = s.market.outcome === "DRAW" || s.market.outcome === "VOID" ? "Stakes returned" : "Verdict settled on-chain";
+    const factionVoid = (s.market.props ?? []).find((p) => p.kind === "FACTION")?.state === "VOID";
+    label = factionVoid ? "Stakes returned" : "Verdict settled on-chain";
     cta = "Results";
     tone = "claim";
   }

@@ -36,13 +36,14 @@ const FORWARDER_ABI = [
  * never be relayed.
  */
 export const MARKET_RELAY_ABI = [
-  "function betYes(uint256 matchId, uint128 amount)",
-  "function betNo(uint256 matchId, uint128 amount)",
+  // Every market (headline faction + side) is one categorical prop, so there is a SINGLE bet/claim/refund
+  // surface to sponsor — betProp/claimProp/refundProp — plus the batch collect-all mirrors (batchClaim/
+  // batchRefund) and the permissionless refund-mode flip.
   "function betProp(uint256 matchId, uint256 propIdx, uint8 outcome, uint128 amount)",
-  "function claim(uint256 matchId)",
   "function claimProp(uint256 matchId, uint256 propIdx)",
-  "function refund(uint256 matchId)",
   "function refundProp(uint256 matchId, uint256 propIdx)",
+  "function batchClaim(uint256 matchId, uint256[] propIdxs)",
+  "function batchRefund(uint256 matchId, uint256[] propIdxs)",
   "function enterRefundMode(uint256 matchId)",
   "function betToken() view returns (address)",
 ];
@@ -60,8 +61,9 @@ export function buildSelectorAllowlist(): Map<string, string> {
   const token = new Interface(TOKEN_ABI);
   const allow = new Map<string, string>();
   const add = (iface: Interface, name: string) => allow.set(iface.getFunction(name)!.selector, name);
-  // market: place + claim wagers (faction + side markets), refund, and the permissionless refund flip.
-  for (const fn of ["betYes", "betNo", "betProp", "claim", "claimProp", "refund", "refundProp", "enterRefundMode"]) add(market, fn);
+  // market: place + claim + refund wagers on any market (all are props), the one-tap batch collect-all,
+  // and the permissionless refund flip.
+  for (const fn of ["betProp", "claimProp", "refundProp", "batchClaim", "batchRefund", "enterRefundMode"]) add(market, fn);
   // token: mint test CHIP + approve the market to pull it.
   for (const fn of ["faucet", "approve"]) add(token, fn);
   return allow;

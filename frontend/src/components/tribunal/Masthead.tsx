@@ -28,8 +28,11 @@ export function liveness(s: ViewState): Live {
 
 export const phaseTag = (s: ViewState): string => {
   if (s.market.state === "REFUND") return "Mistrial · refundable";
-  if (s.market.state === "SETTLED")
-    return s.market.outcome === "DRAW" ? "Mistrial" : s.market.outcome === "VOID" ? "Market void" : "Sentence read";
+  if (s.market.state === "SETTLED") {
+    // The verdict lives in the FACTION prop now — VOID = a mistrial / unbacked verdict (full refund).
+    const factionVoid = (s.market.props ?? []).find((p) => p.kind === "FACTION")?.state === "VOID";
+    return factionVoid ? "Market void" : "Sentence read";
+  }
   if (s.reveal) return "The masks fall";
   if (s.phase === "night") return `Night · round ${s.round}`;
   if (s.phase === "day") return `Day · round ${s.round}`;

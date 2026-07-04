@@ -1,11 +1,15 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { mineUpTo } from "@nomicfoundation/hardhat-network-helpers";
-import { defaultSchedule, createParams, buildSettlement, deployMarket, fundBettors } from "./helpers/market";
+import { defaultSchedule, createParams, buildSettlement, deployMarket, fundBettors, openFaction, FACTION_OUT } from "./helpers/market";
 
 const SEED = "0x" + "ab".repeat(32);
 const CID = "0x" + "cd".repeat(32);
 const DUMMY_COMMIT = "0x" + "aa".repeat(32);
+// Faction market (PropKind.Faction) outcomes: 0 = TOWN wins, 1 = MAFIA wins.
+const MAFIA = FACTION_OUT.MAFIA;
+const TOWN = FACTION_OUT.TOWN;
+const PS = { Unset: 0, Resolved: 1, Void: 2 } as const;
 
 async function deploy() {
   const signers = await ethers.getSigners();
@@ -23,15 +27,16 @@ function commitFor(roles: number[], salt: string): string {
 
 describe("MafiaMarket — settle access control (reveal front-run fix)", () => {
   it("reverts when a non-owner calls settle, even with the full valid reveal", async () => {
-    const { market, alice, bob } = await deploy();
+    const { market, owner, alice, bob } = await deploy();
     const stranger = (await ethers.getSigners())[6];
     const teeSigner = ethers.Wallet.createRandom();
     const fx = await buildSettlement(SEED, 5, "hard-acl", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "hard-acl", playerCount: 5, schedule: sched }));
+    const faction = await openFaction(market, owner);
     await mineUpTo(sched.bettingOpenBlock);
-    await market.connect(alice).betYes(0, ethers.parseEther("1"));
-    await market.connect(bob).betNo(0, ethers.parseEther("1"));
+    await market.connect(alice).betProp(0, faction, MAFIA, ethers.parseEther("1"));
+    await market.connect(bob).betProp(0, faction, TOWN, ethers.parseEther("1"));
     await mineUpTo(sched.bettingCloseBlock);
 
     // A front-runner holding the mempool reveal cannot settle (and so cannot truncate → Draw).
@@ -65,14 +70,15 @@ describe("MafiaMarket — role composition enforcement", () => {
   });
 
   it("still accepts the canonical composition the engine assigns", async () => {
-    const { market, alice, bob } = await deploy();
+    const { market, owner, alice, bob } = await deploy();
     const teeSigner = ethers.Wallet.createRandom();
     const fx = await buildSettlement(SEED, 5, "hard-comp-ok", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "hard-comp-ok", playerCount: 5, schedule: sched }));
+    const faction = await openFaction(market, owner);
     await mineUpTo(sched.bettingOpenBlock);
-    await market.connect(alice).betYes(0, ethers.parseEther("1"));
-    await market.connect(bob).betNo(0, ethers.parseEther("1"));
+    await market.connect(alice).betProp(0, faction, MAFIA, ethers.parseEther("1"));
+    await market.connect(bob).betProp(0, faction, TOWN, ethers.parseEther("1"));
     await mineUpTo(sched.bettingCloseBlock);
     await expect(market.settle(0, fx.moves, fx.roles, fx.salt, CID)).to.emit(market, "MatchSettled");
   });
@@ -133,71 +139,69 @@ describe("MafiaMarket — ownership transfer", () => {
   });
 });
 
-describe("MafiaMarket — conservation for Draw and Void with multiple bettors", () => {
-  it("DRAW: Σ claims + fee == gross within wei-dust", async () => {
-    const { market, token } = await deploy();
+describe("MafiaMarket — conservation for Void (mistrial + empty-winner) with multiple bettors", () => {
+  it("MISTRIAL: the faction market Voids → Σ refunds == gross exactly, no fee", async () => {
+    const { market, token, owner } = await deploy();
     const signers = await ethers.getSigners();
     const bettors = signers.slice(2, 6);
     const teeSigner = ethers.Wallet.createRandom();
     const fx = await buildSettlement(SEED, 5, "cons-draw", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "cons-draw", playerCount: 5, schedule: sched }));
+    const faction = await openFaction(market, owner);
     await mineUpTo(sched.bettingOpenBlock);
     const amts = ["1.3", "0.7", "2.1", "0.05"];
     for (let i = 0; i < bettors.length; i++) {
-      const fn = i % 2 === 0 ? "betYes" : "betNo";
-      await market.connect(bettors[i])[fn](0, ethers.parseEther(amts[i]));
+      await market.connect(bettors[i]).betProp(0, faction, i % 2 === 0 ? MAFIA : TOWN, ethers.parseEther(amts[i]));
     }
     await mineUpTo(sched.bettingCloseBlock);
-    // Truncate to force Draw (every bettor refundable minus the draw fee).
+    // Truncate to a mistrial (no faction wins) → the faction market Voids (full refund, fee-free).
     await market.settle(0, fx.moves.slice(0, fx.moves.length - 1), fx.roles, fx.salt, CID);
-    expect((await market.matches(0)).outcome).to.equal(3); // Draw
+    expect((await market.getProp(0, faction)).state).to.equal(PS.Void);
 
-    const m = await market.matches(0);
-    const gross = m.poolYes + m.poolNo;
-    let claimsTotal = 0n;
+    const pr = await market.getProp(0, faction);
+    const gross = pr.pools[MAFIA] + pr.pools[TOWN];
+    let refundTotal = 0n;
     for (const b of bettors) {
       const before = await token.balanceOf(await market.getAddress());
-      await market.connect(b).claim(0);
+      await market.connect(b).claimProp(0, faction);
       const after = await token.balanceOf(await market.getAddress());
-      claimsTotal += before - after;
+      refundTotal += before - after;
     }
-    const fee = await market.protocolFeeAccrued();
-    const dust = gross - (claimsTotal + fee);
-    expect(dust).to.be.greaterThanOrEqual(0n);
-    expect(dust).to.be.lessThan(BigInt(bettors.length + 1)); // wei-scale floor dust only
+    expect(refundTotal).to.equal(gross); // full refund, no fee, no dust
+    expect(await market.protocolFeeAccrued()).to.equal(0n);
   });
 
-  it("VOID: Σ refunds == gross exactly and drains the match", async () => {
-    const { market, token } = await deploy();
+  it("VOID: empty winning pool → Σ refunds == gross exactly and drains the faction market", async () => {
+    const { market, token, owner } = await deploy();
     const signers = await ethers.getSigners();
     const bettors = signers.slice(2, 5);
     const teeSigner = ethers.Wallet.createRandom();
     const fx = await buildSettlement(SEED, 5, "cons-void", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "cons-void", playerCount: 5, schedule: sched }));
+    const faction = await openFaction(market, owner);
     await mineUpTo(sched.bettingOpenBlock);
-    // Everyone bets the LOSING side → winning pool empty → Void.
-    const loseFn = fx.mafiaWins ? "betNo" : "betYes";
+    // Everyone bets the LOSING faction → winning pool empty → Void.
+    const loseOut = fx.mafiaWins ? TOWN : MAFIA;
     const amts = ["1.0", "2.5", "0.4"];
     for (let i = 0; i < bettors.length; i++) {
-      await market.connect(bettors[i])[loseFn](0, ethers.parseEther(amts[i]));
+      await market.connect(bettors[i]).betProp(0, faction, loseOut, ethers.parseEther(amts[i]));
     }
     await mineUpTo(sched.bettingCloseBlock);
     await market.settle(0, fx.moves, fx.roles, fx.salt, CID);
-    expect((await market.matches(0)).outcome).to.equal(4); // Void
+    expect((await market.getProp(0, faction)).state).to.equal(PS.Void);
 
-    const m = await market.matches(0);
-    const gross = m.poolYes + m.poolNo;
+    const pr = await market.getProp(0, faction);
+    const gross = pr.pools[MAFIA] + pr.pools[TOWN];
     let refundTotal = 0n;
     for (const b of bettors) {
       const before = await token.balanceOf(await market.getAddress());
-      await market.connect(b).claim(0);
+      await market.connect(b).claimProp(0, faction);
       const after = await token.balanceOf(await market.getAddress());
       refundTotal += before - after;
     }
     expect(refundTotal).to.equal(gross); // full refund, no fee, no dust
     expect(await market.protocolFeeAccrued()).to.equal(0n);
-    expect(await token.balanceOf(await market.getAddress())).to.equal(0n);
   });
 });

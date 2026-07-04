@@ -21,8 +21,8 @@ export interface MatchStatus {
   round: number;
   state: MarketState;
   bettingLive: boolean;
-  yesPool: string;
-  noPool: string;
+  /** Total staked on the headline FACTION market (CHIP decimal string) — the lobby's "pot" figure. */
+  pot: string;
   isMock: boolean;
 }
 
@@ -83,8 +83,7 @@ export class Hub {
     let round = 0;
     let state: MarketState = "OPEN";
     let bettingLive = false;
-    let yesPool = "0";
-    let noPool = "0";
+    let pot = "0";
     for (const m of this.buffer) {
       switch (m.type) {
         case "match_init":
@@ -92,12 +91,14 @@ export class Hub {
           matchId = m.matchId;
           isMock = m.isMock;
           break;
-        case "market":
+        case "market": {
           state = m.market.state;
           bettingLive = !!m.market.bettingLive;
-          yesPool = m.market.yesPool;
-          noPool = m.market.noPool;
+          // The pot is the headline FACTION market's total stake (it's just another prop now).
+          const faction = m.market.props?.find((p) => p.kind === "FACTION");
+          if (faction) pot = faction.pools.reduce((a, s) => a + parseFloat(s), 0).toString();
           break;
+        }
         case "night":
         case "dawn":
         case "discussion":
@@ -113,6 +114,6 @@ export class Hub {
           break;
       }
     }
-    return { live: hasInit && !hasSettled, matchId, round, state, bettingLive, yesPool, noPool, isMock };
+    return { live: hasInit && !hasSettled, matchId, round, state, bettingLive, pot, isMock };
   }
 }

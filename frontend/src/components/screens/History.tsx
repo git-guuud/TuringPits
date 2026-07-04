@@ -1,17 +1,17 @@
 import { useEffect, useState } from "react";
 import type { MatchApi } from "../../state/matchStore.js";
-import { useHistory, type HistoryRow, type ReclaimKind } from "../../state/useHistory.js";
+import { useHistory, type HistoryRow, type PropReclaim, type ReclaimKind } from "../../state/useHistory.js";
 import { navigate } from "../../lib/useRoute.js";
 import { betTokenAddress, explorerAddress, explorerToken, explorerTx, MARKET_ADDRESS } from "../../lib/contract.js";
 import type { MatchSummary } from "../../lib/contract.js";
 
-/** The verdict as the record phrases it (mirrors the Verdict panel's ACQUITTED/CONVICTED framing). */
+/** The verdict as the record phrases it (from the FACTION prop; mirrors the Verdict panel's framing). */
 function verdictOf(s: MatchSummary): { label: string; cls: string } {
   if (s.state === "SETTLED") {
-    if (s.outcome === "YES") return { label: "Acquitted", cls: "text-convict" }; // Mafia walked
-    if (s.outcome === "NO") return { label: "Convicted", cls: "text-acquit" }; // Town prevailed
-    if (s.outcome === "DRAW") return { label: "Mistrial", cls: "text-mute" };
-    if (s.outcome === "VOID") return { label: "Void", cls: "text-mute" };
+    if (s.factionState === "RESOLVED" && s.factionWinner === 1) return { label: "Acquitted", cls: "text-convict" }; // Mafia walked
+    if (s.factionState === "RESOLVED" && s.factionWinner === 0) return { label: "Convicted", cls: "text-acquit" }; // Town prevailed
+    if (s.factionState === "VOID") return { label: "Void", cls: "text-mute" }; // mistrial / no wager backed
+    return { label: "Settled", cls: "text-mute" };
   }
   if (s.state === "REFUND") return { label: "Abandoned", cls: "text-gilt" };
   if (s.state === "LOCKED") return { label: "In session", cls: "text-gilt" };
@@ -25,14 +25,15 @@ const RECLAIM_CTA: Record<ReclaimKind, string> = {
   enable: "Enable refund",
 };
 
-/** A row has money/action outstanding: a faction reclaim and/or any unclaimed side pot. */
+/** A row has money/action outstanding: an unclaimed pot on any market, or an abandoned-match flip. */
 function isClaimable(r: HistoryRow): boolean {
-  return !!r.mine?.reclaim || (r.mine?.props?.length ?? 0) > 0;
+  return !!r.mine?.enable || (r.mine?.props?.length ?? 0) > 0;
 }
 
-/** Total CHIP still reclaimable on a battle (faction reclaim + every outstanding side pot). */
+/** Total CHIP still reclaimable on a battle (every outstanding pot, or the stake awaiting a refund flip). */
 function reclaimableTotal(r: HistoryRow): number {
-  let a = r.mine?.reclaim ? parseFloat(r.mine.reclaim.amount) : 0;
+  if (r.mine?.enable) return parseFloat(r.mine.enable.amount);
+  let a = 0;
   for (const p of r.mine?.props ?? []) a += parseFloat(p.amount);
   return a;
 }
@@ -87,14 +88,13 @@ export function History({ api }: { api: MatchApi }) {
     };
   }, []);
 
-  const onReclaim = (matchId: number, kind: ReclaimKind) => {
+  // Match-level: flip an abandoned, past-deadline match into RefundMode (then each market is refundable).
+  const onEnableRefund = (matchId: number) => {
     if (busy) return;
-    if (kind === "refund") void api.refund(matchId);
-    else if (kind === "enable") void api.enterRefund(matchId);
-    else void api.claim(matchId);
+    void api.enterRefund(matchId);
   };
 
-  // Survival side pots claim/refund per seat on a past battle.
+  // Per-market claim/refund on a past battle — the faction verdict and every side pot alike.
   const onReclaimProp = (matchId: number, index: number, kind: "win" | "return" | "refund") => {
     if (busy) return;
     if (kind === "refund") void api.refundProp(index, matchId);
@@ -205,7 +205,7 @@ export function History({ api }: { api: MatchApi }) {
           <>
             <ul className="flex flex-col gap-px bg-line">
               {pageRows.map((r) => (
-                <Row key={r.summary.matchId} row={r} busy={busy} claimable={isClaimable(r)} onReclaim={onReclaim} onReclaimProp={onReclaimProp} />
+                <Row key={r.summary.matchId} row={r} busy={busy} claimable={isClaimable(r)} onEnableRefund={onEnableRefund} onReclaimProp={onReclaimProp} />
               ))}
             </ul>
 
@@ -263,34 +263,35 @@ export function History({ api }: { api: MatchApi }) {
   );
 }
 
+/** The label for a reclaimable pot chip — the market it belongs to. */
+function marketLabel(p: PropReclaim): string {
+  switch (p.market) {
+    case "FACTION": return "Faction verdict";
+    case "ROUND_VOTED_OUT": return `Round ${p.param} vote`;
+    case "NIGHT_KILL": return `Night ${p.param} kill`;
+    case "DETECTIVE_CLAIM": return `Seat ${p.param + 1} · claim`;
+    case "MAFIA_SEAT": return "Who is the Mafia?";
+    default: return `Seat ${p.param + 1} · fate`;
+  }
+}
+
 function Row({
   row,
   busy,
   claimable,
-  onReclaim,
+  onEnableRefund,
   onReclaimProp,
 }: {
   row: HistoryRow;
   busy: boolean;
   claimable: boolean;
-  onReclaim: (matchId: number, kind: ReclaimKind) => void;
+  onEnableRefund: (matchId: number) => void;
   onReclaimProp: (matchId: number, index: number, kind: "win" | "return" | "refund") => void;
 }) {
   const { summary: s, mine } = row;
   const v = verdictOf(s);
-  const pot = (parseFloat(s.yesPool) + parseFloat(s.noPool)).toFixed(2);
+  const pot = parseFloat(s.pot).toFixed(2);
   const props = mine?.props ?? [];
-
-  // What the viewer backed on the faction market, for the status when there's no reclaim button:
-  // YES = Acquittal (Mafia walks), NO = Conviction (Town prevails). Mirrors verdictOf's colours.
-  const yes = mine?.stakeYes ?? 0;
-  const no = mine?.stakeNo ?? 0;
-  const factionStake = yes + no;
-  const backed = yes > 0 && no > 0 ? "BOTH" : yes > 0 ? "YES" : "NO";
-  const backedLabel = backed === "BOTH" ? "both sides" : backed === "YES" ? "Acquittal" : "Conviction";
-  const backedClass = backed === "BOTH" ? "text-gilt" : backed === "YES" ? "text-convict" : "text-acquit";
-  // No reclaim + settled verdict + backed the side that didn't win = the wager missed.
-  const lost = s.state === "SETTLED" && (s.outcome === "YES" || s.outcome === "NO") && backed !== "BOTH" && backed !== s.outcome;
 
   return (
     <li className={["panel flex flex-col gap-3 px-5 py-4", claimable ? "border-l-2 border-gilt" : ""].join(" ")}>
@@ -303,45 +304,34 @@ function Row({
         <div className="flex-1">
           <div className={["font-display text-[20px] tracking-[0.08em]", v.cls].join(" ")}>{v.label}</div>
           <div className="mt-0.5 font-mono text-[11px] tracking-[0.06em] text-mute">
-            {s.playerCount} seats · pot ◈ {pot} ({parseFloat(s.yesPool).toFixed(2)} / {parseFloat(s.noPool).toFixed(2)})
+            {s.playerCount} seats · pot ◈ {pot}
           </div>
         </div>
 
-        {mine && (mine.reclaim || factionStake > 0) && (
+        {/* Match-level action: an abandoned, past-deadline match can be flipped to RefundMode; once
+            settled/refunded, the reclaim buttons for each market live in the strip below. */}
+        {mine?.enable ? (
           <div className="flex-none text-right">
-            {mine.reclaim ? (
-              <button
-                type="button"
-                onClick={() => onReclaim(s.matchId, mine.reclaim!.kind)}
-                disabled={busy}
-                className="rounded-sm border border-gilt px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
-              >
-                {busy
-                  ? "…"
-                  : mine.reclaim.kind === "enable"
-                    ? RECLAIM_CTA.enable
-                    : `${RECLAIM_CTA[mine.reclaim.kind]} ◈ ${mine.reclaim.amount}`}
-              </button>
-            ) : mine.claimed ? (
-              <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">Collected ✓</span>
-            ) : (
-              <div className={lost ? "opacity-60" : ""}>
-                <div className={["font-mono text-[11px] tracking-[0.06em]", backedClass].join(" ")}>
-                  Backed {backedLabel}
-                </div>
-                <div className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-mute">
-                  {lost ? "Missed" : "Wagered"}
-                </div>
-              </div>
-            )}
+            <button
+              type="button"
+              onClick={() => onEnableRefund(s.matchId)}
+              disabled={busy}
+              className="rounded-sm border border-gilt px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
+            >
+              {busy ? "…" : RECLAIM_CTA.enable}
+            </button>
           </div>
-        )}
+        ) : mine?.participated && props.length === 0 ? (
+          <div className="flex-none text-right">
+            <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">Wagered</span>
+          </div>
+        ) : null}
       </div>
 
-      {/* Reclaimable side pots on this battle (player-fate per seat + per-round 'voted out' / 'night kill', each backed correctly). */}
+      {/* Reclaimable pots on this battle — the faction verdict first, then each side market you backed. */}
       {props.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 border-t hairline pt-3">
-          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-mute">Side pots ·</span>
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-mute">Your pots ·</span>
           {props.map((p) => (
             <button
               key={p.index}
@@ -352,7 +342,7 @@ function Row({
             >
               {busy
                 ? "…"
-                : `${p.market === "ROUND_VOTED_OUT" ? `Round ${p.param} vote` : p.market === "NIGHT_KILL" ? `Night ${p.param} kill` : p.market === "DETECTIVE_CLAIM" ? `Seat ${p.param + 1} · claim` : p.market === "MAFIA_SEAT" ? "Who is the Mafia?" : `Seat ${p.param + 1} · fate`} · ${p.kind === "refund" ? "Refund" : p.kind === "return" ? "Reclaim" : "Claim"} ◈ ${p.amount}`}
+                : `${marketLabel(p)} · ${p.kind === "refund" ? "Refund" : p.kind === "return" ? "Reclaim" : "Claim"} ◈ ${p.amount}`}
             </button>
           ))}
         </div>

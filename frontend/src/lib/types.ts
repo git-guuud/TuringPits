@@ -83,28 +83,21 @@ export interface PublicTurn {
 
 // ── MafiaMarket.sol getters ──────────────────────────────────────────────────
 export type MarketState = "OPEN" | "LOCKED" | "SETTLED" | "REFUND";
-export type Side = "YES" | "NO"; // YES = "Mafia wins"
-/** Resolved outcome. YES/NO pay winners; DRAW/VOID return stakes (reclaimed via claim()). */
-export type Outcome = "YES" | "NO" | "DRAW" | "VOID";
 
 /** Snapshot of the on-chain market, read by the server from getters and pushed to clients. */
 export interface MarketSnapshot {
   readonly state: MarketState;
-  /** True only while the chain is actually in [open, close) — i.e. when _bet() is accepted. */
+  /** True only while the chain is actually in [open, close) — i.e. when a bet is accepted. */
   readonly bettingLive?: boolean;
   /**
    * Epoch ms when betting is projected to close (server estimate from remaining blocks × block
    * rate). Present only while betting is live; drives the client-side countdown.
    */
   readonly closesAt?: number;
-  /** Pools as decimal strings of 0G. */
-  readonly yesPool: string;
-  readonly noPool: string;
-  /** Set only when SETTLED, and only for YES/NO. */
-  readonly winningSide?: Side;
-  /** Set when SETTLED — the full resolution, incl. DRAW/VOID refund outcomes. */
-  readonly outcome?: Outcome;
-  /** Per-match categorical side markets (one PlayerFate per seat + one RoundVotedOut per opened round). Absent until the server reads them. */
+  /**
+   * Every market (the headline FACTION market included) is a categorical prop — the faction verdict is
+   * the FACTION prop's `state`/`winningOutcome`. Absent until the server reads the props.
+   */
   readonly props?: readonly PropSnapshot[];
 }
 
@@ -126,12 +119,15 @@ export interface MarketSnapshot {
  *   - MAFIA_SEAT      : "who is the Mafia?" A SINGLE categorical market — one outcome per seat
  *                       (numOutcomes == playerCount, param unused). Floated once at match start; stays
  *                       open until settle (resolves to the Mafia seat from the revealed roles).
+ *   - FACTION         : "which faction wins?" The headline market — a SINGLE binary market (outcome
+ *                       0 = TOWN wins, 1 = MAFIA wins, param unused). Floated once at match start; stays
+ *                       open until settle (resolves to the winning faction; a mistrial Voids → refund).
  * Mirrors MafiaMarket.getProp() / server wire `PropSnapshot`.
  */
 export interface PropSnapshot {
   readonly index: number;
-  readonly kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL" | "DETECTIVE_CLAIM" | "MAFIA_SEAT";
-  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. DETECTIVE_CLAIM: the claiming seat. MAFIA_SEAT: unused. */
+  readonly kind: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL" | "DETECTIVE_CLAIM" | "MAFIA_SEAT" | "FACTION";
+  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. DETECTIVE_CLAIM: the claiming seat. MAFIA_SEAT / FACTION: unused. */
   readonly param: number;
   readonly numOutcomes: number;
   /** Per-outcome pools (CHIP decimal strings), length == numOutcomes. */
@@ -203,7 +199,9 @@ export type WsMessage =
       seat?: number;
     }
   | { type: "reveal"; roles: Role[]; winner: Faction }
-  | { type: "settled"; outcome: Outcome; winningSide?: Side; feeBpsDraw?: number; txHash?: string; transcriptCID?: string };
+  // Match finalized on-chain. The faction verdict (and every market's payout) rides in the final `market`
+  // snapshot's props — the FACTION prop resolves to MAFIA/TOWN, or Voids on a mistrial.
+  | { type: "settled"; txHash?: string; transcriptCID?: string };
 
 /** Live connection state of the feed transport. */
 export type ConnStatus = "connecting" | "open" | "reconnecting";

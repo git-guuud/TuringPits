@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { MatchApi, ViewState } from "../../state/matchStore.js";
-import type { PropSnapshot, Side } from "../../lib/types.js";
+import type { PropSnapshot } from "../../lib/types.js";
 import { explorerTx } from "../../lib/contract.js";
 import { useCountdown } from "../../lib/useCountdown.js";
 
@@ -50,12 +50,9 @@ const PILL = {
 
 function StateBadge({ s }: { s: ViewState }) {
   const preOpen = s.market.state === "OPEN" && !s.market.bettingLive;
-  const settledText =
-    s.market.outcome === "DRAW"
-      ? "Mistrial · stakes returned"
-      : s.market.outcome === "VOID"
-        ? "No verdict backed · stakes returned"
-        : "Verdict settled on-chain";
+  // The headline verdict rides in the FACTION prop now: VOID = a mistrial / unbacked verdict (full refund).
+  const factionVoid = (s.market.props ?? []).find((p) => p.kind === "FACTION")?.state === "VOID";
+  const settledText = factionVoid ? "No verdict backed · stakes returned" : "Verdict settled on-chain";
   const map: Record<string, { text: string; cls: string }> = {
     OPEN: preOpen
       ? { text: "Opening shortly", cls: "text-cream-dim" }
@@ -75,7 +72,7 @@ function StateBadge({ s }: { s: ViewState }) {
 
 // ── one outcome of a market ─────────────────────────────────────────────────────
 interface Choice {
-  /** Stable, unique within the market. Faction: "YES"/"NO". Props: "o<outcome>". */
+  /** Stable, unique within the market — "o<outcome>" for every market (the faction market included). */
   key: string;
   /** Small label above the verdict word — the faction / bucket framing. */
   eyebrow: string;
@@ -439,7 +436,7 @@ function MarketRow({
 }
 
 export function Verdict({ api }: { api: MatchApi }) {
-  const { state: s, connect, placeBet, placePropBet, claim, claimProp, refund, refundProp } = api;
+  const { state: s, connect, placePropBet, claimProp, refundProp } = api;
   const [amount, setAmount] = useState("0.01");
   // Faucet mint kicked off from the Wagers panel (the Menu's "Get test CHIP" isn't reachable mid-match).
   // Local flag only drives the button copy; `api.getTestTokens` owns the actual tx/pending state.
@@ -467,121 +464,14 @@ export function Verdict({ api }: { api: MatchApi }) {
 
   const seatName = (seat: number) => s.personas.find((p) => p.seat === seat)?.name ?? `Seat ${seat + 1}`;
 
-  // ── faction verdict (market 0) ──
-  const factionMarket = (): BetMarket => {
-    const winSide = s.market.winningSide;
-    const outcome = s.market.outcome;
-    const myYes = parseFloat(s.stakes.yes);
-    const myNo = parseFloat(s.stakes.no);
-    const myStake = myYes + myNo;
-    const claimed = s.stakes.claimed;
-    const isWin = settled && (outcome === "YES" || outcome === "NO");
-    const isRefundOutcome = settled && (outcome === "DRAW" || outcome === "VOID");
-    const myWinStake = winSide === "YES" ? myYes : winSide === "NO" ? myNo : 0;
-    const won = isWin && myWinStake > 0 && !claimed;
-    const canClaimRefund = isRefundOutcome && myStake > 0 && !claimed;
-    const canRefundLiveness = refundMode && myStake > 0 && !claimed;
-    const canClaim = won || canClaimRefund || canRefundLiveness;
-    const total = (parseFloat(s.market.yesPool) + parseFloat(s.market.noPool)).toString();
-
-    const projected = (() => {
-      if (!won || !winSide) return null;
-      const t = parseFloat(s.market.yesPool) + parseFloat(s.market.noPool);
-      const wp = winSide === "YES" ? parseFloat(s.market.yesPool) : parseFloat(s.market.noPool);
-      return wp > 0 ? ((t * myWinStake) / wp).toFixed(4) : null;
-    })();
-    const refundAmount = (() => {
-      if (outcome === "DRAW") return (myStake * (10000 - (s.feeBpsDraw ?? 0))) / 10000;
-      if (outcome === "VOID" || refundMode) return myStake;
-      return 0;
-    })().toFixed(4);
-
-    const status = open
-      ? null
-      : preOpen
-        ? "Wagers open shortly"
-        : s.market.state === "LOCKED"
-          ? "🔒 Wagers sealed · match running"
-          : claimed && myStake > 0
-            ? isRefundOutcome || refundMode
-              ? "Stake returned ✓"
-              : "Payout claimed ✓"
-            : isRefundOutcome
-              ? outcome === "DRAW"
-                ? "Mistrial · stakes returned"
-                : "No verdict backed · stakes returned"
-              : settled
-                ? myStake > 0
-                  ? "Your wager missed the verdict"
-                  : "Settled · no wager placed"
-                : refundMode
-                  ? "Match abandoned · no wager placed"
-                  : null;
-
-    const myProjWin = existingWin(myYes, s.market.yesPool, total) + existingWin(myNo, s.market.noPool, total);
-    const pill = open
-      ? { text: "open", cls: PILL.gilt }
-      : preOpen
-        ? { text: "soon", cls: PILL.dim }
-        : s.market.state === "LOCKED"
-          ? { text: "sealed", cls: PILL.mute }
-          : canClaim
-            ? { text: "claim", cls: PILL.acquit }
-            : (isRefundOutcome || refundMode) && myStake > 0
-              ? { text: "returned", cls: PILL.giltDim }
-              : isWin && myWinStake > 0
-                ? { text: "collected", cls: PILL.acquitDim }
-                : settled && myStake > 0
-                  ? { text: "missed", cls: PILL.mute }
-                  : { text: "settled", cls: PILL.mute };
-
-    return {
-      key: "faction",
-      title: "Faction verdict",
-      question: "Will the hidden hand walk free?",
-      bettable: open,
-      hasWager: myStake > 0,
-      myStake,
-      myProjWin,
-      pill,
-      canClaim,
-      claimLabel: won ? `Claim ◈ ${projected ?? "…"}` : `Reclaim stake ◈ ${refundAmount}`,
-      doClaim: () => void (canRefundLiveness ? refund() : claim()),
-      place: (key) => void (open && !busy && placeBet(key as Side, amount)),
-      status,
-      choices: [
-        {
-          key: "YES",
-          eyebrow: "Mafia faction",
-          eyebrowClass: "text-[#d98a55]",
-          label: "ACQUITTED",
-          accent: "text-[#d98a55]",
-          bar: "bg-[#d98a55]",
-          pool: s.market.yesPool,
-          total,
-          mine: myYes,
-          winner: settled && winSide === "YES",
-        },
-        {
-          key: "NO",
-          eyebrow: "Town faction",
-          eyebrowClass: "text-acquit",
-          label: "CONVICTED",
-          accent: "text-acquit",
-          bar: "bg-acquit",
-          pool: s.market.noPool,
-          total,
-          mine: myNo,
-          winner: settled && winSide === "NO",
-        },
-      ],
-    };
-  };
-
-  // ── categorical side markets (PlayerFate per seat + the active per-round RoundVotedOut / NightKill markets) ──
+  // ── every market is a categorical prop: the headline FACTION market + PlayerFate per seat + the active
+  //    per-round RoundVotedOut / NightKill markets + the DetectiveClaim / MafiaSeat markets ──
   const aliveBySeat = new Map(s.seats.map((seat) => [seat.id, seat.alive]));
   const stakeByIdx = new Map(s.propStakes.map((ps) => [ps.index, ps]));
   const props = s.market.props ?? [];
+  // The headline faction market, VOID = a mistrial / unbacked verdict → full refund (drives the banner).
+  const factionProp = props.find((p) => p.kind === "FACTION") ?? null;
+  const factionVoid = settled && factionProp?.state === "VOID";
 
   // "Voted out" and "night kill" are each RECURRING markets — one per round. Show only the ACTIVE one of
   // each live: the highest round still open for bets (`closed` is on-chain truth, so this follows what's
@@ -615,7 +505,23 @@ export function Verdict({ api }: { api: MatchApi }) {
     let title: string;
     let question: string;
     let choices: Choice[];
-    if (prop.kind === "PLAYER_FATE") {
+    if (prop.kind === "FACTION") {
+      // The headline market — binary: outcome 1 = MAFIA wins (ACQUITTED), 0 = TOWN wins (CONVICTED).
+      title = "Faction verdict";
+      question = "Will the hidden hand walk free?";
+      choices = [
+        {
+          key: "o1", eyebrow: "Mafia faction", eyebrowClass: "text-[#d98a55]",
+          label: "ACQUITTED", accent: "text-[#d98a55]", bar: "bg-[#d98a55]",
+          pool: prop.pools[1] ?? "0", total, mine: myStakeFor(1), winner: win === 1,
+        },
+        {
+          key: "o0", eyebrow: "Town faction", eyebrowClass: "text-acquit",
+          label: "CONVICTED", accent: "text-acquit", bar: "bg-acquit",
+          pool: prop.pools[0] ?? "0", total, mine: myStakeFor(0), winner: win === 0,
+        },
+      ];
+    } else if (prop.kind === "PLAYER_FATE") {
       const name = seatName(prop.param);
       title = `${name} · fate`;
       question = `What becomes of ${name}?`;
@@ -709,34 +615,40 @@ export function Verdict({ api }: { api: MatchApi }) {
 
     const awaiting = myTotalStake > 0 ? " · awaiting settlement" : "";
     const closedText =
-      prop.kind === "ROUND_VOTED_OUT"
-        ? `the round ${prop.param} vote is in · market closed${awaiting}`
-        : prop.kind === "NIGHT_KILL"
-          ? `dawn broke on night ${prop.param} · market closed${awaiting}`
-          : prop.kind === "DETECTIVE_CLAIM"
-            ? `${seatName(prop.param)}'s claim · market closed${awaiting}`
-            : prop.kind === "MAFIA_SEAT"
-              ? `the Mafia stands unmasked · market closed${awaiting}`
-              : `${seatName(prop.param)} fell · market closed${awaiting}`;
+      prop.kind === "FACTION"
+        ? `the verdict is in · market closed${awaiting}`
+        : prop.kind === "ROUND_VOTED_OUT"
+          ? `the round ${prop.param} vote is in · market closed${awaiting}`
+          : prop.kind === "NIGHT_KILL"
+            ? `dawn broke on night ${prop.param} · market closed${awaiting}`
+            : prop.kind === "DETECTIVE_CLAIM"
+              ? `${seatName(prop.param)}'s claim · market closed${awaiting}`
+              : prop.kind === "MAFIA_SEAT"
+                ? `the Mafia stands unmasked · market closed${awaiting}`
+                : `${seatName(prop.param)} fell · market closed${awaiting}`;
     const wonStatus = isVoid
       ? "Void · stakes returned"
       : win == null
         ? "Settled"
-        : prop.kind === "ROUND_VOTED_OUT"
-          ? win === prop.numOutcomes - 1
-            ? "Hung vote · no one fell"
-            : `${seatName(win)} was voted out`
-          : prop.kind === "NIGHT_KILL"
+        : prop.kind === "FACTION"
+          ? win === 1
+            ? "The hidden hand walked · Mafia acquitted"
+            : "The Town prevailed · Mafia convicted"
+          : prop.kind === "ROUND_VOTED_OUT"
             ? win === prop.numOutcomes - 1
-              ? "A quiet night · all spared"
-              : `${seatName(win)} fell in the night`
-            : prop.kind === "DETECTIVE_CLAIM"
-              ? win === 1
-                ? `${seatName(prop.param)} was the real Detective`
-                : `${seatName(prop.param)} was bluffing`
-              : prop.kind === "MAFIA_SEAT"
-                ? `${seatName(win)} was the Mafia`
-                : `Fate · ${FATE_COPY[win]?.label ?? "settled"}`;
+              ? "Hung vote · no one fell"
+              : `${seatName(win)} was voted out`
+            : prop.kind === "NIGHT_KILL"
+              ? win === prop.numOutcomes - 1
+                ? "A quiet night · all spared"
+                : `${seatName(win)} fell in the night`
+              : prop.kind === "DETECTIVE_CLAIM"
+                ? win === 1
+                  ? `${seatName(prop.param)} was the real Detective`
+                  : `${seatName(prop.param)} was bluffing`
+                : prop.kind === "MAFIA_SEAT"
+                  ? `${seatName(win)} was the Mafia`
+                  : `Fate · ${FATE_COPY[win]?.label ?? "settled"}`;
     const status = bettable
       ? null
       : settled || refundMode
@@ -786,11 +698,12 @@ export function Verdict({ api }: { api: MatchApi }) {
     };
   };
 
-  // "Who is the Mafia?" is the marquee side market — surface it right under the faction verdict, ahead
-  // of the per-seat / per-round props (which otherwise precede it in prop-array order).
+  // Order the markets: the headline faction verdict first, then the marquee "Who is the Mafia?", then the
+  // per-seat / per-round props (which otherwise precede them in prop-array order).
+  const factionProps = liveProps.filter((p) => p.kind === "FACTION");
   const mafiaProps = liveProps.filter((p) => p.kind === "MAFIA_SEAT");
-  const otherProps = liveProps.filter((p) => p.kind !== "MAFIA_SEAT");
-  const markets: BetMarket[] = [factionMarket(), ...mafiaProps.map(propMarket), ...otherProps.map(propMarket)];
+  const otherProps = liveProps.filter((p) => p.kind !== "MAFIA_SEAT" && p.kind !== "FACTION");
+  const markets: BetMarket[] = [...factionProps, ...mafiaProps, ...otherProps].map(propMarket);
 
   // Which market is expanded. An active betting window FORCES its market open (that's the point of the
   // window — the spotlighted market is front-and-centre). Otherwise: the one that wants attention (a claim),
@@ -822,7 +735,7 @@ export function Verdict({ api }: { api: MatchApi }) {
     setAmount(String(Number(next.toFixed(3))));
   };
 
-  const isRefundOutcome = settled && (s.market.outcome === "DRAW" || s.market.outcome === "VOID");
+  const isRefundOutcome = factionVoid;
 
   // Portfolio roll-up across every market the wallet holds a position in.
   const myPositions = markets.filter((mk) => mk.myStake > 0);
@@ -894,11 +807,9 @@ export function Verdict({ api }: { api: MatchApi }) {
 
       {(isRefundOutcome || refundMode) && (
         <div className="mb-3 border-l-2 border-gilt/50 bg-gilt/[0.04] px-3 py-2.5 text-[13px] italic leading-snug text-cream-dim">
-          {s.market.outcome === "DRAW"
-            ? "The court reached no verdict — a mistrial. Every wager is returned, less a small fee."
-            : s.market.outcome === "VOID"
-              ? "A faction prevailed, but no wager backed it — so the market is void. Stakes returned in full."
-              : "The match was abandoned before settlement. Reclaim your full stake on any market you backed."}
+          {factionVoid
+            ? "No verdict settled on the faction market — a mistrial, or no wager backed the winner. Every stake is returned in full."
+            : "The match was abandoned before settlement. Reclaim your full stake on any market you backed."}
         </div>
       )}
 

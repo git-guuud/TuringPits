@@ -103,23 +103,16 @@ function sceneFor(s: ViewState): Scene {
       lamp: "day",
     };
   if (s.market.state === "SETTLED" && s.playbackComplete) {
-    const o = s.market.outcome;
-    if (o === "DRAW")
+    // The verdict rides in the FACTION prop now: VOID = a mistrial (no verdict) OR a verdict no wager
+    // backed — either way the market voids and every stake is returned in full.
+    const factionVoid = (s.market.props ?? []).find((p) => p.kind === "FACTION")?.state === "VOID";
+    if (factionVoid)
       return {
         title: "The court rises",
-        note: "no verdict could be reached",
-        name: "MISTRIAL",
-        role: "the bench is hung",
-        body: "The court could not reach a verdict — a mistrial is entered into the record. Every wager is returned, less a small fee. The court rises.",
-        lamp: "day",
-      };
-    if (o === "VOID")
-      return {
-        title: "The court rises",
-        note: "a verdict with no wager behind it",
+        note: "no verdict was carried on the market",
         name: "MARKET VOID",
-        role: "no stake backed the verdict",
-        body: "A faction prevailed — but no wager was placed on the winning side, so the market is void. Every stake is returned in full. The court rises.",
+        role: "stakes returned in full",
+        body: "No verdict was carried on the faction market — a mistrial, or a verdict with no wager behind it. Every stake is returned in full. The court rises.",
         lamp: "day",
       };
     return {
@@ -452,24 +445,26 @@ export function Court({
     }
   }, [s.reveal]);
 
-  // A win/lose cue once the market settles on-chain — keyed to the spectator's own wager on the main
-  // market. A refund (Draw/Void) or no stake gets no cue; the gavel already marked the verdict.
+  // A win/lose cue once the market settles on-chain — keyed to the spectator's own wager on the headline
+  // FACTION market. A void (full refund) or no stake gets no cue; the gavel already marked the verdict.
   const settledRef = useRef(false);
   useEffect(() => {
     const settled = s.market.state === "SETTLED" && s.playbackComplete;
     if (settled && !settledRef.current) {
       settledRef.current = true;
-      const o = s.market.outcome;
-      const yes = parseFloat(s.stakes.yes) || 0;
-      const no = parseFloat(s.stakes.no) || 0;
-      const won = (o === "YES" && yes > 0) || (o === "NO" && no > 0);
-      const lost = !won && ((o === "YES" && no > 0) || (o === "NO" && yes > 0));
-      if (won) winSting();
-      else if (lost) loseSting();
+      const faction = (s.market.props ?? []).find((p) => p.kind === "FACTION");
+      const win = faction?.state === "RESOLVED" ? faction.winningOutcome : undefined;
+      if (win != null) {
+        const mine = s.propStakes.find((ps) => ps.index === faction!.index);
+        const myWin = parseFloat(mine?.stakes[win] ?? "0") || 0;
+        const myTotal = mine ? mine.stakes.reduce((a, v) => a + parseFloat(v), 0) : 0;
+        if (myWin > 0) winSting();
+        else if (myTotal > 0) loseSting();
+      }
     } else if (!settled) {
       settledRef.current = false;
     }
-  }, [s.market.state, s.market.outcome, s.playbackComplete, s.stakes.yes, s.stakes.no]);
+  }, [s.market.state, s.market.props, s.playbackComplete, s.propStakes]);
 
   // The aggregate day-vote drama for the stage: how full the count is, who the floor is closing on,
   // and whether the plurality is already locked. Each ALIVE seat casts one vote and the seat with the

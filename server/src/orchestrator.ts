@@ -13,7 +13,7 @@ import { Contract, JsonRpcProvider, Wallet, ZeroHash, formatEther } from "ethers
 import { assignRoles, commitRoles, generateSalt } from "@turingpits/engine";
 import { toSettlementMove } from "@turingpits/players/dist/match.js";
 import { withRetry, isTransientError } from "@turingpits/players/dist/retry.js";
-import { MAFIA_MARKET_ABI, ROLE_ENUM, marketStateOf, outcomeOf, propStateOf, winningSideOf } from "./abi.js";
+import { MAFIA_MARKET_ABI, ROLE_ENUM, marketStateOf, propStateOf } from "./abi.js";
 import { toPublicState, toPublicTurn } from "./redact.js";
 import { gateTurn, newNightGate } from "./night.js";
 import { nightKillResolved, votedOutResolved } from "./round-markets.js";
@@ -54,7 +54,6 @@ export interface OrchestratorConfig {
   openLeadSeconds: number;      // lead time before betting opens (covers createMatch tx inclusion)
   moveIntervalMs: number;
   feeBps: number;
-  feeBpsDraw: number;
   // In-loop betting windows: the match PAUSES for this long and spotlights one side market so a
   // dramatic beat becomes a betting beat. Seconds; 0 disables that window (streams straight through).
   nightKillWindowSeconds: number;      // at nightfall, before the kill is revealed (freezes before dawn)
@@ -183,7 +182,6 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     matchStartBlock,
     settlementDeadlineBlock,
     feeBps: cfg.feeBps,
-    feeBpsDraw: cfg.feeBpsDraw,
   });
   // Retry "open in past": if the chain out-ran our open block during tx inclusion, recompute
   // against the live head with a doubled margin and try again.
@@ -224,10 +222,19 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   // path even if this round is abandoned after bets are placed.
   cfg.onMatchCreated?.(matchId, settlementDeadlineBlock);
 
+  // Float the headline "which faction wins?" market once, at match start, before the first props
+  // snapshot below — it's the match's CORE market (0=TOWN, 1=MAFIA; resolves from the verified run,
+  // mistrial → Void), so unlike the side markets a failure to open it aborts the round (the retry layer
+  // covers transient RPC hiccups). It isn't seeded by createMatch — every market is an on-demand prop.
+  await rpc("openFactionMarket", async () => {
+    const tx = await market.getFunction("openFactionMarket")(matchId);
+    return tx.wait();
+  });
+  console.log(`[orch] 'which faction wins?' market opened on-chain matchId=${matchId}`);
+
   // Float the single "Who is the Mafia?" market once, at match start, so it's bettable for the whole
   // match (one outcome per seat; resolves to the Mafia seat from the revealed roles at settle()). Unlike
-  // the round markets it isn't seeded by createMatch — the host opens it here, before the first props
-  // snapshot below, so spectators always see it. Non-fatal: a miss just leaves this one market absent.
+  // the faction market this is a side market — non-fatal: a miss just leaves this one market absent.
   try {
     await rpc("openMafiaSeatMarket", async () => {
       const tx = await market.getFunction("openMafiaSeatMarket")(matchId);
@@ -264,9 +271,10 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   // append a fresh market per later round (so the two recurring kinds interleave), so the count GROWS
   // during the match: read propCount each pass and address markets by their (kind, param), never a fixed
   // index. The on-chain `kind` byte is the label authority (0 PlayerFate / 1 RoundVotedOut / 2 NightKill /
-  // 3 DetectiveClaim). DetectiveClaim is floated on demand (openDetectiveClaim) at the tail on the first
-  // public claim, so it never collides with the PlayerFate propIdx==seat freeze in closeFallenProps.
-  const PROP_KIND = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL", 3: "DETECTIVE_CLAIM", 4: "MAFIA_SEAT" } as const;
+  // 3 DetectiveClaim / 4 MafiaSeat / 5 Faction). The single on-demand markets (DetectiveClaim, MafiaSeat,
+  // Faction) are floated at the tail — none collide with the PlayerFate propIdx==seat freeze in
+  // closeFallenProps.
+  const PROP_KIND = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL", 3: "DETECTIVE_CLAIM", 4: "MAFIA_SEAT", 5: "FACTION" } as const;
   const readProps = async (): Promise<PropSnapshot[]> => {
     const count = Number(await rpc("propCount", () => market.getFunction("propCount")(matchId)));
     return Promise.all(
@@ -275,7 +283,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
           const state = propStateOf(Number(pr.state));
           return {
             index: i,
-            kind: PROP_KIND[Number(pr.kind) as 0 | 1 | 2 | 3 | 4] ?? "PLAYER_FATE",
+            kind: PROP_KIND[Number(pr.kind) as 0 | 1 | 2 | 3 | 4 | 5] ?? "PLAYER_FATE",
             param: Number(pr.param),
             numOutcomes: Number(pr.numOutcomes),
             pools: (pr.pools as bigint[]).map((p) => formatEther(p)),
@@ -288,29 +296,25 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     );
   };
 
+  // Read the match's lifecycle state + every market's per-outcome pools. There is no bespoke faction pool
+  // anymore — the faction verdict is the FACTION prop inside `props` (state/winningOutcome), like any market.
   const readPools = async () => {
     const [m, props] = await Promise.all([
       rpc("readPools", () => market.getFunction("matches")(matchId)),
       readProps(),
     ]);
-    return {
-      state: marketStateOf(Number(m.state)),
-      yesPool: formatEther(m.poolYes as bigint),
-      noPool: formatEther(m.poolNo as bigint),
-      outcome: Number(m.outcome),
-      props,
-    };
+    return { state: marketStateOf(Number(m.state)), props };
   };
 
   const p0 = await readPools();
-  hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: false, yesPool: p0.yesPool, noPool: p0.noPool, props: p0.props } });
+  hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: false, props: p0.props } });
 
   // 5a. Pre-open: the chain has NOT yet reached bettingOpenBlock, so bets would revert
   //     "betting not started". Hold the UI in a non-clickable pre-open state until it does.
   console.log(`[orch] sealing — waiting for chain to reach open block ${bettingOpenBlock}`);
   while ((await head()) < bettingOpenBlock) {
     const p = await readPools();
-    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: false, yesPool: p.yesPool, noPool: p.noPool, props: p.props } });
+    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: false, props: p.props } });
     await sleep(3000);
   }
 
@@ -320,7 +324,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   console.log(`[orch] betting LIVE — open until settled`);
   {
     const p = await readPools();
-    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, yesPool: p.yesPool, noPool: p.noPool, props: p.props } });
+    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, props: p.props } });
   }
 
   // Keep pushing live pool sizes (still OPEN) on a background tick while the match plays, so bets
@@ -329,7 +333,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     void (async () => {
       try {
         const p = await readPools();
-        hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, yesPool: p.yesPool, noPool: p.noPool, props: p.props } });
+        hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, props: p.props } });
       } catch {
         /* transient RPC read; next tick retries */
       }
@@ -369,7 +373,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   };
   const pushPools = async (): Promise<void> => {
     const p = await readPools();
-    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, yesPool: p.yesPool, noPool: p.noPool, props: p.props } });
+    hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, props: p.props } });
   };
 
   // PlayerFate: freeze a fallen seat's market the moment its death is public (propIdx == seat). Once a
@@ -654,24 +658,21 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     return settleTx.wait();
   });
 
-  // 10. Push final market + settled. Every resolution is announced — including DRAW (mistrial,
-  //     stakes returned less a small fee) and VOID (a faction won but nobody backed it → full
-  //     refund) — so the UI can guide bettors to reclaim their stake via claim().
+  // 10. Push the final market snapshot + a settled marker. Every market's resolution — the FACTION
+  //     verdict (RESOLVED to TOWN/MAFIA, or VOID on a mistrial / an unbacked winner → full refund) and
+  //     every side market — rides in the snapshot's props, so the UI derives the verdict from there and
+  //     guides bettors to reclaim via claimProp/refundProp.
   const pf = await readPools();
-  const side = winningSideOf(pf.outcome);
-  const outcome = outcomeOf(pf.outcome);
-  hub.broadcast({ type: "market", market: { state: "SETTLED", yesPool: pf.yesPool, noPool: pf.noPool, winningSide: side, outcome, props: pf.props } });
-  if (outcome) {
-    hub.broadcast({
-      type: "settled",
-      outcome,
-      winningSide: side,
-      feeBpsDraw: cfg.feeBpsDraw,
-      txHash: settleRcpt?.hash,
-      transcriptCID: transcriptCID === ZeroHash ? undefined : transcriptCID,
-    });
-  }
-  console.log(`[orch] settled matchId=${matchId} outcome=${pf.outcome} side=${side} tx=${settleRcpt?.hash}`);
+  const faction = pf.props.find((p) => p.kind === "FACTION");
+  hub.broadcast({ type: "market", market: { state: "SETTLED", props: pf.props } });
+  hub.broadcast({
+    type: "settled",
+    txHash: settleRcpt?.hash,
+    transcriptCID: transcriptCID === ZeroHash ? undefined : transcriptCID,
+  });
+  const verdict = faction?.state === "VOID" ? "VOID(mistrial/unbacked)"
+    : faction?.winningOutcome === 1 ? "MAFIA" : faction?.winningOutcome === 0 ? "TOWN" : "?";
+  console.log(`[orch] settled matchId=${matchId} faction=${verdict} tx=${settleRcpt?.hash}`);
 }
 
 /**
@@ -716,8 +717,14 @@ export async function sweepAbandonedMatches(
       if (head <= deadline) continue;
 
       // Past deadline and never settled. If it holds no bets there is nothing to protect — drop it
-      // without spending gas. Otherwise flip it so stakes become refundable right now.
-      const hasBets = (m.poolYes as bigint) > 0n || (m.poolNo as bigint) > 0n;
+      // without spending gas. Otherwise flip it so stakes become refundable right now. Bets now live in
+      // the per-market props (there's no match-level pool), so scan them for any stake.
+      const propCount = Number(await market.getFunction("propCount")(matchId));
+      let hasBets = false;
+      for (let i = 0; i < propCount && !hasBets; i++) {
+        const pr = await market.getFunction("getProp")(matchId, i);
+        if ((pr.pools as bigint[]).some((p) => p > 0n)) hasBets = true;
+      }
       if (!hasBets) {
         pending.delete(matchId);
         continue;
@@ -725,7 +732,7 @@ export async function sweepAbandonedMatches(
       const tx = await market.getFunction("enterRefundMode")(matchId);
       await tx.wait();
       pending.delete(matchId);
-      console.log(`[orch] abandoned matchId=${matchId} past deadline → RefundMode; bettors can refund()`);
+      console.log(`[orch] abandoned matchId=${matchId} past deadline → RefundMode; bettors can refundProp()`);
     } catch (e) {
       // Leave it in `pending` so a later sweep retries; refund stays available on-chain regardless.
       console.warn(`[orch] sweep matchId=${matchId} failed:`, (e as Error).message);

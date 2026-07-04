@@ -18,36 +18,24 @@ import {
   readMatchSummary,
   readNextMatchId,
   readPropPositions,
-  readStakesPublic,
   type MatchSummary,
-  type PropPosition,
 } from "../lib/contract.js";
+import { propReclaimsOf, type PropReclaim } from "../lib/reclaims.js";
 
-export type ReclaimKind = "win" | "return" | "refund" | "enable";
-
-/** A reclaimable side pot (PlayerFate, RoundVotedOut, or NightKill) the viewer holds on a past battle. */
-export interface PropReclaim {
-  index: number;
-  /** PLAYER_FATE: the seat. ROUND_VOTED_OUT / NIGHT_KILL: the 1-based round. DETECTIVE_CLAIM: the claiming seat. MAFIA_SEAT: unused. (for the label) */
-  param: number;
-  /** Which side market this pot is — drives the History label ("seat N · fate" / "round R vote" / "night R kill" / "seat N · claim" / "who is the mafia?"). */
-  market: "PLAYER_FATE" | "ROUND_VOTED_OUT" | "NIGHT_KILL" | "DETECTIVE_CLAIM" | "MAFIA_SEAT";
-  /** side markets never need `enable` — they settle/refund with the parent match. */
-  kind: "win" | "return" | "refund";
-  amount: string;
-}
+// Reclaim types now live in ../lib/reclaims (shared with the live winnings tray); re-exported so the
+// History screen's existing imports keep resolving.
+export type { PropReclaim, ReclaimKind } from "../lib/reclaims.js";
 
 export interface HistoryRow {
   summary: MatchSummary;
-  /** Present when the connected wallet wagered on this battle's faction-win OR any survival market. */
+  /** Present when the connected wallet wagered on ANY of this battle's markets (faction + side). */
   mine?: {
-    stakeYes: number;
-    stakeNo: number;
-    claimed: boolean;
-    /** Set when there's still something to collect on the faction market; `enable` flips to RefundMode first. */
-    reclaim?: { kind: ReclaimKind; amount: string };
-    /** Reclaimable side pots (player-fate + per-round voted-out). Empty/absent when none are outstanding. */
+    /** The viewer staked something here — drives the "My wagers" lens even when nothing's outstanding. */
+    participated: boolean;
+    /** Reclaimable pots (faction verdict first, then the side markets). Absent when none are outstanding. */
     props?: PropReclaim[];
+    /** Set when the match is abandoned past its deadline: flip it to RefundMode (then reclaim each market). */
+    enable?: { amount: string };
   };
 }
 
@@ -83,31 +71,27 @@ export function useHistory(account: string | null, refreshSignal: unknown): { ro
     setRows(ids.map((id) => cache.get(id)).filter((r): r is CachedRow => !!r));
   }, []);
 
-  // The viewer's position on one battle — stake, claim status, and any reclaimable side pots. This is
-  // the expensive read (stakes + a fan-out over every side-market prop), and it's *connected-only*.
-  // It's kept separate from the summary so that when it fails (RPC rate-limit on the prop fan-out), the
-  // battle still renders — only the reclaim annotation is deferred to the next scan.
+  // The viewer's position on one battle: what they wagered across EVERY market (faction + side) and
+  // what's still reclaimable. One fan-out over the props (which skips zero-pool outcomes) now covers
+  // the headline faction market too. Connected-only, and kept separate from the summary so that when it
+  // fails (RPC rate-limit on the prop fan-out) the battle still renders — only the reclaim annotation is
+  // deferred to the next scan.
   const readMine = useCallback(
     async (summary: MatchSummary, head: number): Promise<HistoryRow["mine"]> => {
       if (!account) return undefined;
       const id = summary.matchId;
-      const st = await readStakesPublic(MARKET_ADDRESS, id, account);
-      const yes = parseFloat(st.yes);
-      const no = parseFloat(st.no);
-      const stake = yes + no;
-      // Survival side pots only become claimable once the match is terminal; read them only then to
-      // bound the per-row RPC fan-out.
-      const props = isTerminal(summary)
-        ? propReclaimsOf(await readPropPositions(MARKET_ADDRESS, id, account), summary.state)
-        : [];
-      const hasProps = props.length > 0;
-      if (stake <= 0 && !hasProps) return undefined;
+      const positions = await readPropPositions(MARKET_ADDRESS, id, account);
+      const participated = positions.some((p) => p.stakes.some((v) => parseFloat(v) > 0));
+      if (!participated) return undefined;
+      const props = propReclaimsOf(positions, summary.state);
+      // Abandoned (Created/Locked, past its deadline, never settled): offer the permissionless flip to
+      // RefundMode so the viewer can then reclaim each market they backed. Match-level, not per-market.
+      const abandoned = (summary.rawState === 1 || summary.rawState === 2) && head > 0 && head > summary.settlementDeadlineBlock;
+      const staked = positions.reduce((a, p) => a + p.stakes.reduce((s, v) => s + parseFloat(v), 0), 0);
       return {
-        stakeYes: yes,
-        stakeNo: no,
-        claimed: st.claimed,
-        reclaim: stake > 0 ? reclaimOf(summary, yes, no, st.claimed, head) : undefined,
-        props: hasProps ? props : undefined,
+        participated,
+        props: props.length ? props : undefined,
+        enable: abandoned && staked > 0 ? { amount: staked.toFixed(4) } : undefined,
       };
     },
     [account],
@@ -242,64 +226,3 @@ async function withRetry<T>(fn: () => Promise<T>, tries = 2, delayMs = 400): Pro
   throw last;
 }
 
-/** What the viewer can still collect on a battle they wagered on, or undefined if nothing. */
-function reclaimOf(
-  s: MatchSummary,
-  yes: number,
-  no: number,
-  claimed: boolean,
-  head: number,
-): { kind: ReclaimKind; amount: string } | undefined {
-  if (claimed) return undefined;
-  const stake = yes + no;
-  if (stake <= 0) return undefined;
-
-  if (s.state === "REFUND") return { kind: "refund", amount: stake.toFixed(4) };
-  if (s.state === "SETTLED") {
-    if (s.outcome === "YES" || s.outcome === "NO") {
-      const win = s.outcome === "YES" ? yes : no;
-      if (win <= 0) return undefined; // wager lost
-      const wp = parseFloat(s.winningPool);
-      const np = parseFloat(s.netPot);
-      return { kind: "win", amount: (wp > 0 ? (np * win) / wp : 0).toFixed(4) };
-    }
-    if (s.outcome === "DRAW") return { kind: "return", amount: ((stake * (10000 - s.feeBpsDraw)) / 10000).toFixed(4) };
-    if (s.outcome === "VOID") return { kind: "return", amount: stake.toFixed(4) };
-    return undefined;
-  }
-  // Created/Locked, past its deadline, never settled → abandoned; offer the permissionless flip.
-  if ((s.rawState === 1 || s.rawState === 2) && head > 0 && head > s.settlementDeadlineBlock) {
-    return { kind: "enable", amount: stake.toFixed(4) };
-  }
-  return undefined;
-}
-
-/**
- * Outstanding categorical side pots for the viewer on a terminal match. A SETTLED prop pays the winning
- * outcome's backers pro-rata, returns the stake on Void, and a REFUND match returns the stake in full.
- * Already-claimed or losing positions are omitted.
- */
-function propReclaimsOf(positions: PropPosition[], state: MatchSummary["state"]): PropReclaim[] {
-  const out: PropReclaim[] = [];
-  for (const p of positions) {
-    if (p.claimed) continue;
-    const total = p.stakes.reduce((s, v) => s + parseFloat(v), 0);
-    if (total <= 0) continue;
-
-    if (state === "REFUND") {
-      out.push({ index: p.index, param: p.param, market: p.kind, kind: "refund", amount: total.toFixed(4) });
-      continue;
-    }
-    // SETTLED
-    if (p.state === "RESOLVED") {
-      const win = p.winningOutcome != null ? parseFloat(p.stakes[p.winningOutcome] ?? "0") : 0;
-      if (win <= 0) continue; // backed a losing outcome — nothing to collect
-      const wp = parseFloat(p.winningPool);
-      const np = parseFloat(p.netPot);
-      out.push({ index: p.index, param: p.param, market: p.kind, kind: "win", amount: (wp > 0 ? (np * win) / wp : 0).toFixed(4) });
-    } else if (p.state === "VOID") {
-      out.push({ index: p.index, param: p.param, market: p.kind, kind: "return", amount: total.toFixed(4) });
-    }
-  }
-  return out;
-}

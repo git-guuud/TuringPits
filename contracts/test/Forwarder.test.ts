@@ -2,10 +2,12 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { mineUpTo } from "@nomicfoundation/hardhat-network-helpers";
 import { MaxUint256, type Wallet, type Contract } from "ethers";
-import { defaultSchedule, createParams, deployMarket, buildSettlement } from "./helpers/market";
+import { defaultSchedule, createParams, deployMarket, buildSettlement, openFaction, FACTION_OUT } from "./helpers/market";
 
-const SEED = "0x" + "ab".repeat(32); // buildSettlement(SEED, 5) → Mafia (YES) wins
+const SEED = "0x" + "ab".repeat(32); // buildSettlement(SEED, 5) → Mafia wins
 const CID = "0x" + "cd".repeat(32);
+const MAFIA = FACTION_OUT.MAFIA; // Faction outcome 1 — Mafia walks
+const TOWN = FACTION_OUT.TOWN;   // Faction outcome 0 — Town prevails
 
 /**
  * EIP-2771 gas-relayer tests. The "user" is a fresh random wallet with ZERO native 0G — it never
@@ -89,7 +91,7 @@ describe("Forwarder — EIP-2771 gas relayer", () => {
   });
 
   it("a fully-relayed user (0 native 0G) can faucet → approve → bet, with the stake under the USER", async () => {
-    const { forwarder, token, market, relayer, user } = await setup();
+    const { owner, forwarder, token, market, relayer, user } = await setup();
     const tokenAddr = await token.getAddress();
     const marketAddr = await market.getAddress();
 
@@ -97,50 +99,92 @@ describe("Forwarder — EIP-2771 gas relayer", () => {
     const teeSigner = ethers.Wallet.createRandom();
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: "0x" + "aa".repeat(32), teeSigner: teeSigner.address, nonce: "relay-1", playerCount: 5, schedule: sched }));
+    const faction = await openFaction(market, owner);
     await mineUpTo(sched.bettingOpenBlock);
 
     // User does EVERYTHING via the relayer — three signed requests, zero user gas.
     await relay(forwarder, relayer, user, tokenAddr, token.interface.encodeFunctionData("faucet", []));
     await relay(forwarder, relayer, user, tokenAddr, token.interface.encodeFunctionData("approve", [marketAddr, MaxUint256]));
-    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("betYes", [0, ethers.parseEther("2")]));
+    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("betProp", [0, faction, MAFIA, ethers.parseEther("2")]));
 
-    expect(await market.stakeYes(0, user.address)).to.equal(ethers.parseEther("2"));
-    expect(await market.stakeYes(0, relayer.address)).to.equal(0n);
-    expect((await market.matches(0)).poolYes).to.equal(ethers.parseEther("2"));
+    expect(await market.propStake(0, faction, MAFIA, user.address)).to.equal(ethers.parseEther("2"));
+    expect(await market.propStake(0, faction, MAFIA, relayer.address)).to.equal(0n);
+    expect((await market.getProp(0, faction)).pools[MAFIA]).to.equal(ethers.parseEther("2"));
     // The user never paid gas; the relayer wallet did.
     expect(await ethers.provider.getBalance(user.address)).to.equal(0n);
   });
 
-  it("a relayed claim() pays the USER their winnings from a settled match", async () => {
-    const { forwarder, token, market, relayer, bob, user } = await setup();
+  it("a relayed claimProp() pays the USER their winnings from a settled match", async () => {
+    const { owner, forwarder, token, market, relayer, bob, user } = await setup();
     const tokenAddr = await token.getAddress();
     const marketAddr = await market.getAddress();
 
     const teeSigner = ethers.Wallet.createRandom();
     const fx = await buildSettlement(SEED, 5, "relay-claim", teeSigner);
-    expect(fx.mafiaWins).to.equal(true); // sanity: YES is the winning side for this seed
+    expect(fx.mafiaWins).to.equal(true); // sanity: MAFIA is the winning faction for this seed
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "relay-claim", playerCount: 5, schedule: sched }));
+    const faction = await openFaction(market, owner);
     await mineUpTo(sched.bettingOpenBlock);
 
-    // User bets the winning side via relay; bob seeds the losing pool directly (so there's a pot).
+    // User bets the winning faction via relay; bob seeds the losing pool directly (so there's a pot).
     await relay(forwarder, relayer, user, tokenAddr, token.interface.encodeFunctionData("faucet", []));
     await relay(forwarder, relayer, user, tokenAddr, token.interface.encodeFunctionData("approve", [marketAddr, MaxUint256]));
-    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("betYes", [0, ethers.parseEther("1")]));
+    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("betProp", [0, faction, MAFIA, ethers.parseEther("1")]));
     await token.connect(bob).faucet();
     await token.connect(bob).approve(marketAddr, MaxUint256);
-    await market.connect(bob).betNo(0, ethers.parseEther("3"));
+    await market.connect(bob).betProp(0, faction, TOWN, ethers.parseEther("3"));
 
     await market.settle(0, fx.moves, fx.roles, fx.salt, CID);
-    expect((await market.matches(0)).outcome).to.equal(1); // Yes
+    expect((await market.getProp(0, faction)).winningOutcome).to.equal(MAFIA);
 
     const before = await token.balanceOf(user.address);
-    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("claim", [0]));
+    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("claimProp", [0, faction]));
     const after = await token.balanceOf(user.address);
-    // gross 4 CHIP − 2% fee = 3.92, winning pool = 1 → full 3.92 to the lone YES backer.
+    // gross 4 CHIP − 2% fee = 3.92, winning pool = 1 → full 3.92 to the lone MAFIA backer.
     expect(after - before).to.equal(ethers.parseEther("3.92"));
-    expect(await market.claimed(0, user.address)).to.equal(true);
+    expect(await market.propClaimed(0, faction, user.address)).to.equal(true);
     expect(await ethers.provider.getBalance(user.address)).to.equal(0n); // still never paid gas
+  });
+
+  it("a relayed batchClaim() pays the USER every winning market's payout in one gasless tx", async () => {
+    const { owner, forwarder, token, market, relayer, bob, user } = await setup();
+    const tokenAddr = await token.getAddress();
+    const marketAddr = await market.getAddress();
+
+    const teeSigner = ethers.Wallet.createRandom();
+    const fx = await buildSettlement(SEED, 5, "relay-batch", teeSigner);
+    const sched = await defaultSchedule(ethers.provider);
+    await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "relay-batch", playerCount: 5, schedule: sched }));
+    const faction = await openFaction(market, owner);
+    await mineUpTo(sched.bettingOpenBlock);
+
+    const winOut = fx.mafiaWins ? MAFIA : TOWN;
+    const survivorSeat = fx.alive.findIndex((a) => a === true);
+    expect(survivorSeat).to.be.gte(0);
+
+    // User (0 native 0G) bets the winning faction + a surviving seat's PlayerFate (outcome 0) via relay;
+    // bob seeds the losing faction pool so there's a real pot.
+    await relay(forwarder, relayer, user, tokenAddr, token.interface.encodeFunctionData("faucet", []));
+    await relay(forwarder, relayer, user, tokenAddr, token.interface.encodeFunctionData("approve", [marketAddr, MaxUint256]));
+    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("betProp", [0, faction, winOut, ethers.parseEther("1")]));
+    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("betProp", [0, survivorSeat, 0, ethers.parseEther("1")]));
+    await token.connect(bob).faucet();
+    await token.connect(bob).approve(marketAddr, MaxUint256);
+    await market.connect(bob).betProp(0, faction, winOut === MAFIA ? TOWN : MAFIA, ethers.parseEther("3"));
+
+    await market.settle(0, fx.moves, fx.roles, fx.salt, CID);
+    const pf = await market.getProp(0, faction);
+    const ps = await market.getProp(0, survivorSeat);
+    const one = ethers.parseEther("1");
+    const expected = (BigInt(pf.netPot) * one) / BigInt(pf.winningPool) + (BigInt(ps.netPot) * one) / BigInt(ps.winningPool);
+
+    const before = await token.balanceOf(user.address);
+    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("batchClaim", [0, [faction, survivorSeat]]));
+    expect((await token.balanceOf(user.address)) - before).to.equal(expected);
+    expect(await market.propClaimed(0, faction, user.address)).to.equal(true);
+    expect(await market.propClaimed(0, survivorSeat, user.address)).to.equal(true);
+    expect(await ethers.provider.getBalance(user.address)).to.equal(0n); // never paid gas
   });
 
   it("rejects a replayed request (nonce already used)", async () => {
@@ -180,8 +224,8 @@ describe("Forwarder — EIP-2771 gas relayer", () => {
 
   it("bubbles up the inner call's revert reason", async () => {
     const { forwarder, market, relayer, user } = await setup();
-    // betYes on a non-existent match reverts "not open" inside the market — the forwarder must surface it.
-    const data = market.interface.encodeFunctionData("betYes", [999, ethers.parseEther("1")]);
+    // betProp on a non-existent match reverts "not open" inside the market — the forwarder must surface it.
+    const data = market.interface.encodeFunctionData("betProp", [999, 0, 0, ethers.parseEther("1")]);
     await expect(relay(forwarder, relayer, user, await market.getAddress(), data)).to.be.revertedWith("not open");
   });
 
