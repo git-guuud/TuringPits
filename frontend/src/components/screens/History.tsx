@@ -3,6 +3,7 @@ import type { MatchApi } from "../../state/matchStore.js";
 import { useHistory, type HistoryRow, type PropReclaim, type ReclaimKind } from "../../state/useHistory.js";
 import { navigate } from "../../lib/useRoute.js";
 import { betTokenAddress, explorerAddress, explorerToken, explorerTx, MARKET_ADDRESS } from "../../lib/contract.js";
+import { useStorageLink } from "../../lib/useStorageLink.js";
 import type { MatchSummary } from "../../lib/contract.js";
 
 /** The verdict as the record phrases it (from the FACTION prop; mirrors the Verdict panel's framing). */
@@ -273,6 +274,25 @@ export function History({ api }: { api: MatchApi }) {
   );
 }
 
+/** A bytes32 root is "empty" when unset (all-zero) — the signal that storage was off for this match. */
+const isZeroHash = (h?: string) => !h || /^0x0+$/.test(h);
+const shortHash = (h: string) => (h.length > 12 ? `${h.slice(0, 6)}…${h.slice(-4)}` : h);
+
+/** A clickable 0G-Storage evidence deep-link (StorageScan file page), sized for a History row. */
+function EvidenceRef({ href, label, root }: { href: string; label: string; root: string }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      title={root}
+      className="inline-flex items-center gap-1 text-gilt-soft transition-colors hover:text-gilt"
+    >
+      {label} <span className="text-mute">{shortHash(root)}</span> <span aria-hidden>↗</span>
+    </a>
+  );
+}
+
 /** The label for a reclaimable pot chip — the market it belongs to. */
 function marketLabel(p: PropReclaim): string {
   switch (p.market) {
@@ -302,6 +322,14 @@ function Row({
   const v = verdictOf(s);
   const pot = parseFloat(s.pot).toFixed(2);
   const props = mine?.props ?? [];
+  // 0G Storage evidence (verifiable off-chain via StorageScan). Each root is committed in the on-chain
+  // Match struct; a ZeroHash means the host settled with storage disabled, so we render nothing.
+  const personaRoot = !isZeroHash(s.personaPoolRoot) ? s.personaPoolRoot! : null;
+  const transcriptRoot = !isZeroHash(s.transcriptCID) ? s.transcriptCID! : null;
+  const hasEvidence = personaRoot || transcriptRoot;
+  // Resolved evidence deep links (indexer file-info immediately, StorageScan page once resolved).
+  const transcriptLink = useStorageLink(transcriptRoot ?? "");
+  const personaLink = useStorageLink(personaRoot ?? "");
   // A REFUND battle reclaims via batchRefund; a settled one via batchClaim (pays wins + Void returns).
   const isRefund = s.state === "REFUND";
   const propsTotal = props.reduce((a, p) => a + parseFloat(p.amount), 0);
@@ -319,6 +347,13 @@ function Row({
           <div className="mt-0.5 font-mono text-[11px] tracking-[0.06em] text-mute">
             {s.playerCount} seats · pot ◈ {pot}
           </div>
+          {hasEvidence && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] tracking-[0.06em]">
+              <span className="uppercase tracking-[0.12em] text-mute-2">0G evidence ·</span>
+              {transcriptRoot && <EvidenceRef href={transcriptLink} label="transcript" root={transcriptRoot} />}
+              {personaRoot && <EvidenceRef href={personaLink} label="personas" root={personaRoot} />}
+            </div>
+          )}
         </div>
 
         {/* Match-level action. Abandoned + past deadline → flip to RefundMode first. Otherwise a SINGLE

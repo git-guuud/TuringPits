@@ -25,9 +25,14 @@ export const GALILEO = {
   name: "0G Galileo Testnet",
   currency: { name: "0G", symbol: "0G", decimals: 18 },
   explorerUrl: "https://chainscan-galileo.0g.ai",
-  // 0G Storage explorer (StorageScan) — file lookup by content root (the bytes32 CID committed
-  // on-chain). Used to surface the transcript / persona-pool evidence as verifiable links.
+  // 0G Storage explorer (StorageScan). Its human file page is keyed by upload tx-sequence, not by the
+  // merkle root we commit on-chain — so a root is resolved to its sequence via the Open API (see
+  // resolveStorageScanUrl) before deep-linking. Used to surface the transcript / persona-pool evidence.
   storageScanUrl: "https://storagescan-galileo.0g.ai",
+  // Turbo storage indexer. Its /file/info/<root> endpoint IS addressed by merkle root and returns the
+  // stored-and-finalized proof directly — the always-valid evidence link + fallback when the pretty
+  // StorageScan page can't be resolved (e.g. the upload isn't indexed yet).
+  storageIndexerUrl: "https://indexer-storage-testnet-turbo.0g.ai",
   faucetUrl: "https://faucet.0g.ai",
 };
 
@@ -47,12 +52,35 @@ export function explorerToken(address: string): string {
 }
 
 /**
- * 0G Storage (StorageScan) link for a stored file by its content root — the bytes32 `cid` we commit
- * on-chain for the match transcript and the persona pool. This is the verifiable-evidence deep link
- * (StorageScan's own file-detail route).
+ * Direct, always-valid 0G Storage evidence link: the Turbo indexer's file-info endpoint, addressed by
+ * the exact merkle `root` committed on-chain. Returns `{ tx: { seq, size, ... }, finalized }` JSON —
+ * proof the bytes are stored under this root. Used as the immediate link and the fallback when the
+ * prettier StorageScan page can't be resolved.
  */
-export function storageScanFile(cid: string): string {
-  return `${GALILEO.storageScanUrl}/files/info?cid=${cid}`;
+export function storageFileInfoUrl(root: string): string {
+  return `${GALILEO.storageIndexerUrl}/file/info/${root}`;
+}
+
+/**
+ * Resolve a stored merkle `root` to its human-readable StorageScan file page. StorageScan keys pages by
+ * the upload's tx-sequence (`/submission/<seq>`), NOT by root, so we look the root up through its Open
+ * API (`/api/txs?rootHash=…`, CORS-open) and build the deep link. Returns null when the upload isn't
+ * indexed yet (the caller keeps the direct indexer link). Cached per root so History's many rows dedupe.
+ */
+const storageScanCache = new Map<string, Promise<string | null>>();
+export function resolveStorageScanUrl(root: string): Promise<string | null> {
+  let p = storageScanCache.get(root);
+  if (!p) {
+    p = fetch(`${GALILEO.storageScanUrl}/api/txs?rootHash=${root}`)
+      .then((r) => (r.ok ? (r.json() as Promise<{ data?: { list?: { txSeq?: number }[] } }>) : null))
+      .then((j) => {
+        const seq = j?.data?.list?.[0]?.txSeq;
+        return typeof seq === "number" ? `${GALILEO.storageScanUrl}/submission/${seq}` : null;
+      })
+      .catch(() => null);
+    storageScanCache.set(root, p);
+  }
+  return p;
 }
 
 /**
@@ -825,6 +853,10 @@ export interface MatchSummary extends MarketRead {
   factionWinner?: number;
   /** Total staked on the FACTION market (CHIP decimal string) — the battle's headline pot. */
   pot: string;
+  /** 0G Storage content root of the persona pool (evidence). ZeroHash when storage is off. */
+  personaPoolRoot?: string;
+  /** 0G Storage content root of the full attested transcript (evidence). ZeroHash until settled with storage on. */
+  transcriptCID?: string;
 }
 
 /**
@@ -863,5 +895,9 @@ export async function readMatchSummary(matchId: number, address = MARKET_ADDRESS
     factionState: faction.state,
     factionWinner: faction.winner,
     pot: faction.pot,
+    // Both roots ride in the Match struct already read above — no extra call. Persona pool is set at
+    // createMatch, transcript at settle; both are ZeroHash when the host runs with storage disabled.
+    personaPoolRoot: m.personaPoolRoot as string,
+    transcriptCID: m.transcriptCID as string,
   };
 }

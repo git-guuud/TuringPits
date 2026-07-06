@@ -7,8 +7,8 @@ import {
   explorerToken,
   explorerTx,
   MARKET_ADDRESS,
-  storageScanFile,
 } from "../../lib/contract.js";
+import { useStorageLink } from "../../lib/useStorageLink.js";
 
 function Line({ done, children }: { done: boolean; children: React.ReactNode }) {
   return (
@@ -64,6 +64,10 @@ export function Record({ s, onClose }: { s: ViewState; onClose: () => void }) {
     };
   }, [marketAddr]);
 
+  // Verifiable-evidence deep links, resolved from each committed root (never a dead 404 — see the hook).
+  const personaLink = useStorageLink(personaRoot ?? "");
+  const transcriptLink = useStorageLink(transcriptRoot ?? "");
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm"
@@ -114,12 +118,12 @@ export function Record({ s, onClose }: { s: ViewState; onClose: () => void }) {
           <span className="font-mono text-[21px] text-mute">
             {personaRoot && (
               <>
-                {" "}· personas <Ref href={storageScanFile(personaRoot)}>{short(personaRoot)}</Ref>
+                {" "}· personas <Ref href={personaLink}>{short(personaRoot)}</Ref>
               </>
             )}
             {transcriptRoot && (
               <>
-                {" "}· transcript <Ref href={storageScanFile(transcriptRoot)}>{short(transcriptRoot)}</Ref>
+                {" "}· transcript <Ref href={transcriptLink}>{short(transcriptRoot)}</Ref>
               </>
             )}
           </span>
