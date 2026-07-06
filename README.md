@@ -27,7 +27,7 @@ It feels like a Web2 live stream; it settles like a trustless contract.
   ┌─────────────────────┐      per-turn       │   settle(moves, sigs, role-reveal)
   │  MafiaMarket        │◄─── TEE-attested ───┤
   │  (0G Chain)         │      decision       ▼
-  │  • parimutuel YES/NO│            ┌───────────────────┐    pre: personas
+  │  • parimutuel props │            ┌───────────────────┐    pre: personas
   │  • CHIP escrow      │            │   0G Compute TEE  │    post: transcript
   │  • on-chain verify: │            │  qwen2.5-omni     │         │
   │    TEE sig + rules +│            │  temp=0, signed   │         ▼
@@ -51,27 +51,35 @@ check runs on-chain; any failure reverts.
 
 ## The markets
 
-- **Faction-win market:** a binary YES/NO on **"does Mafia win?"** (`YES` = Mafia prevails).
-- **Per-seat Fate side markets (categorical):** one auto-created market per seat asking *"what
-  happens to this seat?"* — five buckets: **Survives**, **Out · R1**, **Out · R2**, **Out · R3**,
-  **Out · R4+**. A seat's market closes the moment that seat falls (its fate is then decided).
-- **Per-round "Who hangs?" side markets (categorical, recurring):** for each day vote, a market over
-  the living seats plus a **"No one"** outcome (a tie / no elimination). Round 1 opens with the match;
-  the host floats a fresh market as each later round begins, and freezes it once that round's vote
-  resolves. Only the currently-bettable round shows live; resolved rounds drop to History.
-- Both side-market kinds resolve from the **same on-chain-verified final game state** as the faction
-  market — no new trust and no extra settlement transaction.
-- **Mechanism:** parimutuel pools. The faction market is binary (one YES pool, one NO pool); each
-  categorical side market holds one pool per outcome. Backers of the resolved (winning) outcome split
-  the pot pro-rata, minus a small protocol fee. Always solvent regardless of bet skew. If nobody
-  backed the winning outcome, that market Voids and every stake is refunded.
+Every market is a **categorical parimutuel prop** — one pool per outcome — and they **all resolve from
+the same on-chain-verified final game state**, inside a single `settle()`. No new trust and no extra
+settlement transaction per market.
+
+- **Faction — "Which faction wins?"** (`TOWN` / `MAFIA`). The headline market, opened first at match
+  start. A mistrial Voids it.
+- **Night kill — "Who dies tonight?"** *(recurring, per round).* Over the living seats plus a "no one /
+  all spared" outcome. Round 1 opens with the match; the host floats a fresh one each night and freezes
+  it at dawn.
+- **Voted out — "Who hangs this round?"** *(recurring, per round).* Over the living seats plus a
+  "no one" outcome (a tie / no elimination). Round 1 opens with the match; a fresh one floats each day
+  and freezes once that vote resolves. Only the currently-bettable round shows live; resolved rounds
+  drop to History.
+- **Who is the Mafia?** *(on-demand).* One outcome per seat.
+- **Detective claim — "real, or a bluff?"** *(on-demand, per claiming seat).* Fires when a player
+  claims the Detective role.
+- **Mechanism:** parimutuel pools with one pool per outcome. Backers of the resolved (winning) outcome
+  split the pot pro-rata, minus a small protocol fee — always solvent regardless of bet skew. If nobody
+  backed the winning outcome, the market **Voids** and every stake is refunded.
 - **Currency:** wagers are placed in **CHIP**, a faucet-mintable mock ERC20 (`MockBetToken`) — test
   money with no value. Tap **"Get test tokens"** in the UI to mint some.
-- **Optional gasless betting (EIP-2771):** if the host runs a funded relayer, a spectator with **zero
-  native 0G** can still play — the wallet signs each action off-chain and a backend relayer submits it
-  through a trusted `Forwarder` and pays the gas, while the user stays the on-chain bettor. It's the
-  default whenever the relayer is live and funded (a "⛽ Gasless" toggle opts out); otherwise the UI
-  falls back to the normal path where gas is paid in native 0G. Real on-chain mechanism, not a mock.
+- **Gasless by default (EIP-2771):** when the host runs a funded relayer, a spectator with **zero
+  native 0G** can play — the wallet signs each action off-chain and a backend relayer submits it through
+  a trusted `Forwarder` and pays the gas, while the user stays the on-chain bettor. It's the default
+  whenever the relayer is live and funded (a "⛽ Gasless" toggle opts out); otherwise the UI falls back
+  to the normal path where gas is paid in native 0G. Real on-chain mechanism, not a mock.
+- **Pop-up-free betting:** an in-browser **session key** (derived from one signature) or a **guest
+  burner** key is the on-chain bettor and signs relayed requests locally — no wallet pop-up per wager.
+- **Batch claim:** one tap collects every winning/refund for a match in a single transfer.
 - **Open until settled:** betting stays open for the whole match and only closes when the verdict is
   settled on-chain. Draws and "nobody backed the winner" (Void) refund stakes.
 
@@ -86,7 +94,7 @@ check runs on-chain; any failure reverts.
 | `server/`    | Sequencer: drives the match, streams turns, settles on-chain| Live Arena          |
 | `contracts/` | `MafiaMarket` + `MockBetToken` + on-chain verifier (Solidity)| Market Ledger (0G Chain) |
 | `storage/`   | 0G Storage uploads/retrieval (personas + transcripts)       | Evidence Layer      |
-| `frontend/`  | Live arena UI, betting panel, history, CHIP faucet          | Live Arena (UI)     |
+| `frontend/`  | Live arena UI, betting panel, session/guest wallets, batch claim, CHIP faucet | Live Arena (UI)     |
 
 ---
 
@@ -100,7 +108,8 @@ check runs on-chain; any failure reverts.
 
 RPC `https://evmrpc-testnet.0g.ai` · Explorer https://chainscan-galileo.0g.ai · Faucet
 https://faucet.0g.ai (native 0G for gas; CHIP comes from the in-app faucet). `MafiaMarket` is a
-multi-match factory and also hosts the per-seat Fate and per-round "Who hangs?" categorical side markets.
+multi-match factory: each match's Faction, recurring per-round Night-kill / Voted-out, and on-demand
+Who-is-the-Mafia / Detective-claim markets are all categorical props on this one contract.
 
 ---
 

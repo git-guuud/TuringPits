@@ -1,255 +1,156 @@
 # Status
 
-_Updated: 2026-06-29_
+_Updated: 2026-07-06_
 
-> **Betting currency → CHIP (mock ERC20):** wagers now settle in `MockBetToken` (CHIP), not native
-> 0G — `betYes/betNo(matchId, amount)` pull via approve+transferFrom; payouts/refunds/fees pay CHIP.
-> The menu shows the CHIP balance + a "Get test tokens" faucet button. **Betting also stays open
-> until settle()** (no block-based close/lock). Redeployed to Galileo (2026-07-05): market
-> `0x35fCb9De839700ED139077ECB183257dD10C581f`, token `0x48cF05921C8f042Ed337f56F947542aB89691aBb`,
-> forwarder `0xaD341c0A01eaA8EBe8B9aee9FD1364C619fB770A`. This build is all-categorical props: the
-> headline **Faction** market plus recurring **voted-out / night-kill** and on-demand
-> **detective-claim / mafia-seat** props. The old per-seat **survival ("player fate") markets are
-> gone** — `createMatch` no longer mints them (propCount at creation is now 2, not playerCount + 2).
-> Forwarder + CHIP token were reused, so gasless session-key betting and existing balances carry over
-> (users re-approve CHIP for the new market on first bet). Contract suite 128 green; frontend + server
-> type-check clean.
+> **Live on 0G Galileo (chainId 16602).** The full "Proof of Battle" demo loop —
+> **watch** a live LLM Mafia match → **wager** in CHIP → **on-chain settle** → **claim** — runs
+> end-to-end. Deployed and current (verified on-chain against the source):
+>
+> | Contract | Address |
+> |---|---|
+> | `MafiaMarket` (multi-match factory) | `0x35fCb9De839700ED139077ECB183257dD10C581f` |
+> | `MockBetToken` (CHIP, the mock currency) | `0x48cF05921C8f042Ed337f56F947542aB89691aBb` |
+> | `Forwarder` (EIP-2771 gasless) | `0xaD341c0A01eaA8EBe8B9aee9FD1364C619fB770A` |
+>
+> Every market is a **categorical parimutuel prop**, all resolved inside one TEE-verified `settle()`:
+> the headline **Faction** (which faction wins), recurring per-round **Voted out** / **Night kill**,
+> and on-demand **Who is the Mafia** and **Detective claim (real / bluff)**. Wagers are in **CHIP**
+> (faucet-mintable mock ERC20), **gasless by default** through the funded relayer, signed pop-up-free
+> by an in-browser **session / guest wallet**, and **open until settlement**.
+>
+> **All suites green:** contracts **128** (Hardhat), engine **37**, players **226** (+1 live-skip),
+> storage **12** (+2 live-skip), server **80**; frontend type-check + `vite build` clean. There is
+> **no pending redeploy** — the deployed bytecode matches the current source.
 
-## Current task
-**AI Mafia** (multiple LLMs playing Mafia). Days 1–6 **complete**: engine, TEE players,
-commit-reveal, 0G Storage, on-chain verifier/market, **and the frontend live arena + betting UI**.
-**Live 0G-TEE provider wired in and confirmed:** the `players/` `Attestation` uses the live envelope
-model (`sha256(req):sha256(res):type:identity:tls_fp`) that `TeeEnvelope.sol` verifies;
-`ZeroGDirectProvider` (Direct SDK) passed a live inference; and a cross-layer Hardhat test settles a
-real `playMatch` transcript on the deployed contract. The full demo loop (watch → wager → settle →
-claim) runs end-to-end on Galileo.
+## What's live right now
 
-**Latest change — betting currency → CHIP + open-until-settled** (see the banner above): wagers moved
-from native 0G to the `MockBetToken` (CHIP) ERC20 with an in-app faucet, the market stays open until
-`settle()`, and both contracts were redeployed. Design:
-`docs/superpowers/specs/2026-06-17-ai-mafia-design.md`.
+- **The demo loop runs end-to-end on Galileo.** A real `qwen2.5-omni` match is driven by the
+  deterministic moderator, each decision is a live 0G-Compute TEE inference, spectators wager in CHIP
+  across the markets, and `settle()` verifies every move's TEE signature + the commit-revealed roles +
+  the Solidity rule re-execution before paying the winning outcome. A cross-layer Hardhat test settles a
+  full `playMatch` transcript on-chain to the engine-declared winner.
+- **Enabled in this deployment:** live 0G Compute (funded `COMPUTE_PRIVATE_KEY`), 0G Storage evidence
+  with StorageScan/indexer links surfaced on the frontend (`ENABLE_STORAGE`), and the EIP-2771 gasless
+  relayer (funded `RELAYER_PRIVATE_KEY`).
+- **Code-complete but OFF here (key-gated):** spoken-dialogue **TTS** (ElevenLabs) — no
+  `ELEVENLABS_API_KEY` / `ELEVENLABS_API_KEYS` set, so the feature is fully off and never ships keys to
+  the browser. Turning it on is purely an env-key step (see `myTasks.md`).
 
-## Done
-- [x] Monorepo scaffolded (npm workspaces): `engine`, `contracts`, `storage`,
-      `server`, `frontend` — each with package manifest, tsconfig, stub source, README.
-      (`oracle` removed — settlement is on-chain.)
-- [x] **Day 1 — Moderator engine + structured decisions.** `engine/` is the deterministic
-      Mafia moderator: `assignRoles` (seeded Fisher–Yates), `initState`, `applyDecision`
-      (validates + throws on illegal/out-of-order), `winner`, `runMatch`, and
-      `encodeDecision` (canonical-JSON signed bytes). Roles MAFIA/DOCTOR/DETECTIVE/TOWN,
-      night/day sequencing, doctor save, detective record, plurality tallies (tie → no-op),
-      parity/elimination win detection. Pure, zero non-deterministic inputs. 22 vitest
-      tests green (determinism, scripted MAFIA/TOWN matches, all illegal-move classes).
-      Design: `docs/superpowers/specs/2026-06-17-moderator-engine-design.md`.
-- [x] Root tooling: `package.json` workspaces, `tsconfig.base.json`, `.gitignore`,
-      `README.md`.
-- [x] **Verified 0G capabilities** against the docs: Compute is AI-inference/fine-tuning
-      only (cannot run arbitrary code) → original "Compute re-runs the match" path dropped.
-- [x] **Game decided: LLM Mafia.** Trust anchor = TEE-attested inference; settlement =
-      fully on-chain (verify TEE sigs + Mafia rules in Solidity). Faction-win market for MVP.
-- [x] Design spec written and approved.
+## The markets (all categorical props, one verified `settle()`)
 
-- [x] **Day 2 — `players/` abstraction over 0G Compute TEE inference.** New `players/`
-      workspace. One `InferenceProvider` interface (BYOM-ready: each seat holds its own
-      provider). `Player.takeTurn` produces the two-layer turn — free-form `speech` + a
-      constrained decision inference whose *entire* output IS the canonical decision string
-      (`encodeDecision`), so the attestation binds the exact bytes the contract reconstructs
-      (`myTasks.md §A`). `verifyAttestation` is the real, reusable EIP-191 `ecrecover` check
-      the Day-5 contract mirrors. `playMatch` drives the Day-1 moderator with real player
-      calls and captures the attested transcript. 25 vitest tests green: a full match runs
-      end-to-end, every decision attestation verifies locally, the captured decisions replay
-      through the pure moderator to the same winner, and parse rejects illegal/non-canonical
-      output. (Historical: a Router-based `ZeroGComputeProvider` was written here; it was later
-      removed when the testnet Router proved to expose no signature endpoint — the real path is
-      now the Direct-SDK `ZeroGDirectProvider`. See "Mocks / stubs in place".)
+`MafiaMarket` is a matchId-keyed factory. Each match's markets are categorical parimutuel props
+(`PropKind`): one pool per outcome, backers of the resolved outcome split the net pot pro-rata (minus
+fee), and a market **Voids → full refund** when nobody backed the winner (or, for Faction, on a
+mistrial). Server/UI address markets by reading each prop's `(kind, param)` — the kinds interleave, so
+there is **no fixed index formula**.
 
-- [x] **Day 3 — role-assignment commit-reveal + confirmed TEE attestation format.**
-      `engine/src/commit.ts`: `commitRoles`/`verifyRoleReveal`/`generateSalt`/
-      `roleCommitPreimage`. Commit = `sha256(abi.encodePacked(uint8[] roles, bytes32 salt))`
-      (role enums MAFIA=0/DOCTOR=1/DETECTIVE=2/TOWN=3, packed in seat order, then the 32-byte
-      salt) — reconstructed on-chain by the SHA-256 precompile the §A verifier already uses,
-      so no new on-chain primitive. The server commits before betting and reveals only
-      `(roles, salt)` at settlement; the secret seed is never disclosed. `verifyRoleReveal`
-      never throws (gates settlement on a boolean, like `verifyAttestation`). 11 vitest tests:
-      accepts the true reveal, rejects a tampered role / wrong salt / reordered assignment,
-      returns false on malformed salt, and round-trips a seeded `assignRoles`. Engine now 33
-      tests green. TEE attestation format was already **confirmed live** (see "0G integration
-      — confirmed facts" below) — no engine change needed; the signed-bytes target is the
-      response envelope, not `encodeDecision`, which re-scopes the Day-5 verifier.
+| Kind | Question | Lifecycle | Outcomes |
+|---|---|---|---|
+| **Faction** | Which faction wins? | Opened first at match start (index 2) | TOWN (0) / MAFIA (1); mistrial → Void |
+| **RoundVotedOut** | Who is voted out this round? | Recurring — round 1 auto-created; host floats each later round; freezes on that vote | one per seat + "no one" |
+| **NightKill** | Who dies tonight? | Recurring — round 1 auto-created; host floats each later round; freezes at dawn | one per seat + "no one / all spared" |
+| **MafiaSeat** | Who is the Mafia? | On-demand single | one per seat |
+| **DetectiveClaim** | Is seat N's Detective claim real — or a bluff? | On-demand, per claiming seat | BLUFF / REAL |
+| _PlayerFate_ | _(per-seat "what happens to this seat?")_ | **Retained in code, NOT floated for now** | FATE_BUCKETS |
 
-- [x] **Day 5 — On-chain Mafia verifier + betting market deployed to 0G Galileo testnet.**
-      `contracts/` rewritten: `MafiaMarket.sol` (parimutuel YES/NO faction-win escrow +
-      `settle()` orchestration) + three pure libraries — `DecisionCodec` (reconstructs the
-      engine's canonical decision JSON on-chain, byte-for-byte, + JSON-escape), `TeeEnvelope`
-      (rebuilds the real 0G-TEE envelope `sha256(req):sha256(res):type:identity:tls_fp` and
-      `ecrecover`s the signer via the SHA-256 precompile + EIP-191), and `MafiaRules` (a faithful
-      Solidity port of the `engine/` moderator: night/day sequencing, doctor save, detective
-      check, plurality votes, parity/elimination win). `settle()` verifies each move's TEE
-      envelope, binds the typed decision to the signed response body by an offset/slice check,
-      checks the commit-reveal role assignment (SHA-256, one byte per role + salt — matches
-      `engine/src/commit.ts`), runs the state machine, and pays the winner. **16 Hardhat tests
-      green** (codec cross-checked vs the engine, envelope recover, state-machine winner == engine
-      winner via dynamic import, full market lifecycle, and the cheat path: forged/dropped/tampered
-      move + bad reveal + settle-before-lock + double-claim all revert). **Deployed:**
-      `0xd4d1007585f9bAa44DaBbBCb224a09395F41ca5F` on 0G Galileo (chainId 16602; bytecode verified
-      on-chain). The on-chain verification *mechanism* is real; the test signer is a labeled local
-      key. Wiring the live 0G-TEE provider into a real match for end-to-end settlement is Day 6/7
-      follow-up.
-  - **Known limitations (now CLOSED by the Day-5 factory rewrite — see below):** (1) the
-    zero-bet-winner trapped pool is handled by the `Void` outcome (full refund to all bettors);
-    (2) the missing settlement timeout is handled by `enterRefundMode`/`refund` past
-    `settlementDeadlineBlock`. Both bettor-protection/liveness gaps are closed.
-    `MafiaMarket` is now a **multi-match factory** (matchId-keyed) with per-match fees,
-    block-based lifecycle, and full event emissions (`MatchCreated`/`BetPlaced`/`BettingLocked`/
-    `MatchSettled`/`Claimed`/`RefundModeEntered`/`Refunded`), per
-    `docs/superpowers/specs/2026-06-18-parimutuel-market-factory-design.md`. Full suite
-    (MafiaMarket factory + fuzz + PlayersIntegration + library tests) green. **Previously-deployed
-    address `0xd4d1007585f9bAa44DaBbBCb224a09395F41ca5F` is now STALE (old single-match ABI) —
-    a re-deploy with `constructor(address _treasury)` is required for Day 6.**
+At `createMatch` only the two recurring round-1 markets are minted (`propCount == 2`); Faction,
+MafiaSeat and DetectiveClaim float on demand. The per-seat **PlayerFate/survival** market is no longer
+minted — the `PropKind.PlayerFate` branch + `FATE_BUCKETS` stay intact so re-adding it is just
+restoring a seat loop in `createMatch`.
 
-- [x] **Day 4 — 0G Storage evidence layer.** `storage/` is now real
-      (`@0gfoundation/0g-storage-ts-sdk` v1.2.10). `serializePersonas` / `serializeMatch`
-      produce **canonical** bytes (recursively sorted keys, compact) so identical evidence
-      always yields the same root — content-addressed and auditable. `root(bytes)` derives the
-      0G merkle root locally (offline). `createZeroGStorage({indexerUrl, rpcUrl, privateKey})`
-      uploads via in-memory `MemData` (no temp files, `skipIfFinalized`) and downloads via
-      `downloadToBlob` with merkle-proof verification; the library reads no globals (caller
-      passes `.env`). **Live-confirmed on Galileo testnet** (`storage/src/live.test.ts`,
-      `RUN_LIVE_STORAGE=1`): persona + transcript uploaded, downloaded by root, announced root
-      == locally-derived root, `sha256(download) == sha256(upload)` for both (e.g. transcript
-      root `0xe1a632bab279fbf71d71ca83d2b1908310c4b0905190635097e1db885c02a1da`). Offline
-      suite (serialization + SDK root, 12 tests) stays green with no network/funds; live test
-      skipped by default. Uploads paid by the funded `COMPUTE_PRIVATE_KEY` wallet.
+### Betting UX
 
-## In progress
-- **Night micro-market — "who falls before dawn?" (TODO 6.1b; code-complete, redeploy pending).**
-  A new categorical `PropKind.NightKill` on `MafiaMarket` — the night-side twin of the per-round
-  RoundVotedOut market — opens at nightfall and freezes at dawn, so the night's dead zone becomes a
-  betting window. Outcomes are the seats + a "no one / all spared". `createMatch` auto-creates round 1
-  (props now number `playerCount + 2`) and the host floats later rounds via `openNightKillRound()`. It
-  resolves inside the SAME verified `settle()` — a night kill is exactly a round death that was NOT a
-  day vote-out (`deathRound[seat] == round && votedOutRound[seat] == 0`), so no new game state, no new
-  trust, no extra tx. The two recurring kinds interleave, so server/UI address markets by `(kind,
-  param)`. Server `orchestrator.ts` (`syncRoundMarkets`) opens/freezes it with pure `round-markets.ts`
-  timing predicates; `Verdict.tsx` renders the active "Night R kill" market. Tests:
-  `MafiaMarket.nightkill.test.ts` (settlement cross-checked vs the engine's night deaths; full Hardhat
-  suite **97 green**) + server `round-markets.test.ts`; type-check + build clean. **Needs a Galileo
-  redeploy** (new bytecode — `openNightKillRound`, +2 props) before it's live (see `myTasks.md`).
-- **Optional spoken-dialogue TTS (code-complete; ElevenLabs key pending).** A server `/tts` endpoint
-  voices each player's line: a tone-tag step inserts ElevenLabs v3 audio tags ([nervous]/[accusing]…)
-  — via a fast Claude Haiku call when `ANTHROPIC_API_KEY` is set, else a heuristic from the wire
-  context — then ElevenLabs synthesizes it, **one voice per persona** (`server/src/voices.ts`). The
-  frontend plays each clip alongside the typewriter with a third audio toggle (hidden unless the server
-  reports a key). **Generation happens ONCE per line, server-side:** clips are content-hash cached +
-  in-flight deduped, so every spectator and every replay/step-back reuses the same synthesis (no
-  per-user or past-dialogue regeneration; the Anthropic tagger is inside the same cached path). Gated
-  on keys — with no `ELEVENLABS_API_KEY` the feature is fully OFF (keys never ship to the browser). 14
-  new server vitest (voice map, heuristic tags, cache/dedupe, /tts/info gating, validation, rate limit);
-  server suite 30 green; server + frontend type-check + build clean. **Needs a direct ElevenLabs key**
-  (+ optional Anthropic key) — see myTasks.md.
+- **Currency: CHIP** — a faucet-mintable mock ERC20 (`MockBetToken`, marked `# MOCK`), the one
+  intentional mock. "Get test tokens" mints some in-app. All market mechanics it touches are real.
+- **Gasless by default (EIP-2771).** A spectator with zero native 0G signs a `ForwardRequest`
+  off-chain; the funded backend relayer submits it through the trusted `Forwarder` and pays gas while
+  `_msgSender()` keeps the user as the on-chain bettor. On whenever the relayer is live + funded; a
+  "⛽ Gasless" toggle opts out, and the UI falls back to the direct user-pays-gas path if the relayer
+  is absent/broke. Real mechanism, not a mock.
+- **Pop-up-free session keys.** An in-browser key is the on-chain bettor and signs relayed requests
+  locally — no wallet pop-up per bet. Two flavours: a **derived session** (one `personal_sign` seeds a
+  deterministic key, cached per-owner) and a **guest burner** (random key for no-wallet visitors,
+  persisted + restored). Caveat: a session/guest key holds no 0G, so it can bet only while the relayer
+  is live + funded (the gasless path is forced, no silent gas fallback).
+- **Batch claim.** One tap collects all winnings/refunds for a match (skip-don't-revert, single
+  transfer) into a persistent winnings tray.
+- **Open until settled.** Betting stays open the whole match; a market only closes at settlement.
+  Draws and "nobody backed the winner" (Void) refund stakes.
 
-- **Side markets — Survival + Round-of-death + RECURRING per-round "Voted out" (code-complete; redeploy pending).**
-  `MafiaMarket` auto-creates three prop kinds, all resolved inside the SAME verified `settle()` from the
-  same TEE-checked run (no new trust, no extra settlement tx). At creation `propCount == 3 * playerCount`,
-  laid out as contiguous seat-ordered blocks:
-  - `PropKind.Survival` (`propIdx == seat`): YES = the seat is alive at the end (`g.alive[param]`).
-  - `PropKind.RoundOfDeath` (`propIdx == n + seat`): over/under fixed at the opening round
-    (`ROUND_OF_DEATH_LINE == 1`). YES = the seat is out in round 1 (the night-1 kill **or** the day-1
-    vote), from `g.deathRound[seat]` (1-based; 0 = survived).
-  - `PropKind.VotedOut` — now a **recurring per-round market** instead of a one-shot first-vote bet.
-    `Prop.round` tags the day-vote round a band targets; round 1 is created up front at `propIdx
-    2n + seat`, and the host floats later rounds via the new `openVotedOutRound(matchId)` (onlyOwner) as
-    the match advances, appending a fresh n-seat band contiguously at `voIdx(round, seat) ==
-    (round+1)*n + seat`. `MafiaRules.Game` now records `votedOutRound[seat]` (the 1-based round whose day
-    vote eliminated it, 0 = never), and `_settleProps` resolves each band by `g.votedOutRound[param] ==
-    pr.round`. `votedOutRoundsOpened[matchId]` tracks the highest opened round (createMatch seeds 1).
-  betProp/claimProp/refundProp/closeProp are kind/idx-agnostic so they're reused as-is. The server's
-  orchestrator reads props dynamically (count grows as bands open), opens each round's band as the match
-  reaches it, and freezes a band once its vote resolves (`syncVotedOutMarkets`); the round-of-death band
-  freezes one-shot once round 1 resolves. The live `Verdict.tsx` shows only the **active** "voted out"
-  band (the round bettable now) — resolved past rounds drop to History, which lists/claims every band per
-  round. Hardhat suite **81 green** (`MafiaMarket.votedout.test.ts` now covers `openVotedOutRound` +
-  per-round settlement at n=6; roundofdeath/props updated for the reorder; `MafiaRules` cross-checks
-  `votedOutRounds()` across multiple rounds); server + frontend type-check + build clean. **Not yet
-  deployed** — the new bytecode needs a Galileo redeploy (see `myTasks.md`).
+## Packages (npm workspaces) — all real, no mocks except CHIP
 
-- **Optional gas relayer — EIP-2771 gasless betting (code-complete; redeploy + funded relayer pending).**
-  A spectator with ZERO native 0G signs a ForwardRequest off-chain; a funded backend relayer submits it
-  through a trusted `Forwarder` and pays gas, while `_msgSender()` keeps the user as the on-chain bettor.
-  New `contracts/Forwarder.sol` + `lib/ERC2771Context.sol`; `MafiaMarket` + `MockBetToken` now take a
-  `trustedForwarder` ctor arg and use `_msgSender()` in the value-moving user funcs (owner/treasury keep
-  `msg.sender`). Server `/relay` + `/relay/info` endpoint (`server/src/relayer.ts`, shares the WS port)
-  with target/selector allowlists, per-address rate limit, `verify()` pre-check, and serialized nonces —
-  enabled only when `RELAYER_PRIVATE_KEY` + `FORWARDER_ADDRESS` are set. Frontend routes every wallet
-  action (faucet/approve/bet/claim/refund) through the relayer **by default whenever it's live + funded**
-  (never gated on the user's own 0G; a manual "⛽ Gasless" toggle opts out), auto-falling back to the
-  direct user-pays-gas path when the relayer is absent/broke. The relayer/forwarder are **real, not
-  mocked** (CHIP remains the only mock). Tests: 11 new Hardhat relay tests (relayed bet/claim attribute to
-  the user, replay/expired/bad-sig revert, direct calls unaffected) — Hardhat suite **85 green**; server
-  vitest +5 (allowlist + rate-limit); frontend type-checks + builds clean. **Not yet deployed** — needs a
-  Galileo redeploy (Forwarder + fresh CHIP + market) and a funded relayer wallet (see `myTasks.md`).
+- **`engine/`** — the deterministic Mafia moderator: seeded role assignment (Fisher–Yates), night/day
+  sequencing, doctor save, detective record, plurality tallies (tie → no elimination), parity/elimination
+  win detection, canonical signed-decision encoding, and role commit-reveal
+  (`commitRoles`/`verifyRoleReveal`, `sha256(roles ‖ salt)`). Pure, zero non-deterministic inputs.
+  **37 tests.**
+- **`players/`** — the player abstraction over 0G Compute TEE inference. Each seat holds its own
+  `InferenceProvider` (BYOM-ready). A turn is two-layer: free-form `speech` + a constrained decision
+  inference whose entire output IS the canonical decision string. The live path is `ZeroGDirectProvider`
+  (Direct SDK, `qwen2.5-omni`); `MockLocalProvider` (real ECDSA, local key) covers offline/CI.
+  `playMatch` drives the moderator with real calls, structures the day as a **trial** (nominate →
+  prosecute → rebuttal → vote) and pauses on **in-loop betting windows** (night-kill / voted-out /
+  detective-claim), and captures the attested transcript. **226 tests** (+1 live-skipped).
+- **`storage/`** — real `@0gfoundation/0g-storage-ts-sdk`. Canonical (sorted-key) serialization so
+  identical evidence yields the same root; local root derivation; upload via in-memory `MemData` and
+  download with merkle-proof verification. **Live-confirmed on Galileo.** **12 offline tests** (+2
+  live-skipped).
+- **`contracts/`** — `MafiaMarket` (categorical-prop parimutuel factory + `settle()` orchestration),
+  `MockBetToken` (CHIP), `Forwarder` + `ERC2771Context`, and three pure libraries: `DecisionCodec`
+  (reconstructs the engine's canonical decision JSON on-chain byte-for-byte), `TeeEnvelope` (rebuilds
+  the real 0G-TEE envelope and `ecrecover`s the signer via the SHA-256 precompile + EIP-191), and
+  `MafiaRules` (a faithful Solidity port of the moderator). **128 Hardhat tests.**
+- **`server/`** — the Sequencer: drives the match, streams turns over WebSocket, opens/freezes the
+  per-round markets as the match advances (`orchestrator.ts`), runs the gasless `/relay` endpoint and
+  the key-gated `/tts` endpoint, and exposes a read-only `/status` for the lobby live-chip. **80 tests.**
+- **`frontend/`** — the live arena UI: tribunal-styled match view, betting panel for every market kind,
+  session/guest wallet connect, CHIP faucet, batch claim + winnings tray, battle history, live-status
+  chip, 0G Storage evidence links, and a (gated) TTS toggle. Type-check + `vite build` clean.
 
-## Pending
-- Polish / demo-day hardening per `TODO.md` (Day 7). Optional follow-ups: verify contract source on
-  the explorer; broaden market types (agent survival, round-of-death) per `IDEA.md` roadmap.
+## 0G integration — confirmed facts (live)
 
-## 0G integration — confirmed facts (live, 2026-06-17)
-Durable findings from real testnet calls (`players/scripts/live-turn.mjs`,
-`live-direct.mjs`). Credentials live in `.env`; remaining human setup in `myTasks.md` (§C, §D).
+Durable findings from real testnet calls (`players/scripts/live-turn.mjs`, `live-direct.mjs`).
+Credentials live in `.env`; remaining human setup in `myTasks.md`.
 
-- **Network — 0G Galileo Testnet:** chainId **16602**, EVM RPC `https://evmrpc-testnet.0g.ai`,
-  faucet `https://faucet.0g.ai`. All free testnet 0G, no real funds.
-- **TEE attestation is `ecrecover`-viable.** EIP-191/ECDSA. The signature recovers to the
-  provider's **`teeSignerAddress` `0x83df…08cF`** (from `checkProviderSignerStatus`) — distinct
-  from the **provider account `0xa48f…7836`** (used to address the service in SDK calls). The
-  contract registers/checks the **signer**, not the provider.
-- **Signed bytes are an envelope, NOT our decision text:**
-  `sha256(req):sha256(res):provider_type:provider_identity:tls_fingerprint`, colon-joined,
-  EIP-191-signed. `part[1] = sha256(raw response body)` (confirmed); `part[0] = sha256(request)`
-  is opaque (provider's own serialization). ⇒ Day-5 `settle()` takes the full response body +
-  envelope fields + signature as calldata, recomputes `sha256(body)` (precompile 0x2), rebuilds
-  the envelope, EIP-191-hashes, `ecrecover`s vs the registered signer, then parses the decision
-  out of the body. **`encodeDecision` is therefore not the signed-bytes target.**
-- **Compute access — both paths provisioned & working:** Router (OpenAI-compatible, `sk-` key,
-  returns a `tee_verified` boolean only) and **Direct SDK** (`@0gfoundation/0g-compute-ts-sdk`
-  v0.8.4, funded wallet, returns the raw `{text, signature}` the verifier needs). Direct ledger
-  needs a **3 0G** minimum; per-inference fee negligible (~1.6e13 wei).
-- **Player model `qwen2.5-omni`** — the only TEE chat model on testnet; live-confirmed
-  `tee_verified:true` and emits byte-exact canonical decision strings `parseDecision` accepts.
-- **⚠️ Trust caveat (state honestly in the demo):** the testnet provider's signed metadata is
-  `provider_type:"centralized", provider_identity:"aliyun"` + TLS-cert fingerprint (RA-TLS),
-  not visibly hardware Intel-TDX. The attestation *mechanism* (provider-signed,
-  on-chain-`ecrecover`able) is fully real; the execution guarantee is weaker than "hardware TEE."
+- **Network — 0G Galileo Testnet:** chainId **16602**, EVM RPC `https://evmrpc-testnet.0g.ai`, explorer
+  `https://chainscan-galileo.0g.ai`, faucet `https://faucet.0g.ai`. All free testnet 0G, no real funds.
+- **TEE attestation is `ecrecover`-viable** (EIP-191/ECDSA). The signature recovers to the provider's
+  **`teeSignerAddress` `0x83df…08cF`** (registered on-chain), distinct from the provider **account
+  `0xa48f…7836`** used to address the service.
+- **Signed bytes are an envelope, not our decision text:**
+  `sha256(req):sha256(res):provider_type:provider_identity:tls_fingerprint`, colon-joined, EIP-191
+  signed. So `settle()` takes the full response body + envelope fields + signature as calldata,
+  recomputes `sha256(body)`, rebuilds the envelope, `ecrecover`s vs the registered signer, then parses
+  the decision out of the body.
+- **Compute — Direct SDK is the production path** (`@0gfoundation/0g-compute-ts-sdk`, funded wallet,
+  returns the raw `{text, signature}` the verifier needs). Model **`qwen2.5-omni`** is the only TEE chat
+  model on testnet; live-confirmed `tee_verified:true`. The rate limit is a token bucket (cap ~32768,
+  refill ~2000/min) + a ~10 req/min request bucket — keep a match under ~32k total tokens to stay fast.
+- **⚠️ Trust caveat (stated honestly in the demo):** the testnet provider's signed metadata is
+  `provider_type: centralized, identity: aliyun` + an RA-TLS fingerprint, **not** visibly hardware
+  Intel-TDX. The attestation *mechanism* (provider-signed, on-chain-`ecrecover`able) is fully real; the
+  execution guarantee is weaker than a hardware TEE. The full defense design and exactly what is
+  enforced on-chain today vs. designed-for-roadmap lives in `IDEA.md` (§ "Implementation Status").
 
 ## Mocks / stubs in place
-- `engine/`, `players/`, `storage/`, `contracts/`, `server/`, and `frontend/` are all real (no
-  mocks). `storage` upload/download/round-trip is live-confirmed on testnet (Day 4). The one
-  intentional mock is **`MockBetToken` (CHIP)** — the betting currency is a faucet-mintable test
-  ERC20 with no value (clearly marked `# MOCK`); all market mechanics it touches are real.
-- **The real `players/` ↔ `contracts` wiring is done and proven offline.** The `players/`
-  `Attestation` now carries the live-confirmed 0G-TEE **envelope**
-  (`reqHash:sha256(body):type:identity:tls`, see confirmed facts) that `TeeEnvelope.sol`
-  verifies; `verifyAttestation` mirrors the Solidity recover, and `toSettlementMove` maps an
-  attested turn straight to `MafiaMarket.settle()` calldata. A cross-layer Hardhat test
-  (`contracts/test/PlayersIntegration.test.ts`) runs a full `playMatch` and **settles its
-  transcript on the deployed contract to the engine-declared winner**.
-- **The real provider is `ZeroGDirectProvider` (`zerog.ts`, Direct SDK) — live-confirmed.**
-  It is the production path (NOT a mock); the broken Router-signature `ZeroGComputeProvider`
-  was removed. The flag-gated live test (`players/src/live.test.ts`, `RUN_LIVE_COMPUTE=1`)
-  **passed against real 0G Compute on Galileo (2026-06-22):** one TEE inference returned a
-  `"0g-tee"` envelope that `verifyAttestation` accepts and that recovers the registered
-  `teeSignerAddress` `0x83df4B8EbA7c0B3B740019b8c9a77ffF77D508cF`. Paid from the funded
-  `COMPUTE_PRIVATE_KEY`.
-- **`MockLocalProvider` (`# MOCK:` in `provider.ts`)** remains for offline/CI. It produces the
-  SAME envelope shape — real ECDSA/EIP-191 signatures, genuinely verified — differing only in
-  the signer: a **local test key, not a 0G TEE provider** (`source` = `"MOCK-local"`, never
-  mistaken for a real attestation). No attestation is faked silently.
 
-## Known scope risk
-- Day 5's **on-chain Mafia state machine + TEE-signature verification** (the heaviest piece)
-  **landed in full** — the labeled fallback (verify sigs + commit-reveal on-chain, trust the
-  tally) was NOT needed. The verifier reconstructs the response envelope (full body in calldata
-  + SHA-256 precompile + `ecrecover`); 16 Hardhat tests green and deployed to Galileo.
-- Remaining risk is now **Day 6 (frontend) breadth** and the **live-TEE end-to-end run**: the
-  player layer is being aligned to the contract's envelope model (in progress), after which a
-  real `qwen2.5-omni` match must be captured and settled on-chain at least once for the demo.
+- **The one intentional mock is `MockBetToken` (CHIP)** — a faucet-mintable test ERC20 with no value
+  (`# MOCK`). Every market mechanic it touches is real.
+- `engine/`, `players/`, `storage/`, `contracts/`, `server/`, `frontend/` are otherwise **all real**.
+  The relayer/forwarder are real. Storage upload/download/round-trip is live-confirmed.
+- **`MockLocalProvider`** remains for offline/CI: it produces the SAME envelope shape with real
+  ECDSA/EIP-191 signatures, differing only in the signer (a labeled local key, `source: "MOCK-local"`)
+  — never silently mistaken for a real attestation.
+
+## What's next
+
+The MVP is shipped and live; remaining work is breadth + polish, tracked in `TODO.md`
+(security-hardening in `SECURITY.md`). Headline threads:
+
+- **Game-loop drama** (`TODO.md` §6.2 → 6.3 → 6.5 → 6.6): an AI colour-commentator, a fuller trial arc,
+  an "endgame / final table" mode, and the north-star beat-anchored micro-markets — off-chain feel work
+  first, then the contract-touching pieces.
+- **Deeper persona pool** (more distinct voices, Merkle-committed) and **more roles** (kept byte-for-byte
+  in `engine/` and `MafiaRules.sol` in lockstep).
+- **Deferred / larger bets:** host bond + slashing (`SECURITY.md` §S6), bring-your-own-model per seat
+  (GPT vs Claude vs Llama as factions), production WebSocket scaling, explorer source verification.
