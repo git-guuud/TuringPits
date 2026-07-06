@@ -35,7 +35,7 @@ export interface BetWindowArgs {
   propIndex: number;
   /** Window length in ms; `<= 0` disables this window (the loop streams straight through). */
   durationMs: number;
-  /** Freeze the prop on-chain when the window closes (round markets); false leaves it open (claim market). */
+  /** Freeze the prop on-chain when the window closes (shuts betting); false leaves it open to settle. */
   freezeOnClose: boolean;
   /** DETECTIVE_CLAIM: the seat whose claim the market judges (for client copy). */
   seat?: number;

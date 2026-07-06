@@ -370,91 +370,94 @@ describe("MafiaMarket factory — batch claim", () => {
     return (BigInt(pr.netPot) * s) / BigInt(pr.winningPool);
   }
 
-  // A settled 5p match where alice holds THREE side positions: two winners (the faction headline + a
-  // surviving seat's PlayerFate outcome 0) and one loser (a dead seat's "survives" bucket — bob seeds
-  // that seat's true death bucket so the prop Resolves rather than Voids, making alice's bet a real loss).
+  // A settled 5p match where alice holds THREE side positions: two winners (the faction headline + the
+  // "who is the Mafia?" market backed on the real Mafia seat) and one loser (the round-1 "voted out"
+  // market backed on a seat the vote didn't take — bob seeds the true outcome so that market Resolves
+  // rather than Voids, making alice's bet a real loss).
   async function settledMulti(nonce = "m-batch") {
     const { market, token, owner, alice, bob } = await deploy();
     const teeSigner = ethers.Wallet.createRandom();
     const fx = await buildSettlement(SEED, 5, nonce, teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce, playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner); // propIdx == playerCount + 2 == 7
+    const faction = await openFaction(market, owner);   // headline market, floated at the tail (propIdx 2)
+    const winSide = Number(await market.propCount(0));  // "who is the Mafia?" market, next tail
+    await market.connect(owner).openMafiaSeatMarket(0);
+    const loseSide = 0;                                 // the round-1 "voted out" market (minted first)
     await mineUpTo(sched.bettingOpenBlock);
 
     const winOut = fx.mafiaWins ? MAFIA : TOWN;
     const loseOut = fx.mafiaWins ? TOWN : MAFIA;
-    const survivorSeat = fx.alive.findIndex((a) => a === true);
-    const deadSeat = fx.alive.findIndex((a) => a === false);
-    expect(survivorSeat, "fixture must have a survivor").to.be.gte(0);
-    expect(deadSeat, "fixture must have a death").to.be.gte(0);
-    const deadWinBucket = Math.min(fx.deathRound[deadSeat]!, 4); // FATE_BUCKETS - 1; bucket 0 = survives
+    const mafiaSeat = fx.roles.findIndex((r) => r === 0); // role enum: MAFIA == 0
+    expect(mafiaSeat, "fixture must seat a Mafia").to.be.gte(0);
+    // Round-1 voted-out market winner: the round-1 day-vote casualty (or "no one" == playerCount).
+    const voWin = fx.firstVotedOut ?? 5;
+    const voLose = voWin === 0 ? 1 : 0; // an outcome that is NOT the winner
 
-    // PlayerFate propIdx == seat (props[0..n-1]); outcome 0 = "survives".
-    await market.connect(alice).betProp(0, faction, winOut, ethers.parseEther("1"));      // winner
-    await market.connect(alice).betProp(0, survivorSeat, 0, ethers.parseEther("1"));       // winner (survives)
-    await market.connect(alice).betProp(0, deadSeat, 0, ethers.parseEther("1"));           // loser (that seat died)
-    await market.connect(bob).betProp(0, faction, loseOut, ethers.parseEther("2"));        // seeds the faction pot
-    await market.connect(bob).betProp(0, deadSeat, deadWinBucket, ethers.parseEther("1")); // resolves deadSeat (alice's 0 loses)
+    await market.connect(alice).betProp(0, faction, winOut, ethers.parseEther("1"));   // winner
+    await market.connect(alice).betProp(0, winSide, mafiaSeat, ethers.parseEther("1")); // winner (the real Mafia)
+    await market.connect(alice).betProp(0, loseSide, voLose, ethers.parseEther("1"));   // loser (a seat the vote didn't take)
+    await market.connect(bob).betProp(0, faction, loseOut, ethers.parseEther("2"));     // seeds the faction pot
+    await market.connect(bob).betProp(0, loseSide, voWin, ethers.parseEther("1"));      // resolves loseSide (alice's bet loses)
 
     await mineUpTo(sched.bettingCloseBlock);
     await market.settle(0, fx.moves, fx.roles, fx.salt, CID);
-    return { market, token, alice, bob, matchId: 0, faction, survivorSeat, deadSeat };
+    return { market, token, alice, bob, matchId: 0, faction, winSide, loseSide };
   }
 
   it("pays every winning market in one tx, skips the losing one, and emits BatchClaimed", async () => {
-    const { market, token, alice, matchId, faction, survivorSeat, deadSeat } = await settledMulti();
+    const { market, token, alice, matchId, faction, winSide, loseSide } = await settledMulti();
     const stake = ethers.parseEther("1");
-    const expected = (await propPayout(market, matchId, faction, stake)) + (await propPayout(market, matchId, survivorSeat, stake));
+    const expected = (await propPayout(market, matchId, faction, stake)) + (await propPayout(market, matchId, winSide, stake));
 
     const a0 = await token.balanceOf(alice.address);
-    await expect(market.connect(alice).batchClaim(matchId, [faction, survivorSeat, deadSeat]))
+    await expect(market.connect(alice).batchClaim(matchId, [faction, winSide, loseSide]))
       .to.emit(market, "BatchClaimed").withArgs(matchId, alice.address, 2, expected);
     const a1 = await token.balanceOf(alice.address);
-    expect(a1 - a0).to.equal(expected); // faction + survivor; dead seat skipped
+    expect(a1 - a0).to.equal(expected); // faction + mafia-seat; the voted-out loser skipped
 
     expect(await market.propClaimed(matchId, faction, alice.address)).to.equal(true);
-    expect(await market.propClaimed(matchId, survivorSeat, alice.address)).to.equal(true);
-    expect(await market.propClaimed(matchId, deadSeat, alice.address)).to.equal(false); // losing → never marked
+    expect(await market.propClaimed(matchId, winSide, alice.address)).to.equal(true);
+    expect(await market.propClaimed(matchId, loseSide, alice.address)).to.equal(false); // losing → never marked
   });
 
   it("pays a duplicated index only once", async () => {
-    const { market, token, alice, matchId, faction, survivorSeat } = await settledMulti("m-batch-dup");
+    const { market, token, alice, matchId, faction, winSide } = await settledMulti("m-batch-dup");
     const stake = ethers.parseEther("1");
-    const expected = (await propPayout(market, matchId, faction, stake)) + (await propPayout(market, matchId, survivorSeat, stake));
+    const expected = (await propPayout(market, matchId, faction, stake)) + (await propPayout(market, matchId, winSide, stake));
     const a0 = await token.balanceOf(alice.address);
-    await expect(market.connect(alice).batchClaim(matchId, [faction, faction, survivorSeat]))
+    await expect(market.connect(alice).batchClaim(matchId, [faction, faction, winSide]))
       .to.emit(market, "BatchClaimed").withArgs(matchId, alice.address, 2, expected);
     expect((await token.balanceOf(alice.address)) - a0).to.equal(expected);
   });
 
   it("skips an already-claimed market and pays only the rest", async () => {
-    const { market, token, alice, matchId, faction, survivorSeat } = await settledMulti("m-batch-partial");
-    await market.connect(alice).claimProp(matchId, survivorSeat); // collect one individually first
+    const { market, token, alice, matchId, faction, winSide } = await settledMulti("m-batch-partial");
+    await market.connect(alice).claimProp(matchId, winSide); // collect one individually first
     const stake = ethers.parseEther("1");
     const expected = await propPayout(market, matchId, faction, stake);
     const a0 = await token.balanceOf(alice.address);
-    await expect(market.connect(alice).batchClaim(matchId, [faction, survivorSeat]))
+    await expect(market.connect(alice).batchClaim(matchId, [faction, winSide]))
       .to.emit(market, "BatchClaimed").withArgs(matchId, alice.address, 1, expected);
     expect((await token.balanceOf(alice.address)) - a0).to.equal(expected);
   });
 
   it("reverts when nothing in the set is collectable (re-run, all-losing, or empty)", async () => {
-    const { market, alice, bob, matchId, faction, survivorSeat, deadSeat } = await settledMulti("m-batch-empty");
-    await market.connect(alice).batchClaim(matchId, [faction, survivorSeat]); // drain the winners
-    await expect(market.connect(alice).batchClaim(matchId, [faction, survivorSeat])).to.be.revertedWith("nothing to claim");
-    await expect(market.connect(alice).batchClaim(matchId, [deadSeat])).to.be.revertedWith("nothing to claim"); // only a loser
+    const { market, alice, bob, matchId, faction, winSide, loseSide } = await settledMulti("m-batch-empty");
+    await market.connect(alice).batchClaim(matchId, [faction, winSide]); // drain the winners
+    await expect(market.connect(alice).batchClaim(matchId, [faction, winSide])).to.be.revertedWith("nothing to claim");
+    await expect(market.connect(alice).batchClaim(matchId, [loseSide])).to.be.revertedWith("nothing to claim"); // only a loser
     await expect(market.connect(alice).batchClaim(matchId, [])).to.be.revertedWith("nothing to claim");        // empty set
     await expect(market.connect(bob).batchClaim(matchId, [faction])).to.be.revertedWith("nothing to claim");   // bob backed the losing faction
   });
 
   it("tolerates an out-of-range index (skips it, pays the valid winners)", async () => {
-    const { market, token, alice, matchId, faction, survivorSeat } = await settledMulti("m-batch-oob");
+    const { market, token, alice, matchId, faction, winSide } = await settledMulti("m-batch-oob");
     const count = Number(await market.propCount(matchId));
     const stake = ethers.parseEther("1");
-    const expected = (await propPayout(market, matchId, faction, stake)) + (await propPayout(market, matchId, survivorSeat, stake));
+    const expected = (await propPayout(market, matchId, faction, stake)) + (await propPayout(market, matchId, winSide, stake));
     const a0 = await token.balanceOf(alice.address);
-    await market.connect(alice).batchClaim(matchId, [faction, count + 5, survivorSeat]); // count+5 is out of range
+    await market.connect(alice).batchClaim(matchId, [faction, count + 5, winSide]); // count+5 is out of range
     expect((await token.balanceOf(alice.address)) - a0).to.equal(expected);
   });
 
@@ -518,7 +521,8 @@ describe("MafiaMarket factory — refund mode", () => {
     await expect(market.settle(matchId, fx.moves, fx.roles, fx.salt, CID)).to.be.revertedWith("not settleable");
   });
 
-  // alice stakes on the faction headline + a PlayerFate seat; the match is abandoned → RefundMode.
+  // alice stakes on the faction headline + the round-1 voted-out market (propIdx 0); the match is
+  // abandoned → RefundMode.
   async function abandonedMulti() {
     const { market, token, owner, alice, stranger } = await deploy();
     const teeSigner = ethers.Wallet.createRandom();
@@ -528,7 +532,7 @@ describe("MafiaMarket factory — refund mode", () => {
     const faction = await openFaction(market, owner);
     await mineUpTo(sched.bettingOpenBlock);
     await market.connect(alice).betProp(0, faction, MAFIA, ethers.parseEther("1"));
-    await market.connect(alice).betProp(0, 0, 2, ethers.parseEther("1")); // PlayerFate seat 0, any outcome
+    await market.connect(alice).betProp(0, 0, 2, ethers.parseEther("1")); // round-1 voted-out market (propIdx 0), any outcome
     await mineUpTo(sched.settlementDeadlineBlock + 1);
     await market.enterRefundMode(0);
     return { market, token, alice, stranger, matchId: 0, faction };
@@ -537,7 +541,7 @@ describe("MafiaMarket factory — refund mode", () => {
   it("batchRefund returns every listed stake in one tx; skips unbet props; re-run reverts", async () => {
     const { market, token, alice, matchId, faction } = await abandonedMulti();
     const a0 = await token.balanceOf(alice.address);
-    // faction (1) + seat 0 (1) = 2; seat 3 was never bet → skipped, doesn't revert the batch.
+    // faction (1) + propIdx 0 (1) = 2; propIdx 3 is out of range → skipped, doesn't revert the batch.
     await expect(market.connect(alice).batchRefund(matchId, [faction, 0, 3]))
       .to.emit(market, "BatchClaimed").withArgs(matchId, alice.address, 2, ethers.parseEther("2"));
     expect((await token.balanceOf(alice.address)) - a0).to.equal(ethers.parseEther("2"));

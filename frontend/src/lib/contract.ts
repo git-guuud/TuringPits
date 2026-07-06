@@ -61,7 +61,7 @@ export function storageScanFile(cid: string): string {
  * needs the address up front. Override per-env with VITE_MARKET_ADDRESS.
  */
 export const MARKET_ADDRESS =
-  (import.meta.env.VITE_MARKET_ADDRESS as string | undefined) || "0xdF955ED2D8C5D1F3C4Acfdb8e26885a25a79b917";
+  (import.meta.env.VITE_MARKET_ADDRESS as string | undefined) || "0x35fCb9De839700ED139077ECB183257dD10C581f";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Optional EIP-2771 gas relayer ("gasless" path). A bettor signs a ForwardRequest (free); the
@@ -590,22 +590,45 @@ export interface MyPropStake {
   claimed: boolean;
 }
 
-/** Read the connected wallet's own per-outcome stake + claimed flag on each prop of a match. */
+/**
+ * Read the connected wallet's own per-outcome stake + claimed flag on each prop of a match.
+ *
+ * This is the LIVE holdings read behind the whole "Your book" / per-option position UI, and it re-runs
+ * after every bet, on open and on settle — so it has to be both light and resilient. Two guards make it
+ * so (mirroring the History position read, which had the same fan-out problem):
+ *   1. Gate every eth_call through `readGate` and SKIP `propStake` for any outcome whose total pool is
+ *      zero — nobody staked it, so the viewer's stake there is provably zero. getProp already hands back
+ *      the pools, so this costs no extra call and collapses the fan-out from (props × outcomes) to just
+ *      the outcomes that actually drew a bet.
+ *   2. Read each market independently and swallow a single market's failure (a transient RPC hiccup)
+ *      into a dropped entry, instead of letting one rejected call reject the whole `Promise.all` and
+ *      wipe EVERY position to empty — the bug that made holdings silently vanish under RPC pressure.
+ */
 export async function readMyPropStakes(address: string, matchId: number, propCount: number, wallet: Wallet): Promise<MyPropStake[]> {
   const c = readContract(address, wallet);
-  return Promise.all(
-    Array.from({ length: propCount }, async (_, i) => {
-      const pr = await c.getFunction("getProp")(matchId, i);
-      const numOutcomes = Number(pr.numOutcomes);
-      const [claimed, stakeWeis] = await Promise.all([
-        c.getFunction("propClaimed")(matchId, i, wallet.account) as Promise<boolean>,
-        Promise.all(
-          Array.from({ length: numOutcomes }, (_, o) => c.getFunction("propStake")(matchId, i, o, wallet.account) as Promise<bigint>),
-        ),
-      ]);
-      return { index: i, numOutcomes, stakes: stakeWeis.map((s) => formatEther(s)), claimed };
+  const results = await Promise.all(
+    Array.from({ length: propCount }, async (_, i): Promise<MyPropStake | null> => {
+      try {
+        const pr = await readGate(() => c.getFunction("getProp")(matchId, i));
+        const numOutcomes = Number(pr.numOutcomes);
+        const pools = pr.pools as bigint[];
+        const [claimed, stakeWeis] = await Promise.all([
+          readGate(() => c.getFunction("propClaimed")(matchId, i, wallet.account) as Promise<boolean>),
+          Promise.all(
+            Array.from({ length: numOutcomes }, (_, o) =>
+              (pools[o] ?? 0n) > 0n
+                ? readGate(() => c.getFunction("propStake")(matchId, i, o, wallet.account) as Promise<bigint>)
+                : Promise.resolve(0n),
+            ),
+          ),
+        ]);
+        return { index: i, numOutcomes, stakes: stakeWeis.map((s) => formatEther(s)), claimed };
+      } catch {
+        return null; // this market missed the refresh; the rest still surface, and it fills in next pass
+      }
     }),
   );
+  return results.filter((r): r is MyPropStake => r !== null);
 }
 
 /** A wallet's position on one side market of a past match, with the figures to size a claim. */
@@ -719,8 +742,10 @@ export async function enterRefundMode(address: string, matchId: number, wallet: 
 const MARKET_STATE: Record<number, MarketState> = { 2: "LOCKED", 3: "SETTLED", 4: "REFUND" };
 /** MafiaMarket PropKind enum → wire label (0 PlayerFate, 1 RoundVotedOut, 2 NightKill, 3 DetectiveClaim, 4 MafiaSeat, 5 Faction). */
 const PROP_KIND: Record<number, PropSnapshot["kind"]> = { 0: "PLAYER_FATE", 1: "ROUND_VOTED_OUT", 2: "NIGHT_KILL", 3: "DETECTIVE_CLAIM", 4: "MAFIA_SEAT", 5: "FACTION" };
-/** The FACTION prop is opened first at match start, right after createMatch's `playerCount + 2` base props. */
-const FACTION_PROP_INDEX = (playerCount: number) => playerCount + 2;
+/** The FACTION prop is opened FIRST at match start, right after createMatch's 2 base props (RoundVotedOut
+ *  r1 at 0, NightKill r1 at 1), so it sits at index 2. (The per-seat PlayerFate/survival markets that used
+ *  to precede it — making this `playerCount + 2` — are no longer floated; see myTasks.md.) */
+const FACTION_PROP_INDEX = 2;
 /** FACTION outcome index → winning faction. 1 = MAFIA wins (Acquitted), 0 = TOWN wins (Convicted). */
 export const FACTION_OUTCOME = { TOWN: 0, MAFIA: 1 } as const;
 /** MafiaMarket PropState enum → wire state (1 = Resolved, 2 = Void; 0 = Unset → undefined). */
@@ -731,11 +756,11 @@ let publicProvider: JsonRpcProvider | null = null;
 const readProvider = () => (publicProvider ??= new JsonRpcProvider(GALILEO.rpcUrl, GALILEO.chainId));
 
 /**
- * Caps concurrent read-RPC so the public 0G node doesn't rate-limit a burst. The History position
- * reads (`readPropPositions`) fan out over every market prop × outcome — with the per-round
- * RoundVotedOut markets that's ~80+ eth_calls per match — so without a shared gate
- * a scan floods the node and calls start failing. One module-level singleton means even parallel match
- * reads share the same budget. Live-match reads don't go through here.
+ * Caps concurrent read-RPC so the public 0G node doesn't rate-limit a burst. Both the History position
+ * reads (`readPropPositions`) and the live holdings read (`readMyPropStakes`) fan out over every market
+ * prop × outcome — with the per-round RoundVotedOut markets that's ~80+ eth_calls per match — so without
+ * a shared gate a scan floods the node and calls start failing. One module-level singleton means even
+ * parallel match reads share the same budget.
  */
 function makeLimiter(max: number) {
   let active = 0;
@@ -804,16 +829,15 @@ export interface MatchSummary extends MarketRead {
 
 /**
  * Read the headline FACTION prop for a match. It's opened first at match start, so it sits at the
- * deterministic index `playerCount + 2` (right after createMatch's base props). Guarded: if that prop
- * isn't the faction market (a malformed/legacy match), the verdict is left unresolved with a zero pot.
+ * deterministic index 2 (right after createMatch's 2 base props). Guarded: if that prop isn't the
+ * faction market (a malformed/legacy match), the verdict is left unresolved with a zero pot.
  */
 async function readFactionProp(
   c: Contract,
   matchId: number,
-  playerCount: number,
 ): Promise<{ state?: PropSnapshot["state"]; winner?: number; pot: string }> {
   try {
-    const pr = await c.getFunction("getProp")(matchId, FACTION_PROP_INDEX(playerCount));
+    const pr = await c.getFunction("getProp")(matchId, FACTION_PROP_INDEX);
     if (Number(pr.kind) !== 5) return { pot: "0" }; // not the FACTION prop → treat as unresolved
     const pot = formatEther((pr.pools as bigint[]).reduce((a, p) => a + p, 0n));
     const state = PROP_STATE[Number(pr.state)];
@@ -828,7 +852,7 @@ export async function readMatchSummary(matchId: number, address = MARKET_ADDRESS
   const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
   const m = await c.getFunction("matches")(matchId);
   const playerCount = Number(m.playerCount);
-  const faction = await readFactionProp(c, matchId, playerCount);
+  const faction = await readFactionProp(c, matchId);
   return {
     matchId,
     state: MARKET_STATE[Number(m.state)] ?? "OPEN",

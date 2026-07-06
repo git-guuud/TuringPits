@@ -94,11 +94,11 @@ export function History({ api }: { api: MatchApi }) {
     void api.enterRefund(matchId);
   };
 
-  // Per-market claim/refund on a past battle — the faction verdict and every side pot alike.
-  const onReclaimProp = (matchId: number, index: number, kind: "win" | "return" | "refund") => {
+  // Collect every reclaimable pot on a past battle in ONE batch tx — batchClaim for a settled match
+  // (pays wins, returns Void stakes), batchRefund for an abandoned one. Replaces per-market claiming.
+  const onClaimAll = (matchId: number, idxs: number[], refund: boolean) => {
     if (busy) return;
-    if (kind === "refund") void api.refundProp(index, matchId);
-    else void api.claimProp(index, matchId);
+    void api.claimAllProps(matchId, idxs, refund);
   };
 
   return (
@@ -215,7 +215,7 @@ export function History({ api }: { api: MatchApi }) {
           <>
             <ul className="flex flex-col gap-px bg-line">
               {pageRows.map((r) => (
-                <Row key={r.summary.matchId} row={r} busy={busy} claimable={isClaimable(r)} onEnableRefund={onEnableRefund} onReclaimProp={onReclaimProp} />
+                <Row key={r.summary.matchId} row={r} busy={busy} claimable={isClaimable(r)} onEnableRefund={onEnableRefund} onClaimAll={onClaimAll} />
               ))}
             </ul>
 
@@ -290,18 +290,21 @@ function Row({
   busy,
   claimable,
   onEnableRefund,
-  onReclaimProp,
+  onClaimAll,
 }: {
   row: HistoryRow;
   busy: boolean;
   claimable: boolean;
   onEnableRefund: (matchId: number) => void;
-  onReclaimProp: (matchId: number, index: number, kind: "win" | "return" | "refund") => void;
+  onClaimAll: (matchId: number, idxs: number[], refund: boolean) => void;
 }) {
   const { summary: s, mine } = row;
   const v = verdictOf(s);
   const pot = parseFloat(s.pot).toFixed(2);
   const props = mine?.props ?? [];
+  // A REFUND battle reclaims via batchRefund; a settled one via batchClaim (pays wins + Void returns).
+  const isRefund = s.state === "REFUND";
+  const propsTotal = props.reduce((a, p) => a + parseFloat(p.amount), 0);
 
   return (
     <li className={["panel flex flex-col gap-3 px-5 py-4", claimable ? "border-l-2 border-gilt" : ""].join(" ")}>
@@ -318,8 +321,8 @@ function Row({
           </div>
         </div>
 
-        {/* Match-level action: an abandoned, past-deadline match can be flipped to RefundMode; once
-            settled/refunded, the reclaim buttons for each market live in the strip below. */}
+        {/* Match-level action. Abandoned + past deadline → flip to RefundMode first. Otherwise a SINGLE
+            "Collect all" sweeps every reclaimable pot on this battle in one batchClaim/batchRefund tx. */}
         {mine?.enable ? (
           <div className="flex-none text-right">
             <button
@@ -331,29 +334,36 @@ function Row({
               {busy ? "…" : RECLAIM_CTA.enable}
             </button>
           </div>
-        ) : mine?.participated && props.length === 0 ? (
+        ) : props.length > 0 ? (
+          <div className="flex-none text-right">
+            <button
+              type="button"
+              onClick={() => onClaimAll(s.matchId, props.map((p) => p.index), isRefund)}
+              disabled={busy}
+              className="rounded-sm border border-acquit px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-acquit transition-colors hover:bg-acquit hover:text-ink disabled:opacity-60"
+            >
+              {busy ? "Collecting…" : `${isRefund ? "Reclaim all" : "Collect all"} ◈ ${propsTotal.toFixed(2)}`}
+            </button>
+          </div>
+        ) : mine?.participated ? (
           <div className="flex-none text-right">
             <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">Wagered</span>
           </div>
         ) : null}
       </div>
 
-      {/* Reclaimable pots on this battle — the faction verdict first, then each side market you backed. */}
+      {/* Breakdown of what "Collect all" sweeps — the faction verdict first, then each side market you
+          backed. Read-only now: one batch tx collects the lot from the button above. */}
       {props.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 border-t hairline pt-3">
           <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-mute">Your pots ·</span>
           {props.map((p) => (
-            <button
+            <span
               key={p.index}
-              type="button"
-              onClick={() => onReclaimProp(s.matchId, p.index, p.kind)}
-              disabled={busy}
-              className="rounded-sm border border-acquit px-2.5 py-1.5 font-mono text-[10.5px] uppercase tracking-[0.12em] text-acquit transition-colors hover:bg-acquit hover:text-ink disabled:opacity-60"
+              className="rounded-sm border border-line-2 px-2.5 py-1.5 font-mono text-[10.5px] uppercase tracking-[0.12em] text-cream-dim"
             >
-              {busy
-                ? "…"
-                : `${marketLabel(p)} · ${p.kind === "refund" ? "Refund" : p.kind === "return" ? "Reclaim" : "Claim"} ◈ ${p.amount}`}
-            </button>
+              {marketLabel(p)} · ◈ {p.amount}
+            </span>
           ))}
         </div>
       )}

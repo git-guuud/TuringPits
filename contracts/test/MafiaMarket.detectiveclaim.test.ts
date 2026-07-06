@@ -30,18 +30,18 @@ async function opened(nonce: string, n = 6) {
   const sched = await defaultSchedule(ethers.provider);
   await ctx.market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce, playerCount: n, schedule: sched }));
   await mineUpTo(sched.bettingOpenBlock);
-  // createMatch mints props[0..n-1] PlayerFate, props[n] RoundVotedOut r1, props[n+1] NightKill r1.
+  // createMatch mints props[0] RoundVotedOut r1, props[1] NightKill r1 (no per-seat PlayerFate market).
   // The DetectiveClaim market is NOT created up front — it is floated on demand and appends at the
-  // tail, so with nothing else opened it lands at propIdx n+2.
+  // tail, so with nothing else opened it lands at propIdx 2.
   const detSeat = fx.roles.findIndex((r) => r === ROLE.DETECTIVE);
   const mafiaSeat = fx.roles.findIndex((r) => r === ROLE.MAFIA);
   return { ...ctx, fx, sched, teeSigner, matchId: 0, n, detSeat, mafiaSeat };
 }
 
 describe("MafiaMarket — 'Detective claim: real or bluff?' side market (props): creation on demand", () => {
-  it("is NOT created up front — createMatch still mints exactly playerCount + 2 props, flag unset", async () => {
+  it("is NOT created up front — createMatch still mints exactly 2 props, flag unset", async () => {
     const { market, n } = await opened("dc-create");
-    expect(await market.propCount(0)).to.equal(n + 2); // n PlayerFate + VO r1 + NK r1, no DetectiveClaim yet
+    expect(await market.propCount(0)).to.equal(2); // VO r1 + NK r1, no DetectiveClaim yet
     expect(await market.detectiveClaimOpened(0)).to.equal(false);
     // no prop is a DetectiveClaim before it is floated
     const count = Number(await market.propCount(0));
@@ -50,11 +50,11 @@ describe("MafiaMarket — 'Detective claim: real or bluff?' side market (props):
 
   it("openDetectiveClaim appends ONE binary market tagged with the claiming seat and flips the guard", async () => {
     const { market, owner, n, detSeat } = await opened("dc-open");
-    const idx = Number(await market.propCount(0)); // tail == n+2
+    const idx = Number(await market.propCount(0)); // tail == 2
     await expect(market.connect(owner).openDetectiveClaim(0, detSeat))
       .to.emit(market, "DetectiveClaimOpened").withArgs(0, idx, detSeat);
     expect(await market.detectiveClaimOpened(0)).to.equal(true);
-    expect(await market.propCount(0)).to.equal(n + 3);
+    expect(await market.propCount(0)).to.equal(3);
     const pr = await market.getProp(0, idx);
     expect(pr.kind).to.equal(KIND.DetectiveClaim);
     expect(pr.param).to.equal(detSeat);       // param carries the claiming seat
@@ -87,7 +87,7 @@ describe("MafiaMarket — 'Detective claim: real or bluff?' side market (props):
 });
 
 describe("MafiaMarket — 'Detective claim' side market (props): betting", () => {
-  it("accumulates per-outcome pools independently of the fate/round markets", async () => {
+  it("accumulates per-outcome pools independently of the round markets", async () => {
     const { market, owner, alice, bob, detSeat, n } = await opened("dc-bet");
     const idx = Number(await market.propCount(0));
     await market.connect(owner).openDetectiveClaim(0, detSeat);
@@ -99,8 +99,8 @@ describe("MafiaMarket — 'Detective claim' side market (props): betting", () =>
     expect(pr.pools[OUT.REAL]).to.equal(ethers.parseEther("1"));
     expect(pr.pools[OUT.BLUFF]).to.equal(ethers.parseEther("3"));
     expect(await market.propStake(0, idx, OUT.REAL, alice.address)).to.equal(ethers.parseEther("1"));
-    // the claiming seat's own PlayerFate market is untouched
-    expect((await market.getProp(0, detSeat)).pools[0]).to.equal(0);
+    // the round-1 RoundVotedOut market (propIdx 0) is untouched
+    expect((await market.getProp(0, 0)).pools[0]).to.equal(0);
   });
 
   it("refuses an out-of-range outcome (binary market has only 0/1)", async () => {

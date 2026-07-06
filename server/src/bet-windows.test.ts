@@ -57,7 +57,7 @@ describe("runBetWindow", () => {
     expect(h.pushCount).toBe(2); // once when the window opens, once after the freeze
   });
 
-  it("does NOT freeze when freezeOnClose is false (the claim market stays open to settle)", async () => {
+  it("does NOT freeze when freezeOnClose is false (window is a pure spotlight, market stays open)", async () => {
     const h = harness();
     await runBetWindow(h.deps, {
       market: "DETECTIVE_CLAIM", round: 1, propIndex: 5, durationMs: 30_000, freezeOnClose: false, seat: 2, freeAt: 0,

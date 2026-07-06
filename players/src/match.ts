@@ -243,11 +243,12 @@ export async function playMatch(config: MatchConfig): Promise<AttestedMatch> {
     ...privateKnowledge(state, turns, seat, state.players[seat]!.role),
   });
 
-  // Apply one signed turn (night action or day vote): record it, advance state, stream it.
-  const applySignedTurn = async (ctx: TurnContext): Promise<boolean> => {
-    const seat = ctx.decisionStub.player;
+  // Apply an ALREADY-COMPUTED turn: record it, advance state, stream it. Split from the inference so the
+  // model call for a turn can run CONCURRENTLY with a betting window — the window hook holds the loop for
+  // its countdown, and the call for what happens once it closes overlaps that hold instead of starting
+  // fresh afterwards (which is what left dead air between the market closing and the next beat).
+  const applyTurn = async (seat: number, turn: PlayerTurn): Promise<boolean> => {
     const aliveBefore = new Set(livingSeats(state));
-    const turn = await players[seat]!.takeTurn(ctx);
     state = applyDecision(state, turn.structuredDecision);
     // Any seat that flipped alive→dead when this turn resolved the phase is now a public death,
     // attributed to the phase/round the action was taken in (night kill vs day vote).
@@ -263,14 +264,34 @@ export async function playMatch(config: MatchConfig): Promise<AttestedMatch> {
     return winnerOf(state) !== null;
   };
 
+  // Kick off a seat's inference NOW but defer surfacing the result until the loop awaits it — so a turn
+  // precomputed to overlap a betting window neither blocks the window nor raises an unhandled rejection
+  // while the window holds (any failure is re-thrown when the getter is finally awaited, in order).
+  const startTurn = (seat: number, action: Action, legalTargets: number[], stage: "night" | "vote") => {
+    const settled = players[seat]!
+      .takeTurn(ctxFor(seat, action, legalTargets, stage))
+      .then((turn) => ({ turn }), (err: unknown) => ({ err }));
+    return async (): Promise<PlayerTurn> => {
+      const r = await settled;
+      if ("err" in r) throw r.err;
+      return r.turn;
+    };
+  };
+
   while (winnerOf(state) === null) {
     if (state.round > maxRounds) throw new Error(`match exceeded ${maxRounds} rounds without a winner`);
 
     if (state.phase === "night") {
-      // Nightfall: open the "who dies tonight?" window BEFORE any night action, while the kill is hidden.
+      // Night actions are simultaneous and independent — every actor decides from the same pre-night
+      // state, blind to the others — so start ALL of them now and let the model calls run while the
+      // "who dies tonight?" window holds the loop. By the time it closes the decisions are in hand, so
+      // dawn follows immediately instead of after a fresh round of inference. (Any actor whose turn we
+      // never apply — a kill that ends the match first — is harmlessly settled and dropped.)
+      const actors = phaseActors(state);
+      const pending = actors.map((a) => startTurn(a.seat, a.action, a.legalTargets, "night"));
       if (onNightfall) await onNightfall(state.round, state);
-      for (const { seat, action, legalTargets } of phaseActors(state)) {
-        if (await applySignedTurn(ctxFor(seat, action, legalTargets, "night"))) break;
+      for (let i = 0; i < actors.length; i++) {
+        if (await applyTurn(actors[i]!.seat, await pending[i]!())) break;
       }
     } else {
       // DAY — discussion pass (unsigned, streamed), then vote pass (signed).
@@ -286,11 +307,20 @@ export async function playMatch(config: MatchConfig): Promise<AttestedMatch> {
         const claim = claimsDetective(speech);
         if (onDiscussion) await onDiscussion({ seat, round: state.round, speech, claim }, state);
       }
+      // Start the FIRST voter's inference now so it overlaps the "who hangs this round?" window and the
+      // tally opens the instant the window closes. Only the first is safe to precompute: every LATER voter
+      // reacts to the votes cast before it (the bandwagon), so its inference legitimately waits on the
+      // vote ahead — it stays sequential.
+      const firstSeat = living[0];
+      const firstVote =
+        firstSeat != null ? startTurn(firstSeat, "vote", living.filter((id) => id !== firstSeat), "vote") : null;
       // The floor has spoken — open the "who hangs this round?" window before the first vote is cast.
       if (onPreVote) await onPreVote(state.round, state);
-      for (const seat of living) {
+      for (let i = 0; i < living.length; i++) {
+        const seat = living[i]!;
         const targets = living.filter((id) => id !== seat);
-        if (await applySignedTurn(ctxFor(seat, "vote", targets, "vote"))) break;
+        const turn = i === 0 && firstVote ? await firstVote() : await players[seat]!.takeTurn(ctxFor(seat, "vote", targets, "vote"));
+        if (await applyTurn(seat, turn)) break;
       }
     }
   }

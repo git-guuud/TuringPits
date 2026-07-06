@@ -25,17 +25,17 @@ export function Menu({ api }: { api: MatchApi }) {
   const status = useLiveStatus();
 
   return (
-    <main className="flex min-h-screen w-full flex-col items-center justify-center px-6 py-12">
+    <main className="flex min-h-screen w-full flex-col items-center justify-center px-6 py-[clamp(1.5rem,5vh,3rem)]">
       <div className="w-full max-w-[760px] text-center">
-        <div className="eyebrow mb-4">The People v. The Hidden Hand</div>
-        <h1 className="font-display text-[64px] font-semibold uppercase leading-none tracking-[0.4em] text-cream">
+        <div className="eyebrow mb-[clamp(0.5rem,1.5vh,1rem)]">The People v. The Hidden Hand</div>
+        <h1 className="font-display text-[clamp(2.5rem,8vw,4rem)] font-semibold uppercase leading-none tracking-[0.4em] text-cream">
           Turing Pits
         </h1>
-        <div className="mt-5 font-body text-[19px] italic text-gilt-soft">
+        <div className="mt-[clamp(0.75rem,2vh,1.25rem)] font-body text-[clamp(1rem,1.8vw,1.1875rem)] italic text-gilt-soft">
           AI agents play Mafia. Every move is TEE-verified and settled on-chain. You wager on the verdict.
         </div>
 
-        <div className="mt-12 grid grid-cols-1 gap-px bg-line sm:grid-cols-2">
+        <div className="mt-[clamp(1.75rem,5vh,3rem)] grid grid-cols-1 gap-px bg-line sm:grid-cols-2">
           <MenuCard
             kicker="The arena"
             title="Enter the Court"
@@ -62,10 +62,15 @@ export function Menu({ api }: { api: MatchApi }) {
           relayFunded={relayFunded}
         />
 
-        {(s.wallet.error || s.tx.error) && (
-          <div className="mt-3 font-mono text-[11px] text-convict">{s.wallet.error ?? s.tx.error}</div>
-        )}
       </div>
+
+      {(s.wallet.error || s.tx.error) && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-4 z-50 flex justify-center px-6">
+          <div className="pointer-events-auto max-w-[440px] rounded-sm border border-convict/50 bg-ink-2/95 px-4 py-2 text-center font-mono text-[11px] text-convict shadow-lg">
+            {s.wallet.error ?? s.tx.error}
+          </div>
+        </div>
+      )}
     </main>
   );
 }
@@ -109,12 +114,12 @@ function MenuCard(p: {
       type="button"
       onClick={p.onClick}
       className={[
-        "panel group flex flex-col items-start px-7 py-8 text-left transition-colors hover:bg-ink-3",
+        "panel group flex flex-col items-start px-[clamp(1.25rem,3vw,1.75rem)] py-[clamp(1.5rem,4vh,2rem)] text-left transition-colors hover:bg-ink-3",
         p.primary ? "border-l-2 border-gilt/40" : "",
       ].join(" ")}
     >
       <div className="eyebrow mb-3">{p.kicker}</div>
-      <div className="font-display text-[30px] tracking-[0.06em] text-cream">{p.title}</div>
+      <div className="font-display text-[clamp(1.5rem,3.2vw,1.875rem)] tracking-[0.06em] text-cream">{p.title}</div>
       <div className="mt-2 font-body text-[15px] leading-snug text-cream-dim">{p.blurb}</div>
       {p.status && <div className="mt-4">{p.status}</div>}
       <div className="mt-5 font-mono text-[12px] uppercase tracking-[0.16em] text-gilt transition-transform group-hover:translate-x-0.5">
@@ -143,7 +148,7 @@ function WalletCard(p: {
 
   if (!connected) {
     return (
-      <div className="panel hairline mx-auto mt-8 w-full max-w-[440px] border px-6 py-6 text-center">
+      <div className="panel hairline mx-auto mt-[clamp(1.5rem,4vh,2rem)] w-full max-w-[440px] border px-6 py-[clamp(1.25rem,3vh,1.5rem)] text-center">
         <div className="font-display text-[22px] tracking-[0.04em] text-cream">Connect to wager</div>
         <p className="mx-auto mt-1.5 max-w-[360px] font-body text-[14px] leading-snug text-cream-dim">
           CHIP is free mock test money. Connect once, then place wagers with{" "}
@@ -157,9 +162,6 @@ function WalletCard(p: {
         >
           {connecting ? "Connecting…" : "Connect wallet"}
         </button>
-        <p className="mx-auto mt-2 max-w-[320px] font-body text-[12px] leading-snug text-mute">
-          One signature sets up a session key — then every wager is signed for you, instantly.
-        </p>
         <button
           type="button"
           onClick={() => void api.connectBurner()}
@@ -182,7 +184,7 @@ function WalletCard(p: {
       : "Gas-free & pop-up-free — you're signed in, so the relayer covers gas and every wager is instant.";
 
   return (
-    <div className="panel hairline mx-auto mt-8 w-full max-w-[440px] border px-6 py-5 text-left">
+    <div className="panel hairline mx-auto mt-[clamp(1.5rem,4vh,2rem)] w-full max-w-[440px] border px-6 py-5 text-left">
       <div className="flex items-center justify-between gap-3">
         <span className="eyebrow">{isGuest ? "Guest wallet" : "Session wallet"}</span>
         <span className="font-mono text-[11px] tracking-[0.1em] text-mute">

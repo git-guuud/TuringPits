@@ -26,19 +26,19 @@ async function opened(nonce: string, n = 5) {
   const sched = await defaultSchedule(ethers.provider);
   await ctx.market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce, playerCount: n, schedule: sched }));
   await mineUpTo(sched.bettingOpenBlock);
-  // createMatch lays out props[0..n-1] PlayerFate, props[n] RoundVotedOut r1, props[n+1] NightKill r1.
-  // This suite only ever opens VotedOut rounds (never NightKill), so its later rounds append past NK r1:
-  // round 1 stays at n, and round R>=2 lands at n+R (the first openVotedOutRound lands at the n+2 tail).
-  // Outcomes: seat 0..n-1, then "no one" == n.
-  const voIdx = (round: number) => (round === 1 ? n : n + round);
+  // createMatch lays out props[0] RoundVotedOut r1, props[1] NightKill r1 (the per-seat PlayerFate market
+  // is not floated for now). This suite only ever opens VotedOut rounds (never NightKill), so its later
+  // rounds append past NK r1: round 1 stays at 0, and round R>=2 lands at R (the first openVotedOutRound
+  // lands at the propCount==2 tail). Outcomes: seat 0..n-1, then "no one" == n.
+  const voIdx = (round: number) => (round === 1 ? 0 : round);
   const noOne = n; // the last outcome index (playerCount): tie / no elimination
   return { ...ctx, fx, sched, teeSigner, matchId: 0, n, voIdx, noOne };
 }
 
 describe("MafiaMarket — per-round 'voted out' side markets (props): creation", () => {
-  it("creates the round-1 RoundVotedOut market after the PlayerFate block (index == n, param == 1, n+1 outcomes)", async () => {
+  it("creates the round-1 RoundVotedOut market first (index == 0, param == 1, n+1 outcomes)", async () => {
     const { market, n, voIdx, noOne } = await opened("vo-create");
-    expect(await market.propCount(0)).to.equal(n + 2); // n PlayerFate + VO r1 + NK r1
+    expect(await market.propCount(0)).to.equal(2); // VO r1 + NK r1 (no PlayerFate market)
     expect(await market.votedOutRoundsOpened(0)).to.equal(1); // round 1 is open up front
     const pr = await market.getProp(0, voIdx(1));
     expect(pr.kind).to.equal(KIND.RoundVotedOut);
@@ -54,18 +54,18 @@ describe("MafiaMarket — per-round 'voted out' side markets (props): creation",
 describe("MafiaMarket — per-round 'voted out' side markets (props): opening later rounds", () => {
   it("openVotedOutRound appends the next round's market contiguously and bumps the counter", async () => {
     const { market, owner, n, voIdx } = await opened("vo-open");
-    // Round 2: appended at the tail (propIdx n+2, past the round-1 NightKill market), tagged param 2.
+    // Round 2: appended at the tail (propIdx 2, past the round-1 NightKill market), tagged param 2.
     await expect(market.connect(owner).openVotedOutRound(0)).to.emit(market, "VotedOutRoundOpened").withArgs(0, 2, voIdx(2));
     expect(await market.votedOutRoundsOpened(0)).to.equal(2);
-    expect(await market.propCount(0)).to.equal(n + 3);
+    expect(await market.propCount(0)).to.equal(3);
     const r2 = await market.getProp(0, voIdx(2));
     expect(r2.kind).to.equal(KIND.RoundVotedOut);
     expect(r2.param).to.equal(2);
     expect(r2.numOutcomes).to.equal(n + 1);
-    // Round 3: the next call is sequential — appended at n+3, param 3.
+    // Round 3: the next call is sequential — appended at idx 3, param 3.
     await expect(market.connect(owner).openVotedOutRound(0)).to.emit(market, "VotedOutRoundOpened").withArgs(0, 3, voIdx(3));
     expect(await market.votedOutRoundsOpened(0)).to.equal(3);
-    expect(await market.propCount(0)).to.equal(n + 4);
+    expect(await market.propCount(0)).to.equal(4);
     expect((await market.getProp(0, voIdx(3))).param).to.equal(3);
   });
 
@@ -78,7 +78,7 @@ describe("MafiaMarket — per-round 'voted out' side markets (props): opening la
 });
 
 describe("MafiaMarket — per-round 'voted out' side markets (props): betting", () => {
-  it("accumulates per-outcome pools on a round-2 market independently of round 1 and the seats' fate markets", async () => {
+  it("accumulates per-outcome pools on a round-2 market independently of round 1", async () => {
     const { market, owner, alice, bob, voIdx, noOne } = await opened("vo-bet");
     await market.connect(owner).openVotedOutRound(0); // round 2 now bettable
     const idx = voIdx(2);
@@ -90,9 +90,8 @@ describe("MafiaMarket — per-round 'voted out' side markets (props): betting", 
     expect(pr.pools[2]).to.equal(ethers.parseEther("1"));
     expect(pr.pools[noOne]).to.equal(ethers.parseEther("3"));
     expect(await market.propStake(0, idx, 2, alice.address)).to.equal(ethers.parseEther("1"));
-    // round-1 RoundVotedOut market and seat 2's PlayerFate market are untouched
+    // the round-1 RoundVotedOut market is untouched
     expect((await market.getProp(0, voIdx(1))).pools[2]).to.equal(0);
-    expect((await market.getProp(0, 2)).pools[0]).to.equal(0);
   });
 });
 

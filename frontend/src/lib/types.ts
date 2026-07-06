@@ -95,6 +95,12 @@ export interface MarketSnapshot {
    */
   readonly closesAt?: number;
   /**
+   * Epoch ms when the PRE-MATCH betting hold ends and the first night falls — present only during the
+   * opening pause on a freshly-convened court (after betting opens, before the match starts). Drives the
+   * "first night in Xs" countdown. Distinct from `closesAt` — betting does NOT close here.
+   */
+  readonly preMatchEndsAt?: number;
+  /**
    * Every market (the headline FACTION market included) is a categorical prop — the faction verdict is
    * the FACTION prop's `state`/`winningOutcome`. Absent until the server reads the props.
    */
@@ -115,7 +121,8 @@ export interface MarketSnapshot {
  *                       nightfall and freezes at dawn — the night-side twin of ROUND_VOTED_OUT.
  *   - DETECTIVE_CLAIM : "is seat `param`, who went public as the Detective, telling the truth or bluffing?"
  *                       A SINGLE binary market — outcome 0 = BLUFF, 1 = REAL DETECTIVE. Floated on the
- *                       first public claim; stays open until settle (resolves from the revealed roles).
+ *                       first public claim, spotlighted for one betting window then frozen; resolves from
+ *                       the revealed roles at settle.
  *   - MAFIA_SEAT      : "who is the Mafia?" A SINGLE categorical market — one outcome per seat
  *                       (numOutcomes == playerCount, param unused). Floated once at match start; stays
  *                       open until settle (resolves to the Mafia seat from the revealed roles).
@@ -184,7 +191,7 @@ export type WsMessage =
   // A synchronized IN-LOOP betting window: the match pauses and one side market is spotlighted so a
   // dramatic moment becomes a betting moment. Rendered as a stage beat (plays in-line with the dialogue)
   // that holds until `endsAt`; `NIGHT_KILL` opens at nightfall (freezes before dawn), `ROUND_VOTED_OUT`
-  // after the discussion pass (freezes before votes), `DETECTIVE_CLAIM` on a claim (stays open to settle).
+  // after the discussion pass (freezes before votes), `DETECTIVE_CLAIM` on a claim (freezes at window close).
   | {
       type: "bet_window";
       market: "NIGHT_KILL" | "ROUND_VOTED_OUT" | "DETECTIVE_CLAIM";

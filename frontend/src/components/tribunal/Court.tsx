@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import { CATCHUP_THRESHOLD, type Beat, type ViewState } from "../../state/matchStore.js";
 import { useTypewriter } from "../../lib/useTypewriter.js";
 import { useCountdown } from "../../lib/useCountdown.js";
-import { bodyFall, dayBreak, gavel, loseSting, nightFall, winSting } from "../../lib/typeSound.js";
+import { bodyFall, countdownWarn, dayBreak, gavel, loseSting, marketOpen, nightFall, winSting } from "../../lib/typeSound.js";
 import type { VoiceApi } from "../../lib/useVoice.js";
 import type { SpeakLine } from "../../lib/voice.js";
 import { Testimony } from "./Testimony.js";
@@ -90,6 +90,13 @@ interface Scene {
   role: string;
   body: string;
   lamp: "day" | "night";
+  /**
+   * "speech" = a player is literally talking (their `body` is spoken testimony, rendered in quotes with a
+   * SPEAKING marker); "narration" = the court/scene-setting (nightfall, dawn, the book opening, the
+   * verdict) rendered as an unquoted inscription. Distinguishing the two is what stops a viewer reading
+   * "Night falls…" as something a seat said. Defaults to narration.
+   */
+  variant?: "speech";
 }
 
 function sceneFor(s: ViewState): Scene {
@@ -189,6 +196,7 @@ function sceneFor(s: ViewState): Scene {
       role: beat.counter ? "counter-claims the Detective's chair" : "steps forward as the Detective",
       body: beat.speech,
       lamp: "day",
+      variant: "speech",
     };
   }
   if (beat?.kind === "bet_window") {
@@ -218,7 +226,7 @@ function sceneFor(s: ViewState): Scene {
       note: "back the badge — or call the bluff",
       name: "REAL — OR BLUFF?",
       role: `${name} has staked their life on the Detective's chair`,
-      body: "A seat has put the Detective's badge on the table. Is it the real thing — or a killer's cover story? The book is open. Money talks now; the truth comes only at the reveal.",
+      body: "A seat has put the Detective's badge on the table. Is it the real thing — or a killer's cover story? Back it before the window closes. Money talks now; the truth comes only at the reveal.",
       lamp: "day",
     };
   }
@@ -231,6 +239,7 @@ function sceneFor(s: ViewState): Scene {
       role: persona?.blurb ?? "",
       body: beat.speech,
       lamp: "day",
+      variant: "speech",
     };
   }
   if (beat?.kind === "turn") {
@@ -242,6 +251,7 @@ function sceneFor(s: ViewState): Scene {
       role: persona?.blurb ?? "",
       body: beat.turn.speech,
       lamp: "day",
+      variant: "speech",
     };
   }
   if (s.market.state === "LOCKED")
@@ -277,18 +287,18 @@ export function Court({
   voice: VoiceApi;
 }) {
   const scene = sceneFor(s);
+  // A player literally speaking vs the court/scene narrating — drives a distinct on-stage treatment
+  // (a SPEAKING marker + quoted, upright testimony vs an unquoted italic inscription) so the two are
+  // never mistaken for one another.
+  const isSpeech = scene.variant === "speech";
   // The in-loop betting window on stage (if any) — drives the prominent on-stage countdown banner.
   const betWindow = s.betWindow;
   const betCountdown = useCountdown(betWindow?.endsAt ?? null);
   const betClosingSoon = betCountdown != null && betCountdown.ms <= 10000;
-  const betLabel =
-    betWindow?.market === "NIGHT_KILL"
-      ? "Who dies tonight?"
-      : betWindow?.market === "ROUND_VOTED_OUT"
-        ? "Who hangs this round?"
-        : betWindow
-          ? "Detective — real or bluff?"
-          : null;
+  // Pre-match betting hold — a fresh case has convened and betting is open before the first night. On the
+  // stage only before any beat lands (cursor < 0), so a new round reads as a deliberate opening, not a flash.
+  const preMatchCountdown = useCountdown(s.market.preMatchEndsAt ?? null);
+  const showPreMatch = s.cursor < 0 && preMatchCountdown != null;
   // The stage paces each beat (seconds on screen) while the server emits them ~1/s, so the viewer
   // steadily falls behind "live" — and a late joiner replays from the very start. When the backlog
   // is meaningful, offer a prominent jump straight to the newest beat. Hidden once the record is
@@ -297,14 +307,25 @@ export function Court({
   // The structured move behind the current speech (a day vote names its target).
   const moveLine = (() => {
     const b = s.currentBeat;
+    // Belongs to a turn beat's speech only. Once the verdict / sentence / mistrial takes the stage
+    // (playback complete, or the court dissolved), the cursor still sits on the last vote beat — suppress
+    // the line so that vote's "votes to convict X" can't linger under the final judgement, where there is
+    // no vote to report.
+    if (s.playbackComplete || s.market.state === "REFUND") return null;
     if (b?.kind !== "turn" || b.turn.decision.action !== "vote") return null;
     const target = b.turn.decision.target;
     const name = (s.personas.find((p) => p.seat === target)?.name ?? `Seat ${target}`).toUpperCase();
     return `▸ votes to convict ${name}`;
   })();
-  const { shown, done } = useTypewriter(scene.body, { sound: true });
+  // A voiced dialogue beat: TTS is available + on AND this beat is spoken (discussion/claim/vote). When
+  // true, TTS reads the line aloud — so soften the typewriter clacks (below) so they don't fight the voice,
+  // and pace playback to the audio (further down, as `audioExpected`).
+  const isSpeechBeat = s.currentBeat?.kind === "discussion" || s.currentBeat?.kind === "claim" || s.currentBeat?.kind === "turn";
+  const dialogueVoiced = voice.available && voice.on && !!isSpeechBeat && !s.playbackComplete;
+  const clackVolume = dialogueVoiced ? 0.32 : 1; // quieter under TTS; full volume for narration / muted voice
+  const { shown, done } = useTypewriter(scene.body, { sound: true, volume: clackVolume });
   // The vote line types out, but only after the speech itself has finished.
-  const move = useTypewriter(done && moveLine ? moveLine : "", { sound: true });
+  const move = useTypewriter(done && moveLine ? moveLine : "", { sound: true, volume: clackVolume });
   const [showLog, setShowLog] = useState(false);
   // Playback transport: when paused, the auto-advance below stands down so the current beat holds on
   // the stage. Stepping a beat at a time (back/forward) pauses too, so the show never runs off while
@@ -319,7 +340,7 @@ export function Court({
 
   // Voice control + the cursor whose spoken line has finished playing (bumped by speak's onEnded, which
   // also fires on mute/synth-failure). The auto-advance below waits on this so a beat is never cut off.
-  const { speak: voiceSpeak, stop: voiceStop, prefetch: voicePrefetch, available: voiceAvailable, on: voiceOn } = voice;
+  const { speak: voiceSpeak, stop: voiceStop, prefetch: voicePrefetch, available: voiceAvailable } = voice;
   const [audioDoneCursor, setAudioDoneCursor] = useState(-1);
 
   // Playback pacing: once a beat finishes typing, hold a moment, then advance the cursor to the
@@ -329,8 +350,7 @@ export function Court({
   // the AUDIO: wait for the spoken line to finish (then a short tail) instead of a fixed timer, so the
   // clip is neither cut off early nor left hanging in silence. Narration / muted playback keeps the
   // fixed read hold. `kind` check (not `lineForBeat`) so this doesn't re-run on every persona change.
-  const isSpeechBeat = s.currentBeat?.kind === "discussion" || s.currentBeat?.kind === "claim" || s.currentBeat?.kind === "turn";
-  const audioExpected = voiceAvailable && voiceOn && !!isSpeechBeat && !s.playbackComplete;
+  const audioExpected = dialogueVoiced; // same condition as the typewriter-softening above
   useEffect(() => {
     if (paused || !done || !s.currentBeat || s.reveal) return;
     const atLast = s.cursor >= s.beats.length - 1;
@@ -466,6 +486,35 @@ export function Court({
     }
   }, [s.market.state, s.market.props, s.playbackComplete, s.propStakes]);
 
+  // A bright market bell when a timed betting window opens on stage. Keyed on the window's identity so a
+  // re-render / pause never re-rings it; a new window (or re-entering one after stepping out) re-arms.
+  const betWindowKey = betWindow ? `${betWindow.market}-${betWindow.round}-${betWindow.propIndex}` : null;
+  const betWindowRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = betWindowRef.current;
+    betWindowRef.current = betWindowKey;
+    if (betWindowKey && betWindowKey !== prev) marketOpen();
+  }, [betWindowKey]);
+
+  // A tense pulse the instant the window's countdown ticks DOWN through 10s (the timer turns red). Fires
+  // only on a genuine downward crossing — we must have seen the countdown above 10s first — so a replayed
+  // window (which opens already expired, ms clamped to 0) never mis-rings it. Re-armed when the window ends.
+  const betWarnedRef = useRef(false);
+  const prevBetMsRef = useRef<number | null>(null);
+  useEffect(() => {
+    const ms = betCountdown?.ms ?? null;
+    const prev = prevBetMsRef.current;
+    prevBetMsRef.current = ms;
+    if (ms == null) {
+      betWarnedRef.current = false;
+      return;
+    }
+    if (!betWarnedRef.current && ms <= 10000 && prev != null && prev > 10000) {
+      betWarnedRef.current = true;
+      countdownWarn();
+    }
+  }, [betCountdown]);
+
   // The aggregate day-vote drama for the stage: how full the count is, who the floor is closing on,
   // and whether the plurality is already locked. Each ALIVE seat casts one vote and the seat with the
   // most is eliminated — a tie at the top spares everyone (engine/src/moderator.ts). Only while a day
@@ -513,26 +562,42 @@ export function Court({
           <span className="text-[15px] tracking-normal">⏭ Skip to present</span>
         </button>
       )}
-      {/* Betting-window banner — the stream is paused for a wager, so the call-to-action lands dead
-          centre on the stage with a live countdown. The Wagers panel holds the actual bet. */}
+      {/* Pre-match banner — a fresh case has convened; betting is open before the first night. The countdown
+          lands dead-centre on stage so the new round is unmistakable and holds until the first night falls. */}
+      {showPreMatch && (
+        <motion.div
+          initial={{ opacity: 0, y: -8 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="absolute left-1/2 top-3 z-40 flex -translate-x-1/2 items-center gap-3 rounded-full border border-gilt bg-gilt/15 px-5 py-2.5 shadow-[0_0_24px_rgba(240,197,82,0.3)] backdrop-blur-sm"
+        >
+          <span className="h-2 w-2 animate-livepulse rounded-full bg-gilt" />
+          <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-gilt">New case · wagers open</span>
+          <span className="font-mono text-[17px] tabular-nums tracking-[0.08em] text-cream">{preMatchCountdown!.label}</span>
+          <span className="font-mono text-[12px] tracking-normal text-mute">first night falls at zero</span>
+        </motion.div>
+      )}
+
+      {/* Betting-window pill — the stream is paused for a wager, so a live countdown lands centre-stage.
+          Kept compact on purpose: the scene header already names the question and the Wagers panel holds
+          the bet, so this stays a slim pulse + countdown rather than a wide label that sprawled under the
+          transcript toggle at the top-right. */}
       {betWindow && betCountdown && (
         <motion.div
           key={`${betWindow.market}-${betWindow.round}`}
           initial={{ opacity: 0, y: -8 }}
           animate={{ opacity: 1, y: 0 }}
           className={[
-            "absolute left-1/2 top-3 z-40 flex -translate-x-1/2 items-center gap-3 rounded-full border px-5 py-2.5 backdrop-blur-sm",
+            "absolute left-1/2 top-3 z-40 flex -translate-x-1/2 items-center gap-2.5 rounded-full border px-4 py-2 backdrop-blur-sm",
             betClosingSoon ? "border-convict bg-convict/15 shadow-[0_0_24px_rgba(179,58,58,0.3)]" : "border-gilt bg-gilt/15 shadow-[0_0_24px_rgba(240,197,82,0.3)]",
           ].join(" ")}
         >
           <span className={["h-2 w-2 animate-livepulse rounded-full", betClosingSoon ? "bg-convict" : "bg-gilt"].join(" ")} />
-          <span className={["font-mono text-[11px] uppercase tracking-[0.22em]", betClosingSoon ? "text-convict" : "text-gilt"].join(" ")}>
-            Wagers open · {betLabel}
+          <span className={["font-mono text-[11px] uppercase tracking-[0.2em]", betClosingSoon ? "text-convict" : "text-gilt"].join(" ")}>
+            {betClosingSoon ? "Closing" : "Wagers open"}
           </span>
-          <span className={["font-mono text-[17px] tabular-nums tracking-[0.08em]", betClosingSoon ? "animate-livepulse text-convict" : "text-cream"].join(" ")}>
+          <span className={["font-mono text-[16px] tabular-nums tracking-[0.06em]", betClosingSoon ? "animate-livepulse text-convict" : "text-cream"].join(" ")}>
             {betCountdown.label}
           </span>
-          <span className="font-mono text-[12px] tracking-normal text-mute">→ The Wagers</span>
         </motion.div>
       )}
       {/* The vote board — the aggregate climax of a day vote, so the tensest moment lands on the stage
@@ -574,9 +639,10 @@ export function Court({
           )}
         </div>
       )}
-      {/* Stage control — the testimony-log toggle. (Audio toggles + phase/liveness live in the header.) */}
+      {/* Stage control — the testimony-log toggle. (Audio toggles + phase/liveness live in the header.)
+          Sits above the centred banners (z-40) so a betting-window pill can never cover it. */}
       {(shownTurns > 0 || showLog) && (
-        <div className="absolute right-3 top-3 z-30 flex flex-col items-end gap-2">
+        <div className="absolute right-3 top-3 z-40 flex flex-col items-end gap-2">
           <button
             type="button"
             onClick={() => setShowLog((v) => !v)}
@@ -612,7 +678,14 @@ export function Court({
       <div className="relative z-10 flex min-h-0 w-full flex-1 flex-col items-center overflow-y-auto px-5 pt-3.5 pb-3 sm:px-8">
         {/* Centres when short; on a long speech the auto-margins collapse and the block scrolls. */}
         <div className="my-auto flex w-full flex-col items-center py-3">
-        <div className="mb-7 mt-1.5 text-center">
+        <div className="mb-7 mt-1.5 flex flex-col items-center text-center">
+          {/* Narration gets a quiet eyebrow so the court's scene-setting reads as narration; a player's own
+              words need no label — the quoted, upright body already marks them as speech. */}
+          {!isSpeech && (
+            <span className="mb-2.5 font-mono text-[10px] uppercase tracking-[0.34em] text-mute-2">
+              <span className="mr-2 text-line-2">✦</span>Narration<span className="ml-2 text-line-2">✦</span>
+            </span>
+          )}
           <div className="font-mono text-[14px] uppercase tracking-[0.3em] text-gilt">{scene.title}</div>
           <div className="mt-1.5 font-body text-[18px] italic text-mute">{scene.note}</div>
         </div>
@@ -633,10 +706,19 @@ export function Court({
           <span className="mx-2 text-mute-2">—</span>
         </div>
 
-        <blockquote className="min-h-[120px] w-full max-w-[34.5rem] text-center font-body text-[clamp(1.25rem,4.6vw,2rem)] italic leading-[1.55] text-cream sm:leading-[1.62]">
+        {/* Testimony is rendered as an actual spoken quote — upright, wrapped in gilt quotation marks — so
+            it reads as the player's own voice. Narration stays an italic, unquoted inscription. */}
+        <blockquote
+          className={[
+            "min-h-[120px] w-full max-w-[34.5rem] text-center font-body text-[clamp(1.25rem,4.6vw,2rem)] leading-[1.55] text-cream sm:leading-[1.62]",
+            isSpeech ? "not-italic" : "italic",
+          ].join(" ")}
+        >
           {/* Full text is laid out from the start; characters only fade in — so centered lines
               never slide while typing. */}
+          {isSpeech && <span aria-hidden className="mr-1 align-[-0.25em] font-display text-[1.5em] leading-[0] text-gilt-soft">“</span>}
           <RevealedSpeech full={scene.body} count={shown.length} done={done} />
+          {isSpeech && <span aria-hidden className="ml-1 align-[-0.25em] font-display text-[1.5em] leading-[0] text-gilt-soft">”</span>}
         </blockquote>
 
         {moveLine && (

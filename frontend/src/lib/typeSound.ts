@@ -6,6 +6,9 @@
  *   - The dramatic stings that punctuate the match's key beats — a gavel on the verdict, a dusk/dawn
  *     sting on the day↔night swing, a heavy thud when a seat falls, and a win/lose cue on settle
  *     (`gavel` / `nightFall` / `dayBreak` / `bodyFall` / `winSting` / `loseSting`).
+ *   - The wager cues around the betting markets — a bell when a timed market opens, a tense pulse as its
+ *     countdown enters the red, and a coin-bag jingle on placing/reclaiming a wager
+ *     (`marketOpen` / `countdownWarn` / `coins`).
  *
  * Browsers block audio until the first user gesture, so the context is created lazily and resumed on
  * the first pointer/key interaction; every emitter no-ops while the context is still suspended, so
@@ -78,8 +81,11 @@ function audio(): { ctx: AudioContext; master: GainNode; noise: AudioBuffer } | 
   return ctx && master && noise ? { ctx, master, noise } : null;
 }
 
-/** A single keystroke clack: a fast-decaying bandpassed noise burst with a touch of low body. */
-export function clickKey(): void {
+/**
+ * A single keystroke clack: a fast-decaying bandpassed noise burst with a touch of low body. `scale`
+ * (0–1) softens it — e.g. the typewriter runs quieter under TTS so the clacks don't fight the voice.
+ */
+export function clickKey(scale = 1): void {
   if (muted()) return;
   const now = performance.now();
   if (now - lastClick < MIN_CLICK_MS) return;
@@ -96,7 +102,7 @@ export function clickKey(): void {
   bp.frequency.value = 1700 + Math.random() * 1000; // per-key variation
   bp.Q.value = 0.9;
   const gain = a.ctx.createGain();
-  const peak = 0.42 + Math.random() * 0.14;
+  const peak = (0.42 + Math.random() * 0.14) * scale;
   gain.gain.setValueAtTime(0.0001, t);
   gain.gain.exponentialRampToValueAtTime(peak, t + 0.002);
   gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.045);
@@ -238,4 +244,46 @@ export function loseSting(): void {
     tone(a, { freq, delay: i * 0.18, dur: 0.8, peak: 0.26, attack: 0.02 }); // A4·F4·C4 ↓
     tone(a, { freq: freq * 0.5, delay: i * 0.18, dur: 0.8, peak: 0.12, type: "triangle", attack: 0.02 }); // sub
   });
+}
+
+// ── wager cues ───────────────────────────────────────────────────────────────────────────────────
+// Betting-specific accents, same shared context/master/mute as the stings above: a bright bell when a
+// timed market opens, a tense pulse as its countdown enters the red, and a coin-bag jingle on a wager.
+
+/** Market-open bell — a timed betting window has opened on stage. Two bright bell strikes (fundamental
+ *  + shimmer partials), inviting and unmistakable, distinct from the day/night stings. */
+export function marketOpen(): void {
+  if (muted()) return;
+  const a = audio();
+  if (!a || a.ctx.state !== "running") return;
+  for (const delay of [0, 0.16]) {
+    tone(a, { delay, freq: 988, dur: 0.55, peak: 0.24, type: "triangle", attack: 0.004 }); // B5 body
+    tone(a, { delay, freq: 1319, dur: 0.4, peak: 0.1, type: "sine", attack: 0.004 }); // E6 partial
+    tone(a, { delay, freq: 2637, dur: 0.22, peak: 0.04, type: "sine", attack: 0.004 }); // shimmer
+  }
+}
+
+/** Countdown warning — the window has entered its final 10 seconds (the timer turns red). Two short,
+ *  hard-edged descending beeps with a sub buzz for weight: urgent without being shrill. */
+export function countdownWarn(): void {
+  if (muted()) return;
+  const a = audio();
+  if (!a || a.ctx.state !== "running") return;
+  for (const delay of [0, 0.14]) {
+    tone(a, { delay, freq: 660, endFreq: 590, dur: 0.12, peak: 0.3, type: "sawtooth", attack: 0.003 });
+    tone(a, { delay, freq: 330, dur: 0.12, peak: 0.1, type: "square", attack: 0.003 }); // sub buzz
+  }
+}
+
+/** Coin-bag jingle — a wager placed or a pot reclaimed. A scatter of bright metallic "clinks" (jittered
+ *  high bandpass-noise bursts) over a few ringing partials, so it reads as coins spilling, not one tone. */
+export function coins(): void {
+  if (muted()) return;
+  const a = audio();
+  if (!a || a.ctx.state !== "running") return;
+  for (let i = 0; i < 7; i++) {
+    const delay = 0.01 + i * 0.03 + Math.random() * 0.02;
+    transient(a, { delay, dur: 0.05, peak: 0.16 + Math.random() * 0.1, freq: 3200 + Math.random() * 2200, type: "bandpass" });
+  }
+  [2093, 2637, 3136].forEach((freq, i) => tone(a, { freq, delay: 0.02 + i * 0.05, dur: 0.18, peak: 0.06, type: "triangle", attack: 0.002 })); // metallic ring
 }

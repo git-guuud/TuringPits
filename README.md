@@ -94,7 +94,7 @@ check runs on-chain; any failure reverts.
 
 | Contract                | Address                                      |
 | ----------------------- | -------------------------------------------- |
-| `MafiaMarket`           | `0xdF955ED2D8C5D1F3C4Acfdb8e26885a25a79b917` |
+| `MafiaMarket`           | `0x35fCb9De839700ED139077ECB183257dD10C581f` |
 | `MockBetToken` (CHIP)   | `0x48cF05921C8f042Ed337f56F947542aB89691aBb` |
 | `Forwarder` (EIP-2771)  | `0xaD341c0A01eaA8EBe8B9aee9FD1364C619fB770A` |
 

@@ -36,7 +36,9 @@ contract MafiaMarket is ERC2771Context {
     ///      - PlayerFate    — "what happens to seat N?" Bucketed by death round: outcome 0 = survives,
     ///        outcome k = out in round k (1..FATE_BUCKETS-2), and the last bucket (FATE_BUCKETS-1)
     ///        catches death in round >= FATE_BUCKETS-1 ("out in round 4+"). Subsumes the old Survival +
-    ///        RoundOfDeath YES/NO markets. FATE_BUCKETS outcomes.
+    ///        RoundOfDeath YES/NO markets. FATE_BUCKETS outcomes. NOT FLOATED FOR NOW — createMatch no
+    ///        longer mints a per-seat fate market; the kind + settle branch are retained so re-adding it
+    ///        is just restoring the seat loop in createMatch.
     ///      - RoundVotedOut — "who is voted out in round R's day vote?" A RECURRING per-round market:
     ///        one market (Prop.param == R) is created up front for round 1 and the host opens a fresh
     ///        one per later round via openVotedOutRound() as the match advances. Outcomes: one per seat
@@ -194,10 +196,10 @@ contract MafiaMarket is ERC2771Context {
         address teeSigner, uint8 playerCount,
         uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock
     );
-    /// @notice Side markets auto-created with the match: one PlayerFate market per seat plus the round-1
-    ///         RoundVotedOut and round-1 NightKill markets, so `count` == playerCount + 2 at creation.
-    ///         Later RoundVotedOut / NightKill rounds are appended on demand (see openVotedOutRound /
-    ///         openNightKillRound and their *RoundOpened events).
+    /// @notice Side markets auto-created with the match: the round-1 RoundVotedOut and round-1 NightKill
+    ///         markets, so `count` == 2 at creation. (The per-seat PlayerFate/survival market is not
+    ///         floated for now.) Later RoundVotedOut / NightKill rounds are appended on demand (see
+    ///         openVotedOutRound / openNightKillRound and their *RoundOpened events).
     event PropsCreated(uint256 indexed matchId, uint256 count);
 
     modifier onlyOwner() { require(msg.sender == owner, "not owner"); _; }
@@ -256,18 +258,18 @@ contract MafiaMarket is ERC2771Context {
             p.bettingOpenBlock, p.bettingCloseBlock, p.matchStartBlock, p.settlementDeadlineBlock
         );
 
-        // Auto-create the side markets, all resolved from the same verified run at settle():
-        //   props[0 .. n-1]  PlayerFate,    one per seat (propIdx == seat == param; FATE_BUCKETS outcomes)
-        //   props[n]         RoundVotedOut, round 1 (param == 1; playerCount + 1 outcomes)
-        //   props[n + 1]     NightKill,     round 1 (param == 1; playerCount + 1 outcomes)
-        // so propCount(matchId) == playerCount + 2 at creation. The two recurring per-round markets each
-        // append their later rounds on demand (openVotedOutRound / openNightKillRound), so once the match
-        // advances the two kinds interleave — DON'T assume a fixed index formula: the server/UI maps
-        // propIdx ⇄ (kind, param) by reading each Prop's fields (kind is the label authority).
+        // Auto-create the two RECURRING per-round side markets' round 1, resolved from the same verified
+        // run at settle():
+        //   props[0]  RoundVotedOut, round 1 (param == 1; playerCount + 1 outcomes)
+        //   props[1]  NightKill,     round 1 (param == 1; playerCount + 1 outcomes)
+        // so propCount(matchId) == 2 at creation. The per-seat "player fate" (survival) market is REMOVED
+        // for now — createMatch no longer mints it. The PropKind.PlayerFate branch + FATE_BUCKETS are kept
+        // intact so re-adding it is just restoring a `for (seat..) props.push(PlayerFate)` loop here. Both
+        // recurring markets append their later rounds on demand (openVotedOutRound / openNightKillRound),
+        // and the on-demand singles (Faction, MafiaSeat, DetectiveClaim) float at the tail, so the kinds
+        // interleave — DON'T assume a fixed index formula: the server/UI maps propIdx ⇄ (kind, param) by
+        // reading each Prop's fields (kind is the label authority).
         Prop[] storage props = _props[matchId];
-        for (uint8 seat = 0; seat < p.playerCount; seat++) {
-            props.push(_newProp(PropKind.PlayerFate, seat, FATE_BUCKETS));
-        }
         props.push(_newProp(PropKind.RoundVotedOut, 1, p.playerCount + 1));
         props.push(_newProp(PropKind.NightKill, 1, p.playerCount + 1));
         votedOutRoundsOpened[matchId] = 1;  // round-1 "voted out" market created up front
@@ -837,9 +839,9 @@ contract MafiaMarket is ERC2771Context {
         emit BatchClaimed(matchId, user, paid, total);
     }
 
-    /// @notice Number of side markets attached to a match (one PlayerFate per seat + one RoundVotedOut
-    ///         per opened round + one NightKill per opened round — i.e.
-    ///         playerCount + votedOutRoundsOpened + nightKillRoundsOpened at any time).
+    /// @notice Number of side markets attached to a match (one RoundVotedOut per opened round + one
+    ///         NightKill per opened round + the on-demand singles — i.e. votedOutRoundsOpened +
+    ///         nightKillRoundsOpened + any floated Faction / MafiaSeat / DetectiveClaim market).
     function propCount(uint256 matchId) external view returns (uint256) {
         return _props[matchId].length;
     }

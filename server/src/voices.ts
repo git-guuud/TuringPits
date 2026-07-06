@@ -12,7 +12,10 @@
  *   ELEVENLABS_DEFAULT_VOICE_ID — the voice for any unmapped name
  *
  * NOTE: these are well-known ElevenLabs premade voice IDs; they can drift per account/region. If a
- * voice 404s at synthesis time, override it via ELEVENLABS_VOICE_MAP (see myTasks.md).
+ * voice 404s at synthesis time, override it via ELEVENLABS_VOICE_MAP (see myTasks.md). ElevenLabs also
+ * reclassifies some older "default" voices as *library* voices over time — those 402 with
+ * `paid_plan_required` on a free-tier key ("Free users cannot use library voices via the API"). Swap the
+ * offending name to a still-premade voice (e.g. Charlotte→Jessica, done below; Aria is also paywalled now).
  */
 
 /**
@@ -25,7 +28,7 @@
  */
 export const DEFAULT_VOICE_MAP: Readonly<Record<string, string>> = {
   Atlas: "nPczCjzI2devNBz1zQrb", // Brian — deep, resonant, confident (was Adam: robotic)
-  Vesper: "XB0fDUnXU5powFXDhCwa", // Charlotte — dry, wry
+  Vesper: "cgSgspJ2msm6clMCkdW9", // Jessica — dry, wry (was Charlotte XB0fD…, now a paywalled *library* voice: 402 paid_plan_required on the free tier)
   Nova: "FGY2WhTYpPnrIDTdsKH5", // Laura — young, warm, earnest (was Elli: robotic)
   Kestrel: "TX3LPaxmHKxFdv7VOQHJ", // Liam — quick, clipped
   Mira: "EXAVITQu4vr4xnSDxMaL", // Sarah — measured, even

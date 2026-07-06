@@ -9,6 +9,11 @@ import {
   estimateMp3DurationMs,
   estimateSpeechMs,
   RECOGNIZED_TAGS,
+  parseKeys,
+  isKeyExhausted,
+  KeyPool,
+  synthWithRotation,
+  ElevenLabsError,
   type ToneInput,
 } from "./tts.js";
 import { DEFAULT_VOICE_MAP, DEFAULT_FALLBACK_VOICE, loadVoiceMap, voiceFor } from "./voices.js";
@@ -201,6 +206,105 @@ describe("play-length estimation (stage pacing)", () => {
     expect(estimateSpeechMs("hi")).toBe(1_500); // floored
     expect(estimateSpeechMs("x".repeat(140))).toBe(10_000); // 140 / 14 × 1000
     expect(estimateSpeechMs("x".repeat(100_000))).toBe(30_000); // capped
+  });
+});
+
+describe("elevenlabs key pool — roll over when a key runs out of credit", () => {
+  const quotaErr = () =>
+    new ElevenLabsError(401, '{"detail":{"status":"quota_exceeded","message":"This request exceeds your quota"}}');
+  const badKeyErr = () =>
+    new ElevenLabsError(401, '{"detail":{"status":"invalid_api_key","message":"Invalid API key"}}');
+  const libraryErr = () =>
+    new ElevenLabsError(402, '{"detail":{"status":"paid_plan_required","message":"Free users cannot use library voices"}}');
+  const rateErr = () =>
+    new ElevenLabsError(429, '{"detail":{"status":"too_many_concurrent_requests"}}');
+
+  it("parseKeys splits on commas/whitespace, trims, dedupes, and drops empties", () => {
+    expect(parseKeys("a, b\nc  d,,a")).toEqual(["a", "b", "c", "d"]);
+    expect(parseKeys("  solo  ")).toEqual(["solo"]);
+    expect(parseKeys("")).toEqual([]);
+    expect(parseKeys(undefined)).toEqual([]);
+  });
+
+  it("isKeyExhausted is true for out-of-credit AND rejected (401) keys, false for plan/transient errors", () => {
+    expect(isKeyExhausted(quotaErr())).toBe(true); // out of credit
+    expect(isKeyExhausted(badKeyErr())).toBe(true); // typo'd / revoked key — a good key can still work
+    expect(isKeyExhausted(libraryErr())).toBe(false); // paywalled voice — every key fails identically
+    expect(isKeyExhausted(rateErr())).toBe(false); // transient rate limit
+    expect(isKeyExhausted(new Error("network down"))).toBe(false);
+  });
+
+  it("KeyPool.retire advances only the active key and is idempotent under concurrency", () => {
+    const pool = new KeyPool(["k1", "k2", "k3"]);
+    expect(pool.active).toBe("k1");
+    expect(pool.retire("k1")).toBe("k2");
+    expect(pool.retire("k1")).toBe("k2"); // a second caller reporting k1 does NOT double-advance
+    expect(pool.active).toBe("k2");
+    expect(pool.retire("k2")).toBe("k3");
+    expect(pool.retire("k3")).toBeUndefined(); // pool drained
+    expect(pool.active).toBeUndefined();
+  });
+
+  it("KeyPool dedupes so a repeated key never wastes a rotation hop", () => {
+    expect(new KeyPool(["k1", "k1", "k2"]).size).toBe(2);
+  });
+
+  it("rotates to the next key on a quota error, then succeeds", async () => {
+    const pool = new KeyPool(["k1", "k2", "k3"]);
+    const used: string[] = [];
+    const out = await synthWithRotation(pool, async (key) => {
+      used.push(key);
+      if (key === "k1") throw quotaErr();
+      return Buffer.from(`audio-${key}`);
+    });
+    expect(out.toString()).toBe("audio-k2");
+    expect(used).toEqual(["k1", "k2"]); // tried k1, rolled over to k2
+    expect(pool.active).toBe("k2"); // k1 retired for the rest of the process
+  });
+
+  it("rotates past a rejected (401 invalid) key so one bad key doesn't kill the pool", async () => {
+    const pool = new KeyPool(["typo", "good"]);
+    const used: string[] = [];
+    const out = await synthWithRotation(pool, async (key) => {
+      used.push(key);
+      if (key === "typo") throw badKeyErr();
+      return Buffer.from(`audio-${key}`);
+    });
+    expect(out.toString()).toBe("audio-good");
+    expect(used).toEqual(["typo", "good"]);
+    expect(pool.active).toBe("good");
+  });
+
+  it("does NOT rotate on a non-credit error (paywalled voice) — the key is preserved", async () => {
+    const pool = new KeyPool(["k1", "k2"]);
+    const used: string[] = [];
+    await expect(
+      synthWithRotation(pool, async (key) => {
+        used.push(key);
+        throw libraryErr();
+      }),
+    ).rejects.toThrow(/402/);
+    expect(used).toEqual(["k1"]); // no rollover — k2 not burned
+    expect(pool.active).toBe("k1");
+  });
+
+  it("throws the credit error once every key in the pool is exhausted", async () => {
+    const pool = new KeyPool(["k1", "k2"]);
+    const used: string[] = [];
+    await expect(
+      synthWithRotation(pool, async (key) => {
+        used.push(key);
+        throw quotaErr();
+      }),
+    ).rejects.toThrow(/quota/i);
+    expect(used).toEqual(["k1", "k2"]);
+    expect(pool.active).toBeUndefined();
+  });
+
+  it("a single-key pool surfaces a quota error without rotation (matches old behavior)", async () => {
+    const pool = new KeyPool(["only"]);
+    await expect(synthWithRotation(pool, async () => { throw quotaErr(); })).rejects.toThrow(/quota/i);
+    expect(pool.active).toBeUndefined();
   });
 });
 

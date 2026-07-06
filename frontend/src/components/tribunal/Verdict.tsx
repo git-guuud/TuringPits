@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { MatchApi, ViewState } from "../../state/matchStore.js";
 import type { PropSnapshot } from "../../lib/types.js";
@@ -95,30 +95,37 @@ function ChoiceCard({
   c,
   selected,
   selectable,
+  bettable,
   dimmed,
   onSelect,
 }: {
   c: Choice;
   selected: boolean;
   selectable: boolean;
+  /** The market still takes bets — drives whether the per-choice figure reads as a projection vs a result. */
+  bettable: boolean;
   dimmed: boolean;
   onSelect: () => void;
 }) {
+  // Odds/pool only read as data once the market actually holds wagers; before then a card would show a
+  // wall of "0% · ◈0.00 · —" noise, so an empty pool collapses to a single quiet line instead.
+  const hasPool = parseFloat(c.total) > 0;
+  const m = mult(c.pool, c.total);
   return (
     <button
       type="button"
       disabled={!selectable}
       onClick={onSelect}
       className={[
-        "relative w-full border-[3px] px-3.5 py-3 text-left transition-colors",
+        "relative w-full border px-3.5 py-2.5 text-left transition-colors",
         selected
           ? "border-gilt bg-gilt/[0.06]"
           : c.mine > 0
-            ? "border-gilt/60"
+            ? "border-gilt/60 bg-gilt/[0.03]"
             : c.winner
               ? c.accent.replace("text-", "border-")
-              : "border-gilt/40",
-        selectable ? "cursor-pointer hover:border-gilt/70" : "cursor-default",
+              : "border-line-2",
+        selectable ? "cursor-pointer hover:border-gilt/60" : "cursor-default",
         dimmed ? "opacity-40" : "",
       ].join(" ")}
     >
@@ -134,18 +141,34 @@ function ChoiceCard({
       )}
       <div className="flex items-center justify-between gap-1.5">
         <span className={["truncate font-mono text-[10px] uppercase tracking-[0.14em]", c.eyebrowClass].join(" ")}>{c.eyebrow}</span>
-        <span className="shrink-0 font-mono text-[15px] tabular-nums text-cream">{mult(c.pool, c.total)}</span>
+        <span className={["shrink-0 font-mono text-[15px] tabular-nums", hasPool && m !== "—" ? "text-cream" : "text-mute-2"].join(" ")}>{m}</span>
       </div>
-      <div className={["mt-1.5 font-display text-[21px] tracking-[0.1em]", c.accent].join(" ")}>{c.label}</div>
-      <div className="mt-2 flex items-baseline justify-between font-mono text-[10.5px] tracking-[0.06em] text-mute">
-        <span>{pct(c.pool, c.total)}% of pot</span>
-        <span>◈ {parseFloat(c.pool).toFixed(2)}</span>
-      </div>
-      <div className="mt-1.5 h-0.5 bg-line">
-        <div className={["h-full", c.bar].join(" ")} style={{ width: `${pct(c.pool, c.total)}%` }} />
-      </div>
+      <div className={["mt-1 font-display text-[21px] tracking-[0.1em]", c.accent].join(" ")}>{c.label}</div>
+      {hasPool ? (
+        <>
+          <div className="mt-2 flex items-baseline justify-between font-mono text-[10.5px] tracking-[0.06em] text-mute">
+            <span>{pct(c.pool, c.total)}% of pot</span>
+            <span>◈ {parseFloat(c.pool).toFixed(2)}</span>
+          </div>
+          <div className="mt-1.5 h-0.5 bg-line">
+            <div className={["h-full", c.bar].join(" ")} style={{ width: `${pct(c.pool, c.total)}%` }} />
+          </div>
+        </>
+      ) : (
+        <div className="mt-1.5 font-mono text-[10px] tracking-[0.08em] text-mute-2">no wagers yet</div>
+      )}
+      {/* Your position on THIS outcome — the amount always, plus the payout it stands to return (a live
+          projection while betting is open; the realized payout once it's the winning outcome). A losing /
+          voided outcome shows only the stake, so no wrong "to win" is implied after settlement. */}
       {c.mine > 0 && (
-        <div className="mt-2 font-mono text-[10.5px] tracking-[0.06em] text-gilt">● your wager · ◈ {c.mine.toFixed(3)}</div>
+        <div className="mt-2 flex items-center justify-between gap-1 rounded-sm border border-gilt/40 bg-gilt/[0.09] px-2 py-1 font-mono text-[10.5px] tracking-[0.03em]">
+          <span className="text-gilt">● ◈{c.mine.toFixed(2)} yours</span>
+          {c.winner ? (
+            <span className="text-acquit">pays ◈{existingWin(c.mine, c.pool, c.total).toFixed(2)}</span>
+          ) : bettable ? (
+            <span className="text-cream-dim">→ ◈{existingWin(c.mine, c.pool, c.total).toFixed(2)}</span>
+          ) : null}
+        </div>
       )}
     </button>
   );
@@ -228,6 +251,10 @@ function MarketRow({
   const fav = m.choices.length ? m.choices.reduce((a, b) => (parseFloat(b.pool) > parseFloat(a.pool) ? b : a)) : null;
   const winner = m.choices.find((c) => c.winner) ?? null;
   const potTotal = m.choices.length ? m.choices[0]!.total : "0";
+  // Name the outcome(s) the wallet is on right in the collapsed row — a lone pick reads "on CONVICTED",
+  // a hedge reads "across N picks" — so the position is legible without expanding the market.
+  const myPicks = m.choices.filter((c) => c.mine > 0);
+  const myPositionLabel = myPicks.length === 1 ? `on ${myPicks[0]!.label}` : `across ${myPicks.length} picks`;
 
   // Projected payout for the staged pick (a NEW stake) — only meaningful while this row is open.
   const stakeNum = parseFloat(amount);
@@ -238,12 +265,38 @@ function MarketRow({
   const exceedsBalance = connected && balance != null && stakeNum > balance;
   const canWager = !!picked && !busy && stakeNum > 0 && !exceedsBalance;
 
+  // A sealed / settled / missed market carries no live action — recede it in the list (dull frame +
+  // dimmed title) so the eye lands on the markets that are actually open or claimable.
+  const dull = !m.bettable && !m.canClaim;
+
   return (
-    <div className={["border transition-colors", open ? "border-gilt/50 bg-ink-2/40" : "border-gilt/40 hover:border-gilt/60"].join(" ")}>
-      {/* ── Collapsed header — title, status, odds peek, your position. Tap to expand. ── */}
-      <button type="button" onClick={onToggle} className="flex w-full items-start justify-between gap-2 px-3.5 py-2.5 text-left">
+    <div
+      className={[
+        "border transition-colors",
+        open
+          ? dull
+            ? "border-line-2 bg-ink-2/20"
+            : "border-gilt/50 bg-ink-2/40"
+          : m.canClaim
+            ? "border-acquit/40 hover:border-acquit/60"
+            : dull
+              ? "border-line/50 hover:border-line-2"
+              : "border-gilt/40 hover:border-gilt/60",
+      ].join(" ")}
+    >
+      {/* ── Collapsed header — title, status, odds peek, your position. Tap to expand. A sealed / settled
+          row carries no live action, so the whole collapsed row recedes (dimmed) and lifts back on hover
+          so it still reads as tappable. Only when collapsed — an expanded sealed market stays readable. ── */}
+      <button
+        type="button"
+        onClick={onToggle}
+        className={[
+          "flex w-full items-start justify-between gap-2 px-3.5 py-2.5 text-left transition-opacity",
+          dull && !open ? "opacity-55 hover:opacity-90" : "",
+        ].join(" ")}
+      >
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-cream">
+          <div className={["flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.14em]", dull ? "text-cream-dim" : "text-cream"].join(" ")}>
             <span className="truncate">{m.title}</span>
             {m.hasWager && <span className="shrink-0 text-gilt" title="You hold a wager here">●</span>}
           </div>
@@ -257,7 +310,7 @@ function MarketRow({
             ) : (
               "—"
             )}
-            {m.myStake > 0 && <span className="text-gilt"> · ◈{m.myStake.toFixed(2)} in</span>}
+            {m.myStake > 0 && <span className="text-gilt"> · ◈{m.myStake.toFixed(2)} {myPositionLabel}</span>}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-0.5">
@@ -295,6 +348,7 @@ function MarketRow({
                 c={c}
                 selected={picked === c.key}
                 selectable={m.bettable && !busy}
+                bettable={m.bettable}
                 dimmed={!m.bettable && !c.winner}
                 onSelect={() => setPicked(c.key)}
               />
@@ -449,7 +503,7 @@ function MarketRow({
 
 export function Verdict({ api }: { api: MatchApi }) {
   const { state: s, connect, connectBurner, placePropBet, claimProp, refundProp } = api;
-  const [amount, setAmount] = useState("0.01");
+  const [amount, setAmount] = useState("10.0");
   // Faucet mint kicked off from the Wagers panel (the Menu's "Get test CHIP" isn't reachable mid-match).
   // Local flag only drives the button copy; `api.getTestTokens` owns the actual tx/pending state.
   const [minting, setMinting] = useState(false);
@@ -460,15 +514,26 @@ export function Verdict({ api }: { api: MatchApi }) {
   // Which market is expanded. null = use the sensible default; "__none__" = explicitly all-collapsed.
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
+  // The scrollable market list — snapped back to the top when a betting window hoists its market up there.
+  const listRef = useRef<HTMLDivElement>(null);
 
   const live = s.market.state === "OPEN" && s.market.bettingLive === true;
   const preOpen = s.market.state === "OPEN" && !s.market.bettingLive;
-  const open = live; // bets are only accepted on-chain while live
+  // Bets are only accepted on-chain while live — AND never once the verdict is on stage. The server
+  // freezes every market before it broadcasts the reveal, so the closed snapshot normally shuts betting
+  // first; this is the belt-and-suspenders that guarantees no market takes a wager the moment the
+  // spectator is looking at the outcome (playbackComplete = the reveal is showing), even during the brief
+  // gap before settle() lands the terminal snapshot.
+  const open = live && !s.playbackComplete;
   const countdown = useCountdown(live ? s.market.closesAt : null);
   const closingSoon = countdown != null && countdown.ms <= 15000;
   // The synchronized in-loop betting window on stage (if any) — spotlights ONE market with its own countdown.
   const windowCountdown = useCountdown(s.betWindow?.endsAt ?? null);
   const windowClosing = windowCountdown != null && windowCountdown.ms <= 10000;
+  // Pre-match betting hold: the fresh court has convened and betting is open before the first night. Only
+  // before any beat lands (cursor < 0); the countdown makes the new round unmistakable and paces its wagers.
+  const preMatchCountdown = useCountdown(s.market.preMatchEndsAt ?? null);
+  const preMatchOpen = s.cursor < 0 && preMatchCountdown != null;
   const settled = s.market.state === "SETTLED";
   const refundMode = s.market.state === "REFUND";
   const connected = s.wallet.status === "connected";
@@ -485,16 +550,27 @@ export function Verdict({ api }: { api: MatchApi }) {
   const factionProp = props.find((p) => p.kind === "FACTION") ?? null;
   const factionVoid = settled && factionProp?.state === "VOID";
 
-  // "Voted out" and "night kill" are each RECURRING markets — one per round. Show only the ACTIVE one of
-  // each live: the highest round still open for bets (`closed` is on-chain truth, so this follows what's
-  // actually wagerable, not the lagging playback round). Resolved past-round markets drop off the list
-  // and stay claimable in History. PlayerFate markets always show. Once every round market is
-  // closed/settled, none show.
-  const activeVoRound = Math.max(0, ...props.filter((p) => p.kind === "ROUND_VOTED_OUT" && !p.closed).map((p) => p.param));
-  const activeNkRound = Math.max(0, ...props.filter((p) => p.kind === "NIGHT_KILL" && !p.closed).map((p) => p.param));
-  const liveProps = props.filter((p) =>
-    p.kind === "ROUND_VOTED_OUT" ? p.param === activeVoRound : p.kind === "NIGHT_KILL" ? p.param === activeNkRound : true,
-  );
+  // "Voted out" and "night kill" are each RECURRING markets — one per round, floated on-demand as the
+  // match reaches each round (so `props` only ever holds rounds that have actually started, never empty
+  // future ones). EVERY round's market stays in the list for the whole match: once its betting window
+  // closes it collapses to a resolved / awaiting-settlement row (still claimable here and from History)
+  // rather than vanishing the instant betting closed — which read as the wager itself disappearing. The
+  // active round is surfaced regardless of list position (auto-expanded, spotlighted during its window).
+  //
+  // Gate the recurring markets by what the PLAYBACK has reached, not what's on-chain: their props open
+  // ahead of the paced stream (round 1's at match creation, later rounds a beat early), so listing them
+  // the instant they exist floats a "Night 2 kill" row before the stream has even reached night 2. Hide a
+  // NIGHT_KILL / ROUND_VOTED_OUT / DETECTIVE_CLAIM market until its narrative beat is on stage (the reached*
+  // marks are monotonic). The always-on headline markets (FACTION, MAFIA_SEAT) are never gated, and once
+  // the match is done — or fully watched — every market shows so all winnings stay claimable from the list.
+  const showAllMarkets = settled || refundMode || s.playbackComplete;
+  const liveProps = props.filter((p) => {
+    if (showAllMarkets) return true;
+    if (p.kind === "NIGHT_KILL") return p.param <= s.reachedNight;
+    if (p.kind === "ROUND_VOTED_OUT") return p.param <= s.reachedDay;
+    if (p.kind === "DETECTIVE_CLAIM") return s.reachedClaim;
+    return true;
+  });
 
   const propMarket = (prop: PropSnapshot): BetMarket => {
     const total = prop.pools.reduce((acc, p) => acc + parseFloat(p), 0).toString();
@@ -721,6 +797,13 @@ export function Verdict({ api }: { api: MatchApi }) {
   // window — the spotlighted market is front-and-centre). Otherwise: the one that wants attention (a claim),
   // else the first that takes bets, else the first market. The "__none__" sentinel lets the user collapse.
   const windowKey = s.betWindow ? `prop-${s.betWindow.propIndex}` : null;
+  // Hoist the spotlighted (countdown) market to the TOP of the list — otherwise a mid-match window (e.g.
+  // "Night 3 kill") opens buried beneath the always-on headline markets, off-screen. Paired with the
+  // scroll-to-top effect below so the freshly-hoisted, auto-expanded market is actually in view.
+  if (windowKey) {
+    const i = markets.findIndex((mk) => mk.key === windowKey);
+    if (i > 0) markets.unshift(markets.splice(i, 1)[0]!);
+  }
   const defaultKey = (markets.find((mk) => mk.canClaim) ?? markets.find((mk) => mk.bettable) ?? markets[0])?.key ?? null;
   const effectiveOpen =
     windowKey && markets.some((mk) => mk.key === windowKey)
@@ -734,6 +817,12 @@ export function Verdict({ api }: { api: MatchApi }) {
 
   // Clear the staged pick whenever the open market changes.
   useEffect(() => setPicked(null), [effectiveOpen]);
+
+  // When a betting window opens, snap the list back to the top so its freshly-hoisted, auto-expanded
+  // market is in view (it may have been scrolled past). Keyed on windowKey → fires once per window.
+  useEffect(() => {
+    if (windowKey) listRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  }, [windowKey]);
 
   const balance = s.wallet.balance != null ? parseFloat(s.wallet.balance) : null;
   const maxStake = balance != null ? Math.max(0, balance) : null;
@@ -760,43 +849,51 @@ export function Verdict({ api }: { api: MatchApi }) {
         <StateBadge s={s} />
       </div>
 
-      {/* Synchronized betting-window banner — the match is paused on a dramatic beat and this market is
-          spotlighted (auto-expanded below). Its own countdown; turns urgent as it closes. */}
-      {s.betWindow && windowCountdown && (
-        <div
-          className={[
-            "mb-4 border-l-2 px-3 py-2.5 transition-colors",
-            windowClosing ? "border-convict bg-convict/[0.07]" : "border-gilt bg-gilt/[0.06]",
-          ].join(" ")}
-        >
+      {/* Pre-match betting hold — a fresh case has convened and betting is open before the first night. A
+          visible countdown makes the new round unmistakable (not an instant cut to nightfall) and gives real
+          time to back the headline markets. Only before the first beat lands. */}
+      {preMatchOpen && (
+        <div className="mb-4 border-l-2 border-gilt bg-gilt/[0.06] px-3 py-2.5">
           <div className="flex items-center justify-between">
-            <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-gilt">◈ Betting window</span>
-            <span
-              className={[
-                "font-mono text-[20px] tabular-nums tracking-[0.08em]",
-                windowClosing ? "animate-livepulse text-convict" : "text-gilt",
-              ].join(" ")}
-            >
-              {windowCountdown.label}
-            </span>
+            <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-gilt">◈ A new case convenes</span>
+            <span className="font-mono text-[20px] tabular-nums tracking-[0.08em] text-gilt">{preMatchCountdown!.label}</span>
           </div>
-          <div className="mt-1 font-display text-[15px] leading-tight text-cream">
-            {s.betWindow.market === "NIGHT_KILL"
-              ? "Who falls before dawn?"
-              : s.betWindow.market === "ROUND_VOTED_OUT"
-                ? "Who hangs in this round's vote?"
-                : `Is ${seatName(s.betWindow.seat ?? 0)}'s claim real — or a bluff?`}
-          </div>
+          <div className="mt-1 font-display text-[15px] leading-tight text-cream">Wagers open before the first night</div>
           <div className="mt-0.5 font-body text-[12px] italic leading-snug text-mute">
-            {s.betWindow.market === "DETECTIVE_CLAIM"
-              ? "back it below — the market stays open until the reveal"
-              : "back it below before the window closes"}
+            back the faction verdict &amp; who&apos;s the Mafia — the first night falls when the clock runs out
           </div>
         </div>
       )}
 
-      {/* Live betting countdown — turns urgent in the final seconds. */}
-      {live && countdown && (
+      {/* Betting-window ribbon — the match is paused on a dramatic beat and this market is spotlighted
+          (auto-expanded below, where its question + outcomes live). Kept to a single urgent line: the
+          question isn't repeated here since the spotlighted market shows it right below, and the stage
+          already frames it. Turns urgent as it closes. */}
+      {s.betWindow && windowCountdown && (
+        <div
+          className={[
+            "mb-3 flex items-center justify-between gap-3 border-l-2 px-3 py-2 transition-colors",
+            windowClosing ? "border-convict bg-convict/[0.07]" : "border-gilt bg-gilt/[0.06]",
+          ].join(" ")}
+        >
+          <span className={["flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.16em]", windowClosing ? "text-convict" : "text-gilt"].join(" ")}>
+            <span className={["h-1.5 w-1.5 animate-livepulse rounded-full", windowClosing ? "bg-convict" : "bg-gilt"].join(" ")} />
+            {windowClosing ? "Closing" : "Betting window"}
+          </span>
+          <span
+            className={[
+              "font-mono text-[20px] tabular-nums tracking-[0.08em]",
+              windowClosing ? "animate-livepulse text-convict" : "text-gilt",
+            ].join(" ")}
+          >
+            {windowCountdown.label}
+          </span>
+        </div>
+      )}
+
+      {/* Live betting countdown — the always-open faction market's close time. Suppressed while a
+          spotlighted window (or the pre-match hold) owns the countdown, so two strips never stack. */}
+      {live && countdown && !s.betWindow && !preMatchOpen && (
         <div
           className={[
             "mb-4 flex items-baseline justify-between border-l-2 px-3 py-2 transition-colors",
@@ -825,31 +922,25 @@ export function Verdict({ api }: { api: MatchApi }) {
         </div>
       )}
 
-      {/* ── Portfolio strip: where your money is, at a glance, across every market. ── */}
+      {/* ── Your book — a slim roll-up of where your money sits, across every market. Shares the
+          left-accent strip treatment with the countdowns so the panel reads as one quiet column. ── */}
       {connected && myPositions.length > 0 && (
-        <div className="mb-3 border border-gilt/30 bg-gilt/[0.04] px-3 py-2.5">
-          <div className="flex items-baseline justify-between">
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-gilt">Your book</span>
-            <span className="font-mono text-[10px] tracking-[0.06em] text-mute">
-              in {myPositions.length} {myPositions.length === 1 ? "market" : "markets"}
-            </span>
-          </div>
-          <div className="mt-1.5 flex items-baseline justify-between font-mono tabular-nums">
-            <div>
-              <span className="text-[10px] uppercase tracking-[0.1em] text-mute">staked </span>
-              <span className="text-[15px] text-cream">◈{portfolioStaked.toFixed(2)}</span>
-            </div>
-            <div className="text-right">
-              <span className="text-[10px] uppercase tracking-[0.1em] text-mute">to win </span>
-              <span className="text-[15px] text-acquit">◈{portfolioWin.toFixed(2)}</span>
-            </div>
-          </div>
-          <div className="mt-0.5 text-right font-mono text-[9.5px] italic tracking-[0.04em] text-mute">if your picks land</div>
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-l-2 border-gilt/40 bg-gilt/[0.035] px-3 py-2 font-mono">
+          <span className="text-[10px] uppercase tracking-[0.18em] text-gilt">
+            Your book <span className="text-mute">· {myPositions.length} {myPositions.length === 1 ? "market" : "markets"}</span>
+          </span>
+          <span className="flex items-baseline gap-2 tabular-nums">
+            <span className="text-[9.5px] uppercase tracking-[0.1em] text-mute">staked</span>
+            <span className="text-[13.5px] text-cream">◈{portfolioStaked.toFixed(2)}</span>
+            <span className="text-mute-2">→</span>
+            <span className="text-[9.5px] uppercase tracking-[0.1em] text-mute">to win</span>
+            <span className="text-[13.5px] text-acquit">◈{portfolioWin.toFixed(2)}</span>
+          </span>
         </div>
       )}
 
       {/* ── The market list — every bet on the table, scannable. Tap a row to expand one. ── */}
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div ref={listRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {markets.map((mk) => (
           <MarketRow
             key={mk.key}

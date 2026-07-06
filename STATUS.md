@@ -5,10 +5,15 @@ _Updated: 2026-06-29_
 > **Betting currency → CHIP (mock ERC20):** wagers now settle in `MockBetToken` (CHIP), not native
 > 0G — `betYes/betNo(matchId, amount)` pull via approve+transferFrom; payouts/refunds/fees pay CHIP.
 > The menu shows the CHIP balance + a "Get test tokens" faucet button. **Betting also stays open
-> until settle()** (no block-based close/lock). Redeployed to Galileo: market
-> `0xdF955ED2D8C5D1F3C4Acfdb8e26885a25a79b917` (now also hosts per-seat **survival side markets** —
-> see DEPLOYMENT.md / TODO.md Post-MVP #1), token `0x48cF05921C8f042Ed337f56F947542aB89691aBb`,
-> forwarder `0xaD341c0A01eaA8EBe8B9aee9FD1364C619fB770A`. Contract suite 49 green; frontend + server type-check clean.
+> until settle()** (no block-based close/lock). Redeployed to Galileo (2026-07-05): market
+> `0x35fCb9De839700ED139077ECB183257dD10C581f`, token `0x48cF05921C8f042Ed337f56F947542aB89691aBb`,
+> forwarder `0xaD341c0A01eaA8EBe8B9aee9FD1364C619fB770A`. This build is all-categorical props: the
+> headline **Faction** market plus recurring **voted-out / night-kill** and on-demand
+> **detective-claim / mafia-seat** props. The old per-seat **survival ("player fate") markets are
+> gone** — `createMatch` no longer mints them (propCount at creation is now 2, not playerCount + 2).
+> Forwarder + CHIP token were reused, so gasless session-key betting and existing balances carry over
+> (users re-approve CHIP for the new market on first bet). Contract suite 128 green; frontend + server
+> type-check clean.
 
 ## Current task
 **AI Mafia** (multiple LLMs playing Mafia). Days 1–6 **complete**: engine, TEE players,

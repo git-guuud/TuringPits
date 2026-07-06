@@ -39,7 +39,11 @@ export interface ToneInput {
 }
 
 export interface TtsConfig {
-  /** ElevenLabs API key. Empty ⇒ the whole feature is disabled. */
+  /**
+   * ElevenLabs API key(s). Accepts a SINGLE key, or several separated by commas/whitespace — the free
+   * tier's character quota is tiny (2-3 matches), so a pool lets synthesis roll over to the next key
+   * when one runs out of credit (see {@link KeyPool}/{@link synthWithRotation}). Empty ⇒ feature disabled.
+   */
   apiKey: string;
   /** ElevenLabs model. `eleven_v3` understands the tone tags; `eleven_multilingual_v2` ignores them. */
   modelId: string;
@@ -242,6 +246,90 @@ async function llmTaggedText(input: ToneInput, apiKey: string, model: string): P
 
 // ── real ElevenLabs synthesis ──────────────────────────────────────────────────
 
+/** A non-2xx ElevenLabs response, carrying the status + raw body so callers can classify it. */
+export class ElevenLabsError extends Error {
+  constructor(readonly status: number, readonly body: string) {
+    super(`elevenlabs ${status}: ${body.slice(0, 200)}`);
+    this.name = "ElevenLabsError";
+  }
+}
+
+/**
+ * True when the key itself is UNUSABLE and a different key could succeed — so the pool should roll over.
+ * Two cases, both HTTP 401 from ElevenLabs: out of credit (`quota_exceeded`) and a rejected key
+ * (`invalid_api_key` / revoked / flagged). Deliberately EXCLUDES a paywalled-voice/feature 402
+ * (`paid_plan_required`) and a rate-limit 429 (`too_many_concurrent_requests`): those fail identically on
+ * every key, so rotating would just burn the whole pool. (`quota` is also matched by body text as a
+ * belt-and-suspenders guard in case the status ever shifts off 401.)
+ */
+export function isKeyExhausted(err: unknown): boolean {
+  if (!(err instanceof ElevenLabsError)) return false;
+  return err.status === 401 || /quota/i.test(err.body);
+}
+
+/** Split a comma/whitespace-separated key string into a de-duplicated, trimmed list (empties dropped). */
+export function parseKeys(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return [...new Set(raw.split(/[,\s]+/).map((k) => k.trim()).filter(Boolean))];
+}
+
+/**
+ * An ordered pool of ElevenLabs keys with a single "active" cursor. Keys are used one at a time; when the
+ * active one runs out of credit it is RETIRED (the cursor advances) and never used again this process.
+ * `retire` is idempotent under concurrency — parallel synths that all hit the same exhausted key advance
+ * the cursor once, not once per caller — because it only advances when the passed key is still the active.
+ */
+export class KeyPool {
+  private readonly keys: string[];
+  private idx = 0;
+  constructor(keys: string[]) {
+    this.keys = [...new Set(keys)]; // a duplicate key would waste a rotation hop
+  }
+  get size(): number {
+    return this.keys.length;
+  }
+  /** The key to use right now, or undefined once the whole pool is exhausted. */
+  get active(): string | undefined {
+    return this.keys[this.idx];
+  }
+  /** Retire `key` if it is still active (out of credit), and return the next active key (or undefined). */
+  retire(key: string): string | undefined {
+    if (this.keys[this.idx] === key) {
+      this.idx++;
+      const remaining = this.keys.length - this.idx;
+      console.warn(
+        remaining > 0
+          ? `[tts] elevenlabs key ${this.idx}/${this.keys.length} out of credit — rotating (${remaining} left)`
+          : `[tts] elevenlabs: all ${this.keys.length} key(s) out of credit`,
+      );
+    }
+    return this.active;
+  }
+}
+
+/**
+ * Run a per-key synthesis, rolling forward through the pool: when the active key is UNUSABLE (out of
+ * credit / rejected — see {@link isKeyExhausted}) it is retired and the SAME synthesis is retried with
+ * the next key, until one succeeds or the pool is drained. Any other error (rate-limit, paywalled voice,
+ * network) propagates immediately — another key won't fix it. The tone-tagging has already happened
+ * upstream, so a rotation only re-issues the (cheap) ElevenLabs call, never a re-tag.
+ */
+export async function synthWithRotation(
+  pool: KeyPool,
+  synthOne: (apiKey: string) => Promise<Buffer>,
+): Promise<Buffer> {
+  for (;;) {
+    const key = pool.active;
+    if (!key) throw new Error("elevenlabs: no api key configured");
+    try {
+      return await synthOne(key);
+    } catch (e) {
+      if (isKeyExhausted(e) && pool.retire(key)) continue; // rotated to a fresh key — retry
+      throw e; // not a key-level failure, or the pool is now drained
+    }
+  }
+}
+
 async function elevenLabsSynth(apiKey: string, modelId: string, text: string, voiceId: string): Promise<Buffer> {
   const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
     method: "POST",
@@ -254,7 +342,7 @@ async function elevenLabsSynth(apiKey: string, modelId: string, text: string, vo
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
-    throw new Error(`elevenlabs ${res.status}: ${detail.slice(0, 200)}`);
+    throw new ElevenLabsError(res.status, detail);
   }
   return Buffer.from(await res.arrayBuffer());
 }
@@ -291,7 +379,8 @@ export function estimateSpeechMs(text: string, charsPerSec = 14): number {
 const MAX_CACHE = 256;
 
 export function createTts(cfg: TtsConfig, deps: TtsDeps = {}): Tts {
-  const enabled = !!(deps.synth || cfg.apiKey);
+  const keyPool = new KeyPool(parseKeys(cfg.apiKey));
+  const enabled = !!(deps.synth || keyPool.size);
   const hasLlm = !!cfg.anthropicApiKey;
   const llmModel = cfg.llmModel || "claude-haiku-4-5";
   const maxText = cfg.maxTextLength ?? 600;
@@ -310,7 +399,8 @@ export function createTts(cfg: TtsConfig, deps: TtsDeps = {}): Tts {
     });
 
   const synth: (text: string, voiceId: string) => Promise<Buffer> =
-    deps.synth ?? ((text, voiceId) => elevenLabsSynth(cfg.apiKey, cfg.modelId, text, voiceId));
+    deps.synth ??
+    ((text, voiceId) => synthWithRotation(keyPool, (key) => elevenLabsSynth(key, cfg.modelId, text, voiceId)));
 
   // Content-addressed cache + in-flight dedupe: identical lines (replays, many viewers) synthesize once.
   const cache = new Map<string, Buffer>();

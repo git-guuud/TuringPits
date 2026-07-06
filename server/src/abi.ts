@@ -15,7 +15,8 @@ export const MAFIA_MARKET_ABI = [
   "function nextMatchId() view returns (uint256)",
   "function createMatch((bytes32 roleCommit, bytes32 personaPoolRoot, address teeSigner, string providerType, string providerIdentity, string tlsFingerprint, string nonce, uint8 playerCount, uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock, uint16 feeBps) p) returns (uint256)",
   "function lockBetting(uint256 matchId)",
-  // host-only: freeze one survival market mid-match once its seat falls (payout-neutral; stops new bets on a decided seat)
+  // host-only: freeze one market mid-match once its outcome is public — a round's vote-out / night-kill
+  // (payout-neutral; stops new bets on a decided market)
   "function closeProp(uint256 matchId, uint256 propIdx)",
   // host-only: float the next round's "voted out" band (one prop per seat) as the match advances — the per-round market re-opens here.
   "function openVotedOutRound(uint256 matchId) returns (uint8 round, uint256 startIdx)",
@@ -38,9 +39,10 @@ export const MAFIA_MARKET_ABI = [
   "function settle(uint256 matchId, ((uint8 phase, uint32 round, uint8 player, uint8 action, uint8 target) decision, bytes rawResponseBody, uint256 contentOffset, uint256 contentLen, string reqHashHex, bytes signature)[] moves, uint8[] revealedRoles, bytes32 salt, bytes32 transcriptCID)",
   // reads (match lifecycle state lives in the Match struct; all pools/outcomes live in the props)
   "function matches(uint256) view returns (uint8 state, uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot, address teeSigner, string providerType, string providerIdentity, string tlsFingerprint, string nonce, uint8 playerCount, bytes32 transcriptCID, uint16 feeBps)",
-  // categorical side markets ("props"): one PlayerFate market per seat + one RoundVotedOut market per
-  // opened round, auto-created/floated from the match and resolved from the same verified run at
-  // settle(). The server only READS these and pushes the per-outcome pools/winner to clients; the prop
+  // categorical side markets ("props"): one RoundVotedOut + one NightKill market per opened round, plus the
+  // on-demand singles (Faction / MafiaSeat / DetectiveClaim), auto-created/floated from the match and
+  // resolved from the same verified run at settle(). (The per-seat PlayerFate/survival market is not floated
+  // for now.) The server only READS these and pushes the per-outcome pools/winner to clients; the prop
   // bets/claims are sent from the spectator wallet (frontend).
   "function propCount(uint256 matchId) view returns (uint256)",
   "function getProp(uint256 matchId, uint256 propIdx) view returns (tuple(uint8 kind, uint8 param, uint8 numOutcomes, bool closed, uint8 state, uint8 winningOutcome, uint128 netPot, uint128 winningPool, uint128[] pools))",

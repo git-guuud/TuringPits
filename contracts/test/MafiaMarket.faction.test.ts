@@ -28,17 +28,17 @@ async function opened(nonce: string, n = 6) {
   const sched = await defaultSchedule(ethers.provider);
   await ctx.market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce, playerCount: n, schedule: sched }));
   await mineUpTo(sched.bettingOpenBlock);
-  // createMatch mints props[0..n-1] PlayerFate, props[n] RoundVotedOut r1, props[n+1] NightKill r1. The
+  // createMatch mints props[0] RoundVotedOut r1, props[1] NightKill r1 (no per-seat PlayerFate market). The
   // headline "which faction wins?" market is NOT created up front — the host floats it once at match start
-  // via openFactionMarket() and it appends at the tail, so with nothing else opened it lands at propIdx n+2.
+  // via openFactionMarket() and it appends at the tail, so with nothing else opened it lands at propIdx 2.
   const mafiaSeat = fx.roles.findIndex((r) => r === 0);
   return { ...ctx, fx, sched, teeSigner, matchId: 0, n, mafiaSeat };
 }
 
 describe("MafiaMarket — 'which faction wins?' headline market (props): creation on demand", () => {
-  it("is NOT created up front — createMatch still mints exactly playerCount + 2 props, flag unset", async () => {
+  it("is NOT created up front — createMatch still mints exactly 2 props, flag unset", async () => {
     const { market, n } = await opened("fac-create");
-    expect(await market.propCount(0)).to.equal(n + 2); // n PlayerFate + VO r1 + NK r1, no Faction yet
+    expect(await market.propCount(0)).to.equal(2); // VO r1 + NK r1, no Faction yet
     expect(await market.factionMarketOpened(0)).to.equal(false);
     const count = Number(await market.propCount(0));
     for (let i = 0; i < count; i++) expect(Number((await market.getProp(0, i)).kind)).to.not.equal(KIND.Faction);
@@ -46,11 +46,11 @@ describe("MafiaMarket — 'which faction wins?' headline market (props): creatio
 
   it("openFactionMarket appends ONE binary market (TOWN / MAFIA) and flips the guard", async () => {
     const { market, owner, n } = await opened("fac-open");
-    const idx = Number(await market.propCount(0)); // tail == n+2
+    const idx = Number(await market.propCount(0)); // tail == 2
     await expect(market.connect(owner).openFactionMarket(0))
       .to.emit(market, "FactionMarketOpened").withArgs(0, idx);
     expect(await market.factionMarketOpened(0)).to.equal(true);
-    expect(await market.propCount(0)).to.equal(n + 3);
+    expect(await market.propCount(0)).to.equal(3);
     const pr = await market.getProp(0, idx);
     expect(pr.kind).to.equal(KIND.Faction);
     expect(pr.param).to.equal(0);          // param unused for this kind

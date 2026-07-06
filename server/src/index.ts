@@ -21,7 +21,7 @@ import { createServer } from "node:http";
 loadEnv({ path: resolve(dirname(fileURLToPath(import.meta.url)), "../../.env") });
 import { Hub } from "./broadcast.js";
 import { createRelayer } from "./relayer.js";
-import { createTts } from "./tts.js";
+import { createTts, parseKeys } from "./tts.js";
 import { DEFAULT_FALLBACK_VOICE, loadVoiceMap } from "./voices.js";
 import { runOneMatch, sweepAbandonedMatches, type OrchestratorConfig } from "./orchestrator.js";
 
@@ -60,13 +60,23 @@ async function main() {
     storagePrivateKey: process.env.STORAGE_PRIVATE_KEY ?? process.env.HOST_PRIVATE_KEY ?? "",
     bettingWindowSeconds: Number(process.env.BETTING_WINDOW_SECONDS ?? 90),
     openLeadSeconds: Number(process.env.OPEN_LEAD_SECONDS ?? 12),
+    // Deliberate pause on the freshly-convened court before the first night — so a new round doesn't cut
+    // straight to nightfall and there's real time to back the headline markets. 0 = instant start.
+    preMatchBettingSeconds: Number(process.env.PRE_MATCH_BETTING_SECONDS ?? 20),
     // In-loop betting windows (the match pauses to spotlight one side market). Seconds; 0 disables one.
     // Set short for local iteration so you don't sit through the full pause every round.
     nightKillWindowSeconds: Number(process.env.NIGHT_KILL_WINDOW_SECONDS ?? 30),
     votedOutWindowSeconds: Number(process.env.VOTED_OUT_WINDOW_SECONDS ?? 60),
     detectiveClaimWindowSeconds: Number(process.env.DETECTIVE_CLAIM_WINDOW_SECONDS ?? 30),
-    // Generous by default so the slow, rate-limited live match settles in time (~30 min budget).
-    settlementDeadlineSeconds: Number(process.env.SETTLEMENT_DEADLINE_SECONDS ?? 1800),
+    // Generous by default so the slow, rate-limited live match settles in time (~90 min budget). This
+    // deadline block also gates bet acceptance on-chain (betProp reverts "betting closed" past it), so a
+    // long match must not outrun it — bets on later rounds would start reverting mid-game if it did.
+    settlementDeadlineSeconds: Number(process.env.SETTLEMENT_DEADLINE_SECONDS ?? 5400),
+    // 0G's block time is a fixed ~0.5s (measured ~2.03 blk/s, <1% drift over a week). NOT sampled at
+    // runtime — a short sample can't resolve a 0.5s block time against 1s timestamps and once read ~1.0,
+    // halving the real deadline. 2.0 tracks the true rate (~1.5% under, negligible next to the ~90min
+    // deadline budget) so block-derived windows (open lead, betting window, deadline) land close to intent.
+    blocksPerSecond: Number(process.env.BLOCKS_PER_SECOND ?? 2.0),
     onMatchCreated: (matchId, deadline) => pending.set(matchId, deadline),
   };
 
@@ -83,8 +93,11 @@ async function main() {
   // Optional spoken-dialogue layer — only active if ELEVENLABS_API_KEY is set. Voices the players'
   // lines (tone-tagged, one voice per persona) over POST /tts; the keys never leave the server. See
   // tts.ts. With no key, /tts/info reports enabled:false and the frontend stays silent.
+  // ELEVENLABS_API_KEYS (plural) accepts a comma/whitespace-separated pool that rolls over to the next
+  // key when one runs out of credit; ELEVENLABS_API_KEY (singular) still works as a one-key pool.
+  const elevenLabsKeys = process.env.ELEVENLABS_API_KEYS ?? process.env.ELEVENLABS_API_KEY ?? "";
   const tts = createTts({
-    apiKey: process.env.ELEVENLABS_API_KEY ?? "",
+    apiKey: elevenLabsKeys,
     modelId: process.env.ELEVENLABS_MODEL_ID ?? "eleven_v3",
     voiceMap: loadVoiceMap(process.env.ELEVENLABS_VOICE_MAP),
     defaultVoiceId: process.env.ELEVENLABS_DEFAULT_VOICE_ID ?? DEFAULT_FALLBACK_VOICE,
@@ -117,7 +130,7 @@ async function main() {
   console.log(`[server] HTTP + WebSocket listening on :${PORT}`);
   console.log(`[server] gas relayer: ${relayer ? `ENABLED (${relayer.relayerAddress})` : "disabled"}`);
   console.log(
-    `[server] dialogue TTS: ${tts.enabled ? `ENABLED (${tts.info().model}, ${tts.info().tagger} tags)` : "disabled (set ELEVENLABS_API_KEY)"}`,
+    `[server] dialogue TTS: ${tts.enabled ? `ENABLED (${tts.info().model}, ${tts.info().tagger} tags, ${parseKeys(elevenLabsKeys).length} key(s))` : "disabled (set ELEVENLABS_API_KEY)"}`,
   );
   console.log(`[server] market=${cfg.marketAddress} chain=${cfg.chainId} seats=${cfg.playerCount}`);
 

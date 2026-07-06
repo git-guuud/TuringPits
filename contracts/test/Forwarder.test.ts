@@ -157,33 +157,35 @@ describe("Forwarder — EIP-2771 gas relayer", () => {
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "relay-batch", playerCount: 5, schedule: sched }));
     const faction = await openFaction(market, owner);
+    const mafiaMkt = Number(await market.propCount(0));
+    await market.connect(owner).openMafiaSeatMarket(0); // "who is the Mafia?" — resolves to the real Mafia seat
     await mineUpTo(sched.bettingOpenBlock);
 
     const winOut = fx.mafiaWins ? MAFIA : TOWN;
-    const survivorSeat = fx.alive.findIndex((a) => a === true);
-    expect(survivorSeat).to.be.gte(0);
+    const mafiaSeat = fx.roles.findIndex((r) => r === 0); // role enum: MAFIA == 0
+    expect(mafiaSeat).to.be.gte(0);
 
-    // User (0 native 0G) bets the winning faction + a surviving seat's PlayerFate (outcome 0) via relay;
-    // bob seeds the losing faction pool so there's a real pot.
+    // User (0 native 0G) bets the winning faction + the real Mafia seat via relay; bob seeds the losing
+    // faction pool so there's a real pot.
     await relay(forwarder, relayer, user, tokenAddr, token.interface.encodeFunctionData("faucet", []));
     await relay(forwarder, relayer, user, tokenAddr, token.interface.encodeFunctionData("approve", [marketAddr, MaxUint256]));
     await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("betProp", [0, faction, winOut, ethers.parseEther("1")]));
-    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("betProp", [0, survivorSeat, 0, ethers.parseEther("1")]));
+    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("betProp", [0, mafiaMkt, mafiaSeat, ethers.parseEther("1")]));
     await token.connect(bob).faucet();
     await token.connect(bob).approve(marketAddr, MaxUint256);
     await market.connect(bob).betProp(0, faction, winOut === MAFIA ? TOWN : MAFIA, ethers.parseEther("3"));
 
     await market.settle(0, fx.moves, fx.roles, fx.salt, CID);
     const pf = await market.getProp(0, faction);
-    const ps = await market.getProp(0, survivorSeat);
+    const ps = await market.getProp(0, mafiaMkt);
     const one = ethers.parseEther("1");
     const expected = (BigInt(pf.netPot) * one) / BigInt(pf.winningPool) + (BigInt(ps.netPot) * one) / BigInt(ps.winningPool);
 
     const before = await token.balanceOf(user.address);
-    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("batchClaim", [0, [faction, survivorSeat]]));
+    await relay(forwarder, relayer, user, marketAddr, market.interface.encodeFunctionData("batchClaim", [0, [faction, mafiaMkt]]));
     expect((await token.balanceOf(user.address)) - before).to.equal(expected);
     expect(await market.propClaimed(0, faction, user.address)).to.equal(true);
-    expect(await market.propClaimed(0, survivorSeat, user.address)).to.equal(true);
+    expect(await market.propClaimed(0, mafiaMkt, user.address)).to.equal(true);
     expect(await ethers.provider.getBalance(user.address)).to.equal(0n); // never paid gas
   });
 

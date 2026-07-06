@@ -28,18 +28,18 @@ async function opened(nonce: string, n = 6) {
   const sched = await defaultSchedule(ethers.provider);
   await ctx.market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce, playerCount: n, schedule: sched }));
   await mineUpTo(sched.bettingOpenBlock);
-  // createMatch mints props[0..n-1] PlayerFate, props[n] RoundVotedOut r1, props[n+1] NightKill r1.
+  // createMatch mints props[0] RoundVotedOut r1, props[1] NightKill r1 (no per-seat PlayerFate market).
   // The "Who is the Mafia?" market is NOT created up front — it is floated on demand and appends at the
-  // tail, so with nothing else opened it lands at propIdx n+2.
+  // tail, so with nothing else opened it lands at propIdx 2.
   const mafiaSeat = fx.roles.findIndex((r) => r === ROLE.MAFIA);
   const townSeat = fx.roles.findIndex((r) => r !== ROLE.MAFIA);
   return { ...ctx, fx, sched, teeSigner, matchId: 0, n, mafiaSeat, townSeat };
 }
 
 describe("MafiaMarket — 'Who is the Mafia?' side market (props): creation on demand", () => {
-  it("is NOT created up front — createMatch still mints exactly playerCount + 2 props, flag unset", async () => {
+  it("is NOT created up front — createMatch still mints exactly 2 props, flag unset", async () => {
     const { market, n } = await opened("ms-create");
-    expect(await market.propCount(0)).to.equal(n + 2); // n PlayerFate + VO r1 + NK r1, no MafiaSeat yet
+    expect(await market.propCount(0)).to.equal(2); // VO r1 + NK r1, no MafiaSeat yet
     expect(await market.mafiaSeatOpened(0)).to.equal(false);
     // no prop is a MafiaSeat before it is floated
     const count = Number(await market.propCount(0));
@@ -48,11 +48,11 @@ describe("MafiaMarket — 'Who is the Mafia?' side market (props): creation on d
 
   it("openMafiaSeatMarket appends ONE categorical market with one outcome per seat and flips the guard", async () => {
     const { market, owner, n } = await opened("ms-open");
-    const idx = Number(await market.propCount(0)); // tail == n+2
+    const idx = Number(await market.propCount(0)); // tail == 2
     await expect(market.connect(owner).openMafiaSeatMarket(0))
       .to.emit(market, "MafiaSeatMarketOpened").withArgs(0, idx);
     expect(await market.mafiaSeatOpened(0)).to.equal(true);
-    expect(await market.propCount(0)).to.equal(n + 3);
+    expect(await market.propCount(0)).to.equal(3);
     const pr = await market.getProp(0, idx);
     expect(pr.kind).to.equal(KIND.MafiaSeat);
     expect(pr.param).to.equal(0);              // param unused for this kind
@@ -78,7 +78,7 @@ describe("MafiaMarket — 'Who is the Mafia?' side market (props): creation on d
 });
 
 describe("MafiaMarket — 'Who is the Mafia?' side market (props): betting", () => {
-  it("accumulates per-outcome pools independently of the fate/round markets", async () => {
+  it("accumulates per-outcome pools independently of the round markets", async () => {
     const { market, owner, alice, bob, mafiaSeat, townSeat } = await opened("ms-bet");
     const idx = Number(await market.propCount(0));
     await market.connect(owner).openMafiaSeatMarket(0);
@@ -90,7 +90,7 @@ describe("MafiaMarket — 'Who is the Mafia?' side market (props): betting", () 
     expect(pr.pools[mafiaSeat]).to.equal(ethers.parseEther("1"));
     expect(pr.pools[townSeat]).to.equal(ethers.parseEther("3"));
     expect(await market.propStake(0, idx, mafiaSeat, alice.address)).to.equal(ethers.parseEther("1"));
-    // a seat's own PlayerFate market is untouched
+    // the round-1 RoundVotedOut market (propIdx 0) is untouched
     expect((await market.getProp(0, 0)).pools[0]).to.equal(0);
   });
 

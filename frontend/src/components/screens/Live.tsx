@@ -18,7 +18,7 @@ import { Record } from "../tribunal/Record.js";
 // draggable width the viewer sets, clamped so neither it nor the centre stage can be crushed; the
 // Court takes whatever's left in between.
 const BENCH_WIDTH = 248;
-const WAGERS_DEFAULT = 408;
+const WAGERS_DEFAULT = 612;
 const WAGERS_MIN = 340;
 const WAGERS_MAX = 840;
 

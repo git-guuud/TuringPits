@@ -314,6 +314,30 @@ describe("playMatch (Day 2 exit criteria)", () => {
     }
   });
 
+  it("runs the night's inference CONCURRENTLY with the onNightfall betting window (no dead air after it closes)", async () => {
+    // The whole point of the concurrency: while onNightfall holds the loop for the window's countdown,
+    // the night actors' model calls are already in flight — so when the window closes the decisions are
+    // in hand. Round 1 opens with the night, so nothing precedes it; if inference only started AFTER the
+    // hook (the old serial behaviour) no `complete` call would have landed while the window was still open.
+    let completeCalls = 0;
+    const base = new MockLocalProvider(PROVIDER_KEY);
+    const capturing: InferenceProvider = {
+      async complete(p, o) { completeCalls++; return base.complete(p, o); },
+    };
+    let callsWhileFirstWindowOpen: number | null = null;
+    await playMatch({
+      seed: SEED, n: 5, nonce: NONCE, personas,
+      players: personas.map(() => new Player(capturing)),
+      onNightfall: async (round) => {
+        // Hold the loop the way the real window does; the concurrent night inference overlaps this hold.
+        await new Promise((r) => setTimeout(r, 15));
+        if (round === 1 && callsWhileFirstWindowOpen === null) callsWhileFirstWindowOpen = completeCalls;
+      },
+    });
+    expect(callsWhileFirstWindowOpen).not.toBeNull();
+    expect(callsWhileFirstWindowOpen!).toBeGreaterThan(0);
+  });
+
   it("keeps discussion speech out of the settlement turns but inside the transcript", async () => {
     const prompts: string[] = [];
     const discussionSpeeches: string[] = [];
