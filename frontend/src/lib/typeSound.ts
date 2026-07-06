@@ -263,16 +263,15 @@ export function marketOpen(): void {
   }
 }
 
-/** Countdown warning — the window has entered its final 10 seconds (the timer turns red). Two short,
- *  hard-edged descending beeps with a sub buzz for weight: urgent without being shrill. */
+/** Countdown tick — one beep per second through the window's final 10 seconds (the timer is red). A
+ *  single short, hard-edged beep with a sub buzz for weight: urgent without being shrill. Fired once
+ *  per remaining second by the Court, so it reads as a steady per-second countdown, not a one-shot. */
 export function countdownWarn(): void {
   if (muted()) return;
   const a = audio();
   if (!a || a.ctx.state !== "running") return;
-  for (const delay of [0, 0.14]) {
-    tone(a, { delay, freq: 660, endFreq: 590, dur: 0.12, peak: 0.3, type: "sawtooth", attack: 0.003 });
-    tone(a, { delay, freq: 330, dur: 0.12, peak: 0.1, type: "square", attack: 0.003 }); // sub buzz
-  }
+  tone(a, { freq: 660, endFreq: 590, dur: 0.12, peak: 0.3, type: "sawtooth", attack: 0.003 });
+  tone(a, { freq: 330, dur: 0.12, peak: 0.1, type: "square", attack: 0.003 }); // sub buzz
 }
 
 /** Coin-bag jingle — a wager placed or a pot reclaimed. A scatter of bright metallic "clinks" (jittered
@@ -283,7 +282,7 @@ export function coins(): void {
   if (!a || a.ctx.state !== "running") return;
   for (let i = 0; i < 7; i++) {
     const delay = 0.01 + i * 0.03 + Math.random() * 0.02;
-    transient(a, { delay, dur: 0.05, peak: 0.16 + Math.random() * 0.1, freq: 3200 + Math.random() * 2200, type: "bandpass" });
+    transient(a, { delay, dur: 0.05, peak: 0.32 + Math.random() * 0.18, freq: 3200 + Math.random() * 2200, type: "bandpass" });
   }
-  [2093, 2637, 3136].forEach((freq, i) => tone(a, { freq, delay: 0.02 + i * 0.05, dur: 0.18, peak: 0.06, type: "triangle", attack: 0.002 })); // metallic ring
+  [2093, 2637, 3136].forEach((freq, i) => tone(a, { freq, delay: 0.02 + i * 0.05, dur: 0.18, peak: 0.12, type: "triangle", attack: 0.002 })); // metallic ring
 }

@@ -65,9 +65,9 @@ async function main() {
     preMatchBettingSeconds: Number(process.env.PRE_MATCH_BETTING_SECONDS ?? 20),
     // In-loop betting windows (the match pauses to spotlight one side market). Seconds; 0 disables one.
     // Set short for local iteration so you don't sit through the full pause every round.
-    nightKillWindowSeconds: Number(process.env.NIGHT_KILL_WINDOW_SECONDS ?? 30),
-    votedOutWindowSeconds: Number(process.env.VOTED_OUT_WINDOW_SECONDS ?? 60),
-    detectiveClaimWindowSeconds: Number(process.env.DETECTIVE_CLAIM_WINDOW_SECONDS ?? 30),
+    nightKillWindowSeconds: Number(process.env.NIGHT_KILL_WINDOW_SECONDS ?? 45),
+    votedOutWindowSeconds: Number(process.env.VOTED_OUT_WINDOW_SECONDS ?? 45),
+    detectiveClaimWindowSeconds: Number(process.env.DETECTIVE_CLAIM_WINDOW_SECONDS ?? 45),
     // Generous by default so the slow, rate-limited live match settles in time (~90 min budget). This
     // deadline block also gates bet acceptance on-chain (betProp reverts "betting closed" past it), so a
     // long match must not outrun it — bets on later rounds would start reverting mid-game if it did.

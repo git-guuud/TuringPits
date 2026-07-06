@@ -496,21 +496,21 @@ export function Court({
     if (betWindowKey && betWindowKey !== prev) marketOpen();
   }, [betWindowKey]);
 
-  // A tense pulse the instant the window's countdown ticks DOWN through 10s (the timer turns red). Fires
-  // only on a genuine downward crossing — we must have seen the countdown above 10s first — so a replayed
-  // window (which opens already expired, ms clamped to 0) never mis-rings it. Re-armed when the window ends.
-  const betWarnedRef = useRef(false);
-  const prevBetMsRef = useRef<number | null>(null);
+  // A tense per-second beep through the window's final ten seconds (the timer turns red). We key on the
+  // integer second remaining so each second rings exactly once (10, 9, … 1) as the countdown ticks down,
+  // re-arming above 10s; a replayed window (which opens already expired, ms clamped to 0 → 0s) stays quiet.
+  const lastBeepSecRef = useRef<number | null>(null);
   useEffect(() => {
     const ms = betCountdown?.ms ?? null;
-    const prev = prevBetMsRef.current;
-    prevBetMsRef.current = ms;
     if (ms == null) {
-      betWarnedRef.current = false;
+      lastBeepSecRef.current = null;
       return;
     }
-    if (!betWarnedRef.current && ms <= 10000 && prev != null && prev > 10000) {
-      betWarnedRef.current = true;
+    const sec = Math.ceil(ms / 1000);
+    if (sec > 10) {
+      lastBeepSecRef.current = null;
+    } else if (sec >= 1 && sec !== lastBeepSecRef.current) {
+      lastBeepSecRef.current = sec;
       countdownWarn();
     }
   }, [betCountdown]);
