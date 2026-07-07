@@ -99,6 +99,24 @@ export interface TxState {
   lastHash?: string;
 }
 
+/**
+ * An in-flight local wager, overlaid on the authoritative book until the chain read catches up — so a
+ * bet moves the odds bar + the "yours" figure the instant it's placed, not on the next pool push. Each
+ * field reconciles INDEPENDENTLY against its own authoritative source (the server pool vs the own-stake
+ * read), which land at slightly different moments, so the overlay never double-counts the user's own bet
+ * during the hand-off. See placePropBet + the overlay in Verdict.
+ */
+export interface OptimisticBet {
+  id: number;
+  propIdx: number;
+  outcome: number;
+  amount: number;
+  /** Authoritative pool for this outcome at bet time; the overlay stops adding to the pool once server pool ≥ base+amount. */
+  basePool: number;
+  /** Authoritative own-stake for this outcome at bet time; the overlay stops adding to "yours" once the read ≥ base+amount. */
+  baseMine: number;
+}
+
 export interface ViewState {
   isMock: boolean;
   nonce: string | null;
@@ -123,6 +141,8 @@ export interface ViewState {
   gaslessPref: "auto" | "off";
   /** The connected wallet's own stake + claimed flag on EACH market (faction + side markets), by propIdx. */
   propStakes: MyPropStake[];
+  /** Pending local wagers, overlaid on the authoritative pools/stakes so a bet moves the book instantly. */
+  optimisticBets: OptimisticBet[];
   tx: TxState;
 
   // ── raw ingest (every beat received, in order) ──
@@ -201,6 +221,7 @@ const baseState: ViewState = {
   relay: null,
   gaslessPref: "auto",
   propStakes: [],
+  optimisticBets: [],
   tx: { pending: false },
   beats: [],
   rawReveal: null,
@@ -234,6 +255,8 @@ type Action =
   | { kind: "connection"; status: ConnStatus }
   | { kind: "wallet"; wallet: WalletState }
   | { kind: "propStakes"; propStakes: MyPropStake[] }
+  | { kind: "optimisticAdd"; id: number; propIdx: number; outcome: number; amount: number }
+  | { kind: "optimisticDrop"; id: number }
   | { kind: "relay"; relay: { enabled: boolean; funded: boolean } | null }
   | { kind: "gaslessPref"; pref: "auto" | "off" }
   | { kind: "tx"; tx: TxState };
@@ -344,6 +367,17 @@ function project(s: ViewState): ViewState {
 function reduce(state: ViewState, action: Action): ViewState {
   if (action.kind === "wallet") return { ...state, wallet: action.wallet };
   if (action.kind === "propStakes") return { ...state, propStakes: action.propStakes };
+  if (action.kind === "optimisticAdd") {
+    // Capture the AUTHORITATIVE pool + own-stake for this outcome right now, so the overlay in Verdict
+    // can add the wager on top and then peel it back the moment each of those catches up (independently).
+    const prop = state.market.props?.find((p) => p.index === action.propIdx);
+    const basePool = prop ? parseFloat(prop.pools[action.outcome] ?? "0") : 0;
+    const mineRec = state.propStakes.find((ps) => ps.index === action.propIdx);
+    const baseMine = mineRec ? parseFloat(mineRec.stakes[action.outcome] ?? "0") : 0;
+    const bet: OptimisticBet = { id: action.id, propIdx: action.propIdx, outcome: action.outcome, amount: action.amount, basePool, baseMine };
+    return { ...state, optimisticBets: [...state.optimisticBets, bet] };
+  }
+  if (action.kind === "optimisticDrop") return { ...state, optimisticBets: state.optimisticBets.filter((b) => b.id !== action.id) };
   if (action.kind === "relay") return { ...state, relay: action.relay };
   if (action.kind === "gaslessPref") return { ...state, gaslessPref: action.pref };
   if (action.kind === "tx") return { ...state, tx: action.tx };
@@ -550,6 +584,10 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
   const propCountRef = useRef(0);
   propCountRef.current = state.market.props?.length ?? state.personas.length + 2;
 
+  // Monotonic id for optimistic-bet overlay entries (see placePropBet), so success/failure can drop the
+  // exact wager it added.
+  const optIdRef = useRef(0);
+
   // Gasless is the DEFAULT whenever the server's relayer is live AND still funded — the user signs
   // and the relayer pays. We never gate this on the USER's own 0G balance (a fresh wallet with zero
   // 0G is exactly who this is for); we fall back to the direct path only when the relayer is
@@ -718,6 +756,12 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
         dispatch({ kind: "tx", tx: { pending: false, error: "No market/match id from server yet." } });
         return;
       }
+      // Optimistic overlay: reflect the wager in the pools + "yours" the instant it's placed, so the
+      // odds move on the click instead of after the chain round-trip. Reconciled away (per-field) as the
+      // real-time pool push + stake refresh land; dropped on success (a no-op by then) or on failure.
+      const amt = parseFloat(amount);
+      const optId = amt > 0 ? ++optIdRef.current : null;
+      if (optId != null) dispatch({ kind: "optimisticAdd", id: optId, propIdx, outcome, amount: amt });
       dispatch({ kind: "tx", tx: { pending: true } });
       try {
         const hash = await placePropBetTx(address, matchId, propIdx, walletRef.current, outcome, amount, gaslessRef.current);
@@ -726,6 +770,8 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
         await Promise.all([refreshPropStakes(), refreshBalance(), refreshRelay(true)]);
       } catch (e) {
         dispatch({ kind: "tx", tx: { pending: false, error: humanizeTxError(e) } });
+      } finally {
+        if (optId != null) dispatch({ kind: "optimisticDrop", id: optId });
       }
     },
     [connect, refreshPropStakes, refreshBalance, refreshRelay],

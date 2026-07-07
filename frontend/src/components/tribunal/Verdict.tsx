@@ -38,6 +38,26 @@ function existingWin(mine: number, pool: string, total: string): number {
   return p > 0 ? (t * mine) / p : 0;
 }
 
+/**
+ * Track a number across renders and briefly report whether it just ROSE or FELL, so the UI can flash a
+ * green/red cue when the odds move. Returns null except for `ms` after a change. Because a bet reprices
+ * the whole market at once (the backed outcome's share up, the rest down), driving this off each outcome's
+ * pot fraction makes the whole book visibly tick the instant money moves. No flash on the first render.
+ */
+function useValueFlash(value: number, ms = 800): "up" | "down" | null {
+  const prev = useRef(value);
+  const [dir, setDir] = useState<"up" | "down" | null>(null);
+  useEffect(() => {
+    const p = prev.current;
+    prev.current = value;
+    if (value === p) return;
+    setDir(value > p ? "up" : "down");
+    const t = setTimeout(() => setDir(null), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return dir;
+}
+
 // Compact status-pill palettes (text + border), one per market state.
 const PILL = {
   gilt: "text-gilt border-gilt/40",
@@ -111,6 +131,11 @@ function ChoiceCard({
   // wall of "0% · ◈0.00 · —" noise, so an empty pool collapses to a single quiet line instead.
   const hasPool = parseFloat(c.total) > 0;
   const m = mult(c.pool, c.total);
+  // Precise pot fraction (not the rounded %) drives the bar width + the move-flash, so even a sub-1% shift
+  // registers — the rounded "%" text can sit still while the bar eases and the up/down cue fires.
+  const frac = parseFloat(c.total) > 0 ? (parseFloat(c.pool) / parseFloat(c.total)) * 100 : 0;
+  const dir = useValueFlash(Math.round(frac * 10) / 10);
+  const flashText = dir === "up" ? "text-acquit" : dir === "down" ? "text-convict" : "text-mute";
   return (
     <button
       type="button"
@@ -147,11 +172,16 @@ function ChoiceCard({
       {hasPool ? (
         <>
           <div className="mt-2 flex items-baseline justify-between font-mono text-[10.5px] tracking-[0.06em] text-mute">
-            <span>{pct(c.pool, c.total)}% of pot</span>
+            <span className={["inline-flex items-center gap-1 transition-colors duration-700", flashText].join(" ")}>
+              {pct(c.pool, c.total)}% of pot
+              <span aria-hidden className={["text-[8px] leading-none transition-opacity duration-300", dir ? "opacity-100" : "opacity-0"].join(" ")}>
+                {dir === "down" ? "▼" : "▲"}
+              </span>
+            </span>
             <span>◈ {parseFloat(c.pool).toFixed(2)}</span>
           </div>
           <div className="mt-1.5 h-0.5 bg-line">
-            <div className={["h-full", c.bar].join(" ")} style={{ width: `${pct(c.pool, c.total)}%` }} />
+            <div className={["h-full transition-[width] duration-500 ease-out", c.bar].join(" ")} style={{ width: `${Math.min(100, frac).toFixed(2)}%` }} />
           </div>
         </>
       ) : (
@@ -251,6 +281,9 @@ function MarketRow({
   const fav = m.choices.length ? m.choices.reduce((a, b) => (parseFloat(b.pool) > parseFloat(a.pool) ? b : a)) : null;
   const winner = m.choices.find((c) => c.winner) ?? null;
   const potTotal = m.choices.length ? m.choices[0]!.total : "0";
+  // Flash the pot when money moves so a COLLAPSED row still reads as live (during betting the pot only
+  // grows, so this pulses green on any wager in the market — the at-a-glance "something's happening" cue).
+  const potDir = useValueFlash(Math.round(parseFloat(potTotal) * 100) / 100);
   // Name the outcome(s) the wallet is on right in the collapsed row — a lone pick reads "on CONVICTED",
   // a hedge reads "across N picks" — so the position is legible without expanding the market.
   const myPicks = m.choices.filter((c) => c.mine > 0);
@@ -305,7 +338,7 @@ function MarketRow({
               <span className="text-cream-dim">● {winner.label}</span>
             ) : fav ? (
               <>
-                pot ◈{parseFloat(potTotal).toFixed(2)} · fav <span className="text-cream-dim">{fav.label}</span> {mult(fav.pool, fav.total)}
+                pot <span className={["transition-colors duration-700", potDir === "up" ? "text-acquit" : potDir === "down" ? "text-convict" : ""].join(" ")}>◈{parseFloat(potTotal).toFixed(2)}</span> · fav <span className="text-cream-dim">{fav.label}</span> {mult(fav.pool, fav.total)}
               </>
             ) : (
               "—"
@@ -573,10 +606,23 @@ export function Verdict({ api }: { api: MatchApi }) {
   });
 
   const propMarket = (prop: PropSnapshot): BetMarket => {
-    const total = prop.pools.reduce((acc, p) => acc + parseFloat(p), 0).toString();
     const mine = stakeByIdx.get(prop.index);
-    const myStakeFor = (o: number) => (mine ? parseFloat(mine.stakes[o] ?? "0") : 0);
-    const myTotalStake = mine ? mine.stakes.reduce((acc, v) => acc + parseFloat(v), 0) : 0;
+    const authMine = (o: number) => (mine ? parseFloat(mine.stakes[o] ?? "0") : 0);
+    // Optimistic overlay: fold any just-placed local wager on THIS market into the pools + own-stake so the
+    // odds move on the click, not after the chain round-trip. Each wager keeps contributing to a field only
+    // until that field's authoritative source catches up — the server pool (basePool + amount) and the
+    // own-stake read (baseMine + amount) reconcile INDEPENDENTLY, so the book never double-counts your bet.
+    const opt = s.optimisticBets.filter((b) => b.propIdx === prop.index);
+    const mineAdd = (o: number) =>
+      opt.reduce((acc, b) => (b.outcome === o ? acc + Math.max(0, b.baseMine + b.amount - authMine(o)) : acc), 0);
+    const augPools = prop.pools.map((p, o) => {
+      const raw = parseFloat(p);
+      const add = opt.reduce((acc, b) => (b.outcome === o ? acc + Math.max(0, b.basePool + b.amount - raw) : acc), 0);
+      return String(raw + add);
+    });
+    const total = augPools.reduce((acc, p) => acc + parseFloat(p), 0).toString();
+    const myStakeFor = (o: number) => authMine(o) + mineAdd(o);
+    const myTotalStake = augPools.reduce((acc, _p, o) => acc + myStakeFor(o), 0);
     const claimed = mine?.claimed ?? false;
     const win = prop.state === "RESOLVED" ? prop.winningOutcome : undefined;
     const isVoid = prop.state === "VOID";
@@ -601,12 +647,12 @@ export function Verdict({ api }: { api: MatchApi }) {
         {
           key: "o1", eyebrow: "Mafia faction", eyebrowClass: "text-[#d98a55]",
           label: "ACQUITTED", accent: "text-[#d98a55]", bar: "bg-[#d98a55]",
-          pool: prop.pools[1] ?? "0", total, mine: myStakeFor(1), winner: win === 1,
+          pool: augPools[1] ?? "0", total, mine: myStakeFor(1), winner: win === 1,
         },
         {
           key: "o0", eyebrow: "Town faction", eyebrowClass: "text-acquit",
           label: "CONVICTED", accent: "text-acquit", bar: "bg-acquit",
-          pool: prop.pools[0] ?? "0", total, mine: myStakeFor(0), winner: win === 0,
+          pool: augPools[0] ?? "0", total, mine: myStakeFor(0), winner: win === 0,
         },
       ];
     } else if (prop.kind === "PLAYER_FATE") {
@@ -616,7 +662,7 @@ export function Verdict({ api }: { api: MatchApi }) {
       choices = FATE_COPY.map((copy, o) => ({
         key: `o${o}`,
         ...copy,
-        pool: prop.pools[o] ?? "0",
+        pool: augPools[o] ?? "0",
         total,
         mine: myStakeFor(o),
         winner: win === o,
@@ -631,12 +677,12 @@ export function Verdict({ api }: { api: MatchApi }) {
         {
           key: "o1", eyebrow: "the real detective", eyebrowClass: "text-acquit",
           label: "REAL", accent: "text-acquit", bar: "bg-acquit",
-          pool: prop.pools[1] ?? "0", total, mine: myStakeFor(1), winner: win === 1,
+          pool: augPools[1] ?? "0", total, mine: myStakeFor(1), winner: win === 1,
         },
         {
           key: "o0", eyebrow: "a fake claim", eyebrowClass: "text-convict",
           label: "BLUFF", accent: "text-convict", bar: "bg-convict",
-          pool: prop.pools[0] ?? "0", total, mine: myStakeFor(0), winner: win === 0,
+          pool: augPools[0] ?? "0", total, mine: myStakeFor(0), winner: win === 0,
         },
       ];
     } else if (prop.kind === "MAFIA_SEAT") {
@@ -653,7 +699,7 @@ export function Verdict({ api }: { api: MatchApi }) {
           label: seatName(seat),
           accent: "text-convict",
           bar: "bg-convict",
-          pool: prop.pools[seat] ?? "0",
+          pool: augPools[seat] ?? "0",
           total,
           mine: myStakeFor(seat),
           winner: win === seat,
@@ -670,7 +716,7 @@ export function Verdict({ api }: { api: MatchApi }) {
       choices = [];
       for (let seat = 0; seat < noOne; seat++) {
         const aliveNow = aliveBySeat.get(seat) ?? true;
-        const seatPool = parseFloat(prop.pools[seat] ?? "0");
+        const seatPool = parseFloat(augPools[seat] ?? "0");
         // Live: only living seats are realistic targets. Settled/past: also surface the winner and any
         // seat that drew a wager, so the resolved card and reclaimable pots are always visible.
         if (!aliveNow && win !== seat && seatPool === 0 && myStakeFor(seat) === 0) continue;
@@ -681,7 +727,7 @@ export function Verdict({ api }: { api: MatchApi }) {
           label: seatName(seat),
           accent: "text-convict",
           bar: "bg-convict",
-          pool: prop.pools[seat] ?? "0",
+          pool: augPools[seat] ?? "0",
           total,
           mine: myStakeFor(seat),
           winner: win === seat,
@@ -694,7 +740,7 @@ export function Verdict({ api }: { api: MatchApi }) {
         label: isNight ? "ALL SPARED" : "NO ONE",
         accent: "text-acquit",
         bar: "bg-acquit",
-        pool: prop.pools[noOne] ?? "0",
+        pool: augPools[noOne] ?? "0",
         total,
         mine: myStakeFor(noOne),
         winner: win === noOne,

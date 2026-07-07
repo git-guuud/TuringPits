@@ -82,6 +82,12 @@ export interface RelayerConfig {
   rateRefillMs?: number;
   /** Below this native-0G balance the relayer reports `funded:false` and refuses new relays. */
   minRelayerBalanceWei?: bigint;
+  /**
+   * Called the instant a sponsored `betProp` lands on-chain, with the bet's matchId. The server wires
+   * this to the running match's pool pusher so the odds update in real time (~as fast as the bet mines)
+   * instead of on the orchestrator's backstop poll. See pool-signal.ts. No-op if unset.
+   */
+  onSponsoredWrite?: (matchId: number) => void;
 }
 
 interface ForwardRequest {
@@ -160,6 +166,7 @@ export function createRelayer(cfg: RelayerConfig): Relayer | null {
   const gasCap = cfg.gasCap ?? 700_000n;
   const minBalance = cfg.minRelayerBalanceWei ?? 10_000_000_000_000_000n; // 0.01 0G
   const selectors = buildSelectorAllowlist();
+  const marketIface = new Interface(MARKET_RELAY_ABI); // decode a landed betProp's matchId for the pool signal
   const limiter = new RateLimiter(cfg.rateBurst ?? 6, cfg.rateRefillMs ?? 6_000);
   const inflight = new Set<string>(); // per-`from` lock: one pending relay each
 
@@ -260,6 +267,17 @@ export function createRelayer(cfg: RelayerConfig): Relayer | null {
         console.log(`[relayer] ${label} for ${req.from} → ${tx.hash}`);
         return tx.wait();
       });
+      // A bet just moved the book — tell the server so it re-reads + broadcasts the live pools NOW,
+      // rather than making spectators wait for the orchestrator's backstop poll. Only betProp changes
+      // OPEN-market odds (claims/refunds are post-settle), so that's the only call we signal on.
+      if (label === "betProp") {
+        try {
+          const matchId = Number(marketIface.decodeFunctionData("betProp", req.data)[0]);
+          cfg.onSponsoredWrite?.(matchId);
+        } catch {
+          /* non-fatal — the backstop poll still catches the change */
+        }
+      }
       return { txHash: receipt?.hash ?? "" };
     } finally {
       inflight.delete(req.from);

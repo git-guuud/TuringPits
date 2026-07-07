@@ -21,6 +21,7 @@ import { runBetWindow as runBetWindowFn, type BetWindowMarket } from "./bet-wind
 import { classifyDetectiveClaim } from "./detective-claim.js";
 import { buildPersonas, buildProvider, runMatch } from "./match-runner.js";
 import type { Hub } from "./broadcast.js";
+import type { PoolSignal } from "./pool-signal.js";
 import type { PropSnapshot, WsMessage } from "./wire.js";
 import { estimateSpeechMs, type Tts, type ToneInput } from "./tts.js";
 
@@ -67,6 +68,10 @@ export interface OrchestratorConfig {
   // Called as soon as a match is created on-chain (before it could fail mid-run), so the caller can
   // track it and guarantee a refund path if the round is later abandoned. See sweepAbandonedMatches.
   onMatchCreated?: (matchId: number, settlementDeadlineBlock: number) => void;
+  // Real-time odds: the relayer signals through this the instant a sponsored bet lands, so the book is
+  // re-read + broadcast immediately instead of on the 10s backstop poll below. See pool-signal.ts. When
+  // unset, the market still updates — just on the poll cadence.
+  poolSignal?: PoolSignal;
   // Settlement deadline budget (wall-clock seconds after match start). Must comfortably exceed
   // how long the match takes to play out — live 0G inference is rate-limited (~10/min), so a
   // full match runs many minutes. Default is generous; settle() reverts "deadline passed" past it.
@@ -112,6 +117,30 @@ function randomSeed(): string {
   const b = new Uint8Array(32);
   crypto.getRandomValues(b);
   return "0x" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Trailing debounce: coalesce a burst of bet-driven pool bumps into ONE push carrying the final book.
+ * When the bots pile into a freshly-opened market (or a human fires a few quick bets), the relayer signals
+ * once per bet; without this we'd re-read + rebroadcast the pools N times in a few hundred ms. `cancel`
+ * drops a pending push at match teardown so it can't land after the settled snapshot.
+ */
+function debounced(fn: () => void, ms: number): { (): void; cancel: () => void } {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const call = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      fn();
+    }, ms);
+  };
+  call.cancel = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+  return call;
 }
 
 export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts): Promise<void> {
@@ -343,8 +372,11 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, props: p.props } });
   }
 
-  // Keep pushing live pool sizes (still OPEN) on a background tick while the match plays, so bets
-  // placed during the match show up immediately. Cleared right before settlement.
+  // Live pools are pushed the instant a bet lands (the relayer → poolSignal → pushPoolsSoon path set up
+  // below), so this background tick is only a BACKSTOP: it catches a direct-wallet bet that skipped the
+  // relayer, or a signal we somehow missed, and keeps the "first night in Xs" countdown fresh. Because the
+  // real-time path carries the load, this can run slow (10s) — net RPC reads go DOWN vs the old 4s poll.
+  // Cleared right before settlement.
   const poolTick = setInterval(() => {
     void (async () => {
       try {
@@ -354,7 +386,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
         /* transient RPC read; next tick retries */
       }
     })();
-  }, 4000);
+  }, 10_000);
 
   // 6. (no lock step — betting stays open until settle).
 
@@ -391,6 +423,17 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     const p = await readPools();
     hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, ...(preMatchEndsAt ? { preMatchEndsAt } : {}), props: p.props } });
   };
+
+  // Real-time odds: the relayer nudges us the instant a sponsored bet for this match lands, so the book
+  // updates as fast as the bet mines (~0.5s on 0G) rather than on the 10s backstop tick. Debounced so a
+  // burst (the bots piling into a fresh market) collapses into one push of the final pools. Unregistered
+  // + cancelled at teardown so a late bump can't rebroadcast an OPEN book after the settled snapshot.
+  const pushPoolsSoon = debounced(() => {
+    void pushPools().catch(() => {
+      /* transient read; the backstop tick retries */
+    });
+  }, 250);
+  const unregisterPoolSignal = cfg.poolSignal?.register(matchId, pushPoolsSoon);
 
   // The two RECURRING per-round markets — "voted out" (the day vote) and "night kill" (before dawn).
   // createMatch floats round 1 for both; as the match advances we open each new round's pair (so they're
@@ -663,8 +706,12 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
       },
     });
   } finally {
-    // Stop the live pool ticker — betting closes via settle() next (or the match was abandoned).
+    // Stop the live pool ticker AND the bet-driven real-time push — betting closes via settle() next (or
+    // the match was abandoned). Cancelling both here guarantees no stray OPEN snapshot lands during the
+    // reveal/settle sequence and flips the client back off the settled board.
     clearInterval(poolTick);
+    pushPoolsSoon.cancel();
+    unregisterPoolSignal?.();
   }
 
   // 7b. Close EVERY market still open BEFORE the masks come off — the reveal decides the FACTION verdict,

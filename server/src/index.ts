@@ -21,6 +21,7 @@ import { createServer } from "node:http";
 loadEnv({ path: resolve(dirname(fileURLToPath(import.meta.url)), "../../.env") });
 import { Hub } from "./broadcast.js";
 import { createRelayer } from "./relayer.js";
+import { createPoolSignal } from "./pool-signal.js";
 import { createNameRegistry } from "./names.js";
 import { createTts, parseKeys } from "./tts.js";
 import { DEFAULT_FALLBACK_VOICE, loadVoiceMap } from "./voices.js";
@@ -44,6 +45,10 @@ async function main() {
   // Matches the server has created but not yet seen finalized (matchId -> settlementDeadlineBlock).
   // Drives abandoned, past-deadline matches to RefundMode so bettors never wait on a third party.
   const pending = new Map<number, number>();
+
+  // Real-time betting book: the relayer bumps this the instant a sponsored bet lands, and the running
+  // match registers its pool pusher on it — so the odds move as fast as the bet mines, not on a poll.
+  const poolSignal = createPoolSignal();
 
   const cfg: OrchestratorConfig = {
     rpcUrl: process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai",
@@ -79,6 +84,7 @@ async function main() {
     // deadline budget) so block-derived windows (open lead, betting window, deadline) land close to intent.
     blocksPerSecond: Number(process.env.BLOCKS_PER_SECOND ?? 2.0),
     onMatchCreated: (matchId, deadline) => pending.set(matchId, deadline),
+    poolSignal,
   };
 
   // Optional EIP-2771 gas relayer — only active if RELAYER_PRIVATE_KEY + FORWARDER_ADDRESS are set.
@@ -89,6 +95,8 @@ async function main() {
     relayerPrivateKey: process.env.RELAYER_PRIVATE_KEY ?? "",
     forwarderAddress: process.env.FORWARDER_ADDRESS ?? "",
     marketAddress: cfg.marketAddress,
+    // Push the live book the instant a relayed bet mines (the common path — session keys + bots relay).
+    onSponsoredWrite: (matchId) => poolSignal.bump(matchId),
   });
 
   // Optional spoken-dialogue layer — only active if ELEVENLABS_API_KEY is set. Voices the players'
