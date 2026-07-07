@@ -42,6 +42,13 @@ export const MAFIA_MARKET_ABI = [
   // full match struct — used as a read-only fallback to detect terminal state if the server stops
   // pushing (e.g. it crashed, or the match entered RefundMode on-chain). Pools/outcomes live in the props.
   "function matches(uint256) view returns (uint8 state, uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot, address teeSigner, string providerType, string providerIdentity, string tlsFingerprint, string nonce, uint8 playerCount, bytes32 transcriptCID, uint16 feeBps)",
+  // Emitted on every wager — the ONLY way to enumerate who bet on a match (propStake is keyed by a
+  // known address, not iterable). `matchId` + `user` are indexed, so a topic-filtered queryFilter over
+  // one match returns exactly its bettors — the match leaderboard reads these to build its roster.
+  "event PropBetPlaced(uint256 indexed matchId, uint256 indexed propIdx, address indexed user, uint8 outcome, uint128 amount, uint128 newPool)",
+  // Emitted once when a match is created — used only to bound the PropBetPlaced log query to the
+  // match's lifetime (its creation block → head) so we never scan the whole chain.
+  "event MatchCreated(uint256 indexed matchId, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot, address teeSigner, uint8 playerCount, uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock)",
 ] as const;
 
 /**

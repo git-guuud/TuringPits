@@ -5,9 +5,10 @@
  *   line of dialogue  →  TONE-TAG step  →  ElevenLabs v3 synthesis  →  mp3
  *
  * The TONE-TAG step inserts ElevenLabs v3 audio tags ([nervous], [accusing], [whispers]…) so the
- * delivery matches the moment. When ANTHROPIC_API_KEY is set it uses a fast Claude Haiku call that
- * reads the line + game context; otherwise it falls back to a cheap heuristic derived from the
- * vote/discussion context already on the wire. Each persona gets its OWN voice (server/src/voices.ts).
+ * delivery matches the moment. When NVIDIA_NIM_API_KEY is set it uses a fast NVIDIA NIM call (the
+ * OpenAI-compatible hosted catalog at integrate.api.nvidia.com) that reads the line + game context;
+ * otherwise it falls back to a cheap heuristic derived from the vote/discussion context already on the
+ * wire. Each persona gets its OWN voice (server/src/voices.ts).
  *
  * OPTIONAL at every layer: this only activates when ELEVENLABS_API_KEY is set. With no key,
  * `GET /tts/info` reports `enabled:false` and the frontend simply never speaks (the typewriter still
@@ -51,10 +52,16 @@ export interface TtsConfig {
   voiceMap: Record<string, string>;
   /** Voice for any unmapped persona name. */
   defaultVoiceId: string;
-  /** Anthropic key for the LLM tone-tagger. Empty ⇒ heuristic tags. */
-  anthropicApiKey?: string;
-  /** Fast model for the tagger (default claude-haiku-4-5). */
+  /** NVIDIA NIM key (nvapi-…) for the LLM tone-tagger. Empty ⇒ heuristic tags. */
+  nimApiKey?: string;
+  /**
+   * Fast NIM catalog model for the tagger (default meta/llama-3.1-8b-instruct). Keep it SMALL — on the
+   * free catalog a big model (e.g. llama-3.3-70b) can queue for minutes, while the 8b answers sub-second;
+   * a slow tag falls back to the heuristic anyway (see {@link taggerTimeoutMs}) but wastes the window.
+   */
   llmModel?: string;
+  /** Abort the tagger call after this many ms and fall back to the heuristic (default 6000). */
+  taggerTimeoutMs?: number;
   /** Per-IP token bucket for POST /tts (abuse guard). */
   rateBurst?: number;
   rateRefillMs?: number;
@@ -196,19 +203,39 @@ export function heuristicTaggedText(input: ToneInput): string {
  */
 export function parseTaggerResponse(modelText: string | undefined, originalLine: string): string {
   const text = modelText?.trim();
-  if (!text) throw new Error("anthropic returned no text");
-  // Guard against a chatty model: keep tags only when the de-tagged line still contains the original —
-  // otherwise discard and let the caller fall back to the heuristic.
-  const stripped = text.replace(/\[[^\]]*\]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
-  const original = originalLine.replace(/\s+/g, " ").trim().toLowerCase();
-  if (!stripped.includes(original.slice(0, Math.min(original.length, 24)))) {
+  if (!text) throw new Error("tagger returned no text");
+  // Keep the tags ONLY when the de-tagged reply is word-for-word the original — otherwise discard and let
+  // the caller fall back to the heuristic. This rejects a chatty model that rewrote the line AND a small
+  // model that APPENDED words (both would make the voice speak text the player never said). `norm` drops
+  // the tags, folds whitespace + the space a tag leaves before punctuation (`Vesper [serious].` →
+  // `Vesper .`) the way sanitizeTaggedLine does, and folds smart quotes, so a faithful tagging that only
+  // differs by inserted tags/spacing/quote-style still matches exactly.
+  const norm = (s: string) =>
+    s
+      .replace(/\[[^\]]*\]/g, " ")
+      .replace(/[‘’]/g, "'")
+      .replace(/[“”]/g, '"')
+      .replace(/\s+/g, " ")
+      .replace(/\s+([.,!?;:])/g, "$1")
+      .trim()
+      .toLowerCase();
+  if (norm(text) !== norm(originalLine)) {
     throw new Error("tagger drifted from the original line");
   }
   return text;
 }
 
-/** Call a fast Claude model to insert v3 tone tags. Throws on any failure so the caller can fall back. */
-async function llmTaggedText(input: ToneInput, apiKey: string, model: string): Promise<string> {
+/**
+ * Call a fast NVIDIA NIM model to insert v3 tone tags. Uses the OpenAI-compatible chat-completions
+ * endpoint on the hosted catalog (integrate.api.nvidia.com). Throws on any failure so the caller can
+ * fall back to the heuristic.
+ */
+async function llmTaggedText(
+  input: ToneInput,
+  apiKey: string,
+  model: string,
+  timeoutMs: number,
+): Promise<string> {
   const system =
     "You add ElevenLabs v3 audio tags to a single line of dialogue spoken by an AI playing the " +
     "social-deduction game Mafia, so the voice delivery matches the moment. Insert 1-3 bracketed " +
@@ -223,24 +250,28 @@ async function llmTaggedText(input: ToneInput, apiKey: string, model: string): P
   const persona = input.blurb ? ` whose manner is "${input.blurb}"` : "";
   const user = `Speaker ${input.name}${persona}. ${ctx}\nLine: ${input.text}`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  // Bound the call: the free NIM catalog can queue a busy model for minutes, and this runs on the
+  // stage-pacing path — a hung tag must fall back to the heuristic fast, not freeze the match.
+  const res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
     method: "POST",
     headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
+      authorization: `Bearer ${apiKey}`,
       "content-type": "application/json",
     },
     body: JSON.stringify({
       model,
       max_tokens: 300,
       temperature: 0.5,
-      system,
-      messages: [{ role: "user", content: user }],
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
     }),
+    signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!res.ok) throw new Error(`anthropic ${res.status}`);
-  const data = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
-  const text = data.content?.find((b) => b.type === "text")?.text;
+  if (!res.ok) throw new Error(`nvidia nim ${res.status}`);
+  const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  const text = data.choices?.[0]?.message?.content;
   return parseTaggerResponse(text, input.text);
 }
 
@@ -381,8 +412,9 @@ const MAX_CACHE = 256;
 export function createTts(cfg: TtsConfig, deps: TtsDeps = {}): Tts {
   const keyPool = new KeyPool(parseKeys(cfg.apiKey));
   const enabled = !!(deps.synth || keyPool.size);
-  const hasLlm = !!cfg.anthropicApiKey;
-  const llmModel = cfg.llmModel || "claude-haiku-4-5";
+  const hasLlm = !!cfg.nimApiKey;
+  const llmModel = cfg.llmModel || "meta/llama-3.1-8b-instruct";
+  const taggerTimeoutMs = cfg.taggerTimeoutMs ?? 6000;
   const maxText = cfg.maxTextLength ?? 600;
 
   const tag: (input: ToneInput) => Promise<string> =
@@ -390,7 +422,7 @@ export function createTts(cfg: TtsConfig, deps: TtsDeps = {}): Tts {
     (async (input) => {
       if (hasLlm) {
         try {
-          return await llmTaggedText(input, cfg.anthropicApiKey!, llmModel);
+          return await llmTaggedText(input, cfg.nimApiKey!, llmModel, taggerTimeoutMs);
         } catch (e) {
           console.warn(`[tts] tagger fell back to heuristic: ${(e as Error).message}`);
         }

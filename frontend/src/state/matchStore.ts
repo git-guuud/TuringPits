@@ -38,8 +38,10 @@ import {
   refundPropStake,
   relayInfo,
   restoreBurnerWallet,
+  setDisplayName as setDisplayNameTx,
 } from "../lib/contract.js";
 import type { MyPropStake, Wallet } from "../lib/contract.js";
+import { setLocalName } from "../lib/names.js";
 import { propReclaimsOf } from "../lib/reclaims.js";
 import { coins } from "../lib/typeSound.js";
 import type {
@@ -506,6 +508,8 @@ export interface MatchApi {
   claimAllProps: (matchId: number, idxs: number[], refund: boolean) => Promise<boolean>;
   /** Mint free test CHIP to the connected wallet (the demo faucet), then refresh the balance. */
   getTestTokens: () => Promise<void>;
+  /** Claim a custom display handle for the connected wallet (signed locally, shared via the server). */
+  setDisplayName: (name: string) => Promise<void>;
   /** Flip an abandoned, past-deadline match into RefundMode so its stake becomes refundable. */
   enterRefund: (matchId: number) => Promise<void>;
   /** Opt the gasless path on/off ("off" = always pay your own gas). No-op when no relayer is live. */
@@ -881,6 +885,16 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
 
   const dismissWinnings = useCallback(() => setWinnings(null), []);
 
+  // Claim a display handle for the leaderboard. The wallet's session key signs the name message locally
+  // (no pop-up); the server verifies + shares it. Also cache it locally so the lobby reflects it at once.
+  // Not a chain tx, so it stays out of the tx/toaster state — the caller (the lobby) shows its own status.
+  const setDisplayName = useCallback(async (name: string) => {
+    const w = walletRef.current;
+    if (!w) throw new Error("Connect a wallet to set a handle.");
+    await setDisplayNameTx(w, name);
+    setLocalName(w.account, name);
+  }, []);
+
   const advance = useCallback(() => dispatch({ kind: "advance" }), []);
   const stepBack = useCallback(() => dispatch({ kind: "stepBack" }), []);
   const skipToPresent = useCallback(() => dispatch({ kind: "skip" }), []);
@@ -888,5 +902,5 @@ export function useMatch({ live }: { live: boolean }): MatchApi {
   // Let the user opt out of (or back into) the gasless path. "off" forces their own wallet to pay gas.
   const setGasless = useCallback((on: boolean) => dispatch({ kind: "gaslessPref", pref: on ? "auto" : "off" }), []);
 
-  return { state, gasless, connect, connectBurner, placePropBet, claimProp, refundProp, claimAllProps, getTestTokens, enterRefund, setGasless, winnings, claimAllWinnings, dismissWinnings, advance, stepBack, skipToPresent };
+  return { state, gasless, connect, connectBurner, placePropBet, claimProp, refundProp, claimAllProps, getTestTokens, setDisplayName, enterRefund, setGasless, winnings, claimAllWinnings, dismissWinnings, advance, stepBack, skipToPresent };
 }

@@ -1,11 +1,15 @@
 /**
  * Liquidity bots — # MOCK demo liquidity for the AI-Mafia markets.
  *
- * A small fleet of scripted wallets that watch the deployed `MafiaMarket` for newly-opened matches
- * and sprinkle small CHIP wagers on both sides (and, optionally, the per-seat survival side markets)
- * so the betting UI isn't an empty book when a human first lands on it. Every bet is a REAL on-chain
- * `betYes/betNo` in the CHIP `MockBetToken` — the same pools/payouts/fees/settlement the frontend
- * uses. The only "fake" part is that the stakers are scripts, not people, betting test money.
+ * A small fleet of scripted wallets that watch the deployed `MafiaMarket` for open matches and sprinkle
+ * small CHIP wagers across EVERY market — the headline Faction market and all side markets — so the
+ * betting UI isn't an empty book when a human first lands on it. Betting stays open for the whole match
+ * (there is no lock step; the market accepts wagers until settle), so the bots keep seeding right through
+ * play — including the short-lived in-loop markets (later-round VotedOut/NightKill, DetectiveClaim) that
+ * the host floats mid-game — until each is frozen or the match settles. Every bet is a REAL on-chain
+ * `betProp` in the CHIP `MockBetToken` — the same categorical pools/payouts/fees/settlement the frontend
+ * uses. The only "fake" part is that the stakers are scripts, not people, betting test money. Every
+ * market (the Faction one included) is one categorical prop; there is no separate betYes/betNo path.
  *
  * GASLESS: every write (faucet + approve + bet) is submitted as an EIP-2771 meta-transaction through
  * the deployed relayer, which pays the 0G gas. The bot wallets sign off-chain (free) and stay the
@@ -29,12 +33,13 @@
  * Tunables (env, all optional):
  *   RELAYER_URL                        relayer base URL (default the deployed Railway relayer)
  *   ZEROG_RPC_URL, ZEROG_CHAIN_ID, MAFIA_MARKET_ADDRESS, BET_TOKEN_ADDRESS
- *   BOT_MIN_BET=0.5  BOT_MAX_BET=5     per-wager CHIP range
- *   BOT_YES_PROB=0.5                   chance a bot picks YES (Mafia-win) over NO
- *   BOT_BET_PROPS=false                also place a few bets on survival side markets
- *   BOT_POLL_MS=8000                   how often to scan for new/open matches
+ *   BOT_MIN_BET=10  BOT_MAX_BET=50     per-wager CHIP range
+ *   BOT_BET_STEP=5                     snap wagers to whole increments (→ 10, 15, 20, …, 50); 0 = off
+ *   BOT_YES_PROB=0.5                   chance a bot backs MAFIA over TOWN in the headline Faction market
+ *   BOT_BET_PROPS=true                 also seed every side market (default on; false = Faction only)
+ *   BOT_POLL_MS=5000                   how often to scan for open matches AND newly-floated in-loop markets
  *   BOT_BACKFILL_WINDOW=10             how many recent matches to consider at startup
- *   BOT_MAX_BETS_PER_MATCH=1           bets each bot places per match (per market)
+ *   BOT_MAX_BETS_PER_MATCH=1           bets each bot places per market
  */
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -63,15 +68,27 @@ const RPC_URL = process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai";
 const CHAIN_ID = Number(process.env.ZEROG_CHAIN_ID ?? 16602);
 // Deployed relayer that sponsors gas for the bots' meta-transactions.
 const RELAYER_URL = (process.env.RELAYER_URL ?? "https://turingpits-production.up.railway.app").replace(/\/$/, "");
-const MIN_BET = parseEther(process.env.BOT_MIN_BET ?? "0.5");
-const MAX_BET = parseEther(process.env.BOT_MAX_BET ?? "5");
+const MIN_BET = parseEther(process.env.BOT_MIN_BET ?? "10");
+const MAX_BET = parseEther(process.env.BOT_MAX_BET ?? "50");
+// Wagers snap to whole increments of this above MIN_BET, so a bet is one of {MIN, MIN+STEP, …, MAX}
+// (defaults → 10, 15, 20, …, 50 CHIP). Set 0 to disable snapping (any amount in range).
+const BET_STEP = parseEther(process.env.BOT_BET_STEP ?? "5");
 const YES_PROB = Number(process.env.BOT_YES_PROB ?? 0.5);
-const BET_PROPS = /^(1|true|yes)$/i.test(process.env.BOT_BET_PROPS ?? "");
-const POLL_MS = Number(process.env.BOT_POLL_MS ?? 8000);
+// Seed the side markets (PlayerFate / VotedOut / NightKill / DetectiveClaim / MafiaSeat) too, not just the
+// headline Faction market. Default ON — set BOT_BET_PROPS=false for Faction-only, lighter liquidity.
+const BET_PROPS = !/^(0|false|no|off)$/i.test(process.env.BOT_BET_PROPS ?? "");
+// Scan cadence. Betting now runs the WHOLE match, so this also gates how fast a newly-floated in-loop
+// market gets seeded — poll a few times inside each betting window (default 45s) before its pre-reveal freeze.
+const POLL_MS = Number(process.env.BOT_POLL_MS ?? 5000);
 const BACKFILL_WINDOW = Number(process.env.BOT_BACKFILL_WINDOW ?? 10);
 const MAX_BETS_PER_MATCH = Math.max(1, Number(process.env.BOT_MAX_BETS_PER_MATCH ?? 1));
 const BOT_COUNT = Math.max(1, Number(process.env.BOT_COUNT ?? 5));
 const CONTRACT_MIN_BET = parseEther("0.01"); // MafiaMarket.MIN_BET
+// PropKind.Faction — the headline "which faction wins?" market. Now a normal 2-outcome categorical
+// prop (0 = TOWN wins, 1 = MAFIA wins), floated on-demand by the host via openFactionMarket().
+const FACTION_KIND = 5;
+const OUTCOME_MAFIA = 1;
+const OUTCOME_TOWN = 0;
 // Gas forwarded to each relayed inner call — comfortably covers faucet/approve/bet, under the relayer cap.
 const RELAY_GAS = 600_000n;
 
@@ -79,9 +96,7 @@ const RELAY_GAS = 600_000n;
 const MARKET_ABI = [
   "function nextMatchId() view returns (uint256)",
   "function betToken() view returns (address)",
-  "function matches(uint256) view returns (uint8 state, uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot, address teeSigner, string providerType, string providerIdentity, string tlsFingerprint, string nonce, uint8 playerCount, uint128 poolYes, uint128 poolNo, uint8 outcome, uint128 netPot, uint128 winningPool, bytes32 transcriptCID, uint16 feeBps, uint16 feeBpsDraw)",
-  "function betYes(uint256 matchId, uint128 amount)",
-  "function betNo(uint256 matchId, uint128 amount)",
+  "function matches(uint256) view returns (uint8 state, uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot, address teeSigner, string providerType, string providerIdentity, string tlsFingerprint, string nonce, uint8 playerCount, bytes32 transcriptCID, uint16 feeBps)",
   "function propCount(uint256 matchId) view returns (uint256)",
   "function getProp(uint256 matchId, uint256 propIdx) view returns (tuple(uint8 kind, uint8 param, uint8 numOutcomes, bool closed, uint8 state, uint8 winningOutcome, uint128 netPot, uint128 winningPool, uint128[] pools))",
   "function betProp(uint256 matchId, uint256 propIdx, uint8 outcome, uint128 amount)",
@@ -125,11 +140,22 @@ interface RelayInfo {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const randInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
 
-/** A random wager between MIN_BET and MAX_BET, in CHIP base units (clamped to the contract minimum). */
+/** A random wager on the {MIN_BET, MIN_BET+STEP, …, MAX_BET} grid — snapped to whole BET_STEP
+ *  increments (default 5 CHIP) so pools show round numbers. In CHIP base units, clamped to the
+ *  contract minimum. BET_STEP <= 0 disables snapping (any amount in [MIN_BET, MAX_BET]). */
 function randomBet(): bigint {
-  const span = MAX_BET - MIN_BET;
-  const r = span > 0n ? BigInt(Math.floor(Math.random() * 1e6)) * span / 1_000_000n : 0n;
-  const amt = MIN_BET + r;
+  const span = MAX_BET > MIN_BET ? MAX_BET - MIN_BET : 0n;
+  let amt: bigint;
+  if (BET_STEP > 0n) {
+    // steps = whole increments that fit in the span; floor keeps the top rung <= MAX_BET. randInt is
+    // inclusive, so k ∈ [0, steps] covers every rung from MIN_BET up to the last one at or below MAX_BET.
+    const steps = span / BET_STEP;
+    const k = steps > 0n ? BigInt(randInt(0, Number(steps))) : 0n;
+    amt = MIN_BET + k * BET_STEP;
+  } else {
+    const r = span > 0n ? (BigInt(Math.floor(Math.random() * 1e6)) * span) / 1_000_000n : 0n;
+    amt = MIN_BET + r;
+  }
   return amt < CONTRACT_MIN_BET ? CONTRACT_MIN_BET : amt;
 }
 
@@ -214,8 +240,8 @@ async function main() {
   console.log(`  Forwarder: ${relay.forwarder}`);
   console.log(`  Market   : ${marketAddr}`);
   console.log(`  CHIP     : ${tokenAddr}`);
-  console.log(`  Bet range: ${formatEther(MIN_BET)}–${formatEther(MAX_BET)} CHIP, YES prob ${YES_PROB}`);
-  console.log(`  Props    : ${BET_PROPS ? "on" : "off"}  Poll: ${POLL_MS}ms`);
+  console.log(`  Bet range: ${formatEther(MIN_BET)}–${formatEther(MAX_BET)} CHIP, MAFIA prob ${YES_PROB}`);
+  console.log(`  Markets  : ${BET_PROPS ? "Faction + all side markets" : "Faction only"}  Poll: ${POLL_MS}ms  (bets the whole match)`);
   for (const w of wallets) console.log(`  bot ${w.address}  (gas sponsored by relayer)`);
   console.log("─".repeat(60));
 
@@ -282,79 +308,71 @@ async function main() {
     }
   }
 
-  /** Place the main YES/NO wagers for one open match across the fleet. */
-  async function betMatch(matchId: number, closeBlock: bigint) {
-    const key = `m${matchId}`;
-    for (let i = 0; i < wallets.length; i++) {
-      if (has(key, i)) continue;
-      const bot = wallets[i]!;
-      for (let n = 0; n < MAX_BETS_PER_MATCH; n++) {
-        const amount = randomBet();
-        try {
-          await prepare(bot, amount);
-          // Betting closes the moment the host locks the match at bettingCloseBlock. prepare() may have
-          // just relayed a (slow) faucet+approve, so re-check the window right before staking — a bet
-          // that lands after the lock reverts "not open" and burns the relayer's gas for nothing.
-          if (BigInt(await provider.getBlockNumber()) >= closeBlock) return;
-          const side = Math.random() < YES_PROB ? "YES" : "NO";
-          const data =
-            side === "YES"
-              ? marketIface.encodeFunctionData("betYes", [matchId, amount])
-              : marketIface.encodeFunctionData("betNo", [matchId, amount]);
-          await relayCall(bot, marketAddr, data);
-          console.log(`✓ match ${matchId}: bot ${i} bet ${formatEther(amount)} CHIP ${side}`);
-        } catch (e) {
-          console.warn(`✗ match ${matchId}: bot ${i} bet failed — ${(e as Error).message.split("\n")[0]}`);
-          break; // don't hammer a failing bot this round; retry next poll
-        }
-        await sleep(randInt(300, 1200));
-      }
-      mark(key, i);
-    }
-  }
-
-  /** Optionally seed a couple of categorical side markets so they aren't empty either. */
-  async function betProps(matchId: number, closeBlock: bigint) {
-    if (!BET_PROPS) return;
+  /**
+   * Seed EVERY open market on a match across the whole fleet — the headline Faction market and all side
+   * markets alike. Called on every poll for the entire life of the match (betting stays open until settle,
+   * there is no lock step), so the short-lived in-loop markets — later-round VotedOut/NightKill and the
+   * on-demand DetectiveClaim — get seeded as the host floats them, before their pre-reveal `closeProp`
+   * freeze. The `handled` map (keyed per prop) makes repeat polls cheap: a fully-seeded market is skipped,
+   * so steady-state work is a single propCount read until a NEW market appears.
+   *
+   * @param deadlineBlock settlementDeadlineBlock — the on-chain cutoff after which betProp reverts.
+   */
+  async function betAllProps(matchId: number, deadlineBlock: bigint) {
     let count = 0;
     try {
       count = Number((await market.propCount(matchId)) as bigint);
     } catch {
-      return;
+      return; // transient RPC read; retry next poll
     }
-    if (BigInt(await provider.getBlockNumber()) >= closeBlock) return;
-    // Seed up to 2 random props per match so the prop book shows activity without flooding it.
-    const propIdxs = Array.from({ length: count }, (_, i) => i).sort(() => Math.random() - 0.5).slice(0, 2);
-    for (const propIdx of propIdxs) {
+    for (let propIdx = 0; propIdx < count; propIdx++) {
       const key = `m${matchId}p${propIdx}`;
+      if (wallets.every((_, i) => has(key, i))) continue; // every bot already seeded this market
+
+      // One read of the market's shape for the whole fleet: kind picks the outcome policy, numOutcomes
+      // bounds a random pick, closed means the outcome is already public (nothing left to bet).
+      let pr: { kind: bigint; closed: boolean; numOutcomes: bigint };
+      try {
+        pr = (await market.getProp(matchId, propIdx)) as typeof pr;
+      } catch {
+        continue; // transient read; retry next poll
+      }
+      const isFaction = Number(pr.kind) === FACTION_KIND;
+      // BET_PROPS off → seed only the headline Faction market (lighter liquidity).
+      if (!isFaction && !BET_PROPS) continue;
+      const numOutcomes = Number(pr.numOutcomes);
+
       for (let i = 0; i < wallets.length; i++) {
         if (has(key, i)) continue;
+        if (pr.closed) {
+          mark(key, i); // outcome public — nothing to bet; don't reconsider this prop
+          continue;
+        }
         const bot = wallets[i]!;
-        const amount = randomBet();
-        try {
-          const pr = (await market.getProp(matchId, propIdx)) as { closed: boolean; numOutcomes: bigint };
-          if (pr.closed) {
-            mark(key, i);
-            continue;
+        for (let n = 0; n < MAX_BETS_PER_MATCH; n++) {
+          const amount = randomBet();
+          try {
+            await prepare(bot, amount);
+            // The host may closeProp this market (freeze-before-reveal) or the settlement deadline may
+            // lapse while prepare()'s faucet/approve was in flight — re-check right before staking so we
+            // don't relay a doomed bet that reverts "prop closed"/"betting closed" and wastes gas.
+            if (BigInt(await provider.getBlockNumber()) > deadlineBlock) return;
+            // Faction: YES_PROB-weighted MAFIA(1)/TOWN(0). Every other market: a random valid outcome
+            // (PlayerFate: a death-round bucket; RoundVotedOut/NightKill: a seat or "no one"; etc).
+            const outcome = isFaction
+              ? (Math.random() < YES_PROB ? OUTCOME_MAFIA : OUTCOME_TOWN)
+              : randInt(0, Math.max(0, numOutcomes - 1));
+            const data = marketIface.encodeFunctionData("betProp", [matchId, propIdx, outcome, amount]);
+            await relayCall(bot, marketAddr, data);
+            const label = isFaction ? (outcome === OUTCOME_MAFIA ? "MAFIA" : "TOWN") : `outcome ${outcome}`;
+            console.log(`✓ match ${matchId} prop ${propIdx}: bot ${i} bet ${formatEther(amount)} CHIP on ${label}`);
+          } catch (e) {
+            console.warn(`✗ match ${matchId} prop ${propIdx}: bot ${i} bet failed — ${(e as Error).message.split("\n")[0]}`);
+            break; // don't hammer a failing bot this round; retry next poll
           }
-          await prepare(bot, amount);
-          // Same race as betMatch: the host locks the match (and may closeProp individual markets) as
-          // the game advances. Re-check the window right before staking so we don't relay a doomed
-          // betProp that reverts "not open"/"prop closed" and wastes the relayer's gas.
-          if (BigInt(await provider.getBlockNumber()) >= closeBlock) return;
-          // Categorical market: stake on a random valid outcome (PlayerFate: a death-round bucket;
-          // RoundVotedOut: a seat or "no one").
-          const numOutcomes = Number(pr.numOutcomes);
-          const outcome = randInt(0, Math.max(0, numOutcomes - 1));
-          const data = marketIface.encodeFunctionData("betProp", [matchId, propIdx, outcome, amount]);
-          await relayCall(bot, marketAddr, data);
-          console.log(`✓ match ${matchId} prop ${propIdx}: bot ${i} bet ${formatEther(amount)} CHIP on outcome ${outcome}`);
-        } catch (e) {
-          console.warn(`✗ match ${matchId} prop ${propIdx}: bot ${i} prop bet failed — ${(e as Error).message.split("\n")[0]}`);
-          break;
+          await sleep(randInt(300, 1200));
         }
         mark(key, i);
-        await sleep(randInt(300, 1200));
       }
     }
   }
@@ -368,17 +386,17 @@ async function main() {
       for (let matchId = from; matchId < next; matchId++) {
         const m = await market.matches(matchId);
         const state = Number(m.state);
-        if (state !== 1) continue; // 1 == Created (OPEN); skip Locked/Settled/Refund/None
+        if (state !== 1) continue; // 1 == Created; betProp reverts "not open" in any other state
         const block = BigInt(await provider.getBlockNumber());
-        const closeBlock = BigInt(m.bettingCloseBlock);
         if (block < BigInt(m.bettingOpenBlock)) continue; // betting hasn't opened yet
-        // Stop at bettingCloseBlock, NOT settlementDeadlineBlock: the host locks/settles the match at
-        // close, and betYes/betNo/betProp all revert "not open" once state leaves Created. A bet placed
-        // in the [close, lock] window races the lock and lands after it — a guaranteed on-chain revert
-        // that still costs the relayer gas. Gating here mirrors the frontend's betting window.
-        if (block >= closeBlock) continue;
-        await betMatch(matchId, closeBlock);
-        await betProps(matchId, closeBlock);
+        // Bet through the WHOLE match, up to settlementDeadlineBlock — NOT bettingCloseBlock. There is no
+        // lock step: the match stays Created and betProp is accepted until the settlement deadline (see
+        // MafiaMarket.betProp + orchestrator "betting stays open until settle"). The short-lived in-loop
+        // markets (later-round VotedOut/NightKill, DetectiveClaim) open mid-play, AFTER bettingCloseBlock,
+        // so gating there would miss them entirely. betAllProps re-scans each poll to catch them.
+        const deadlineBlock = BigInt(m.settlementDeadlineBlock);
+        if (block > deadlineBlock) continue; // past the on-chain cutoff — betProp would revert "betting closed"
+        await betAllProps(matchId, deadlineBlock);
       }
       if (next !== lastSeenNext) lastSeenNext = next;
     } catch (e) {

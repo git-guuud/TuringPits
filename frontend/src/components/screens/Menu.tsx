@@ -1,8 +1,10 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { MatchApi } from "../../state/matchStore.js";
-import type { MatchStatus } from "../../lib/contract.js";
+import { fetchDisplayNames, type MatchStatus } from "../../lib/contract.js";
+import { getLocalName, pseudonymFor, validHandle, MAX_HANDLE_LEN } from "../../lib/names.js";
 import { useLiveStatus } from "../../lib/useLiveStatus.js";
 import { navigate } from "../../lib/useRoute.js";
+import { startTour } from "../tour/Onboarding.js";
 
 /**
  * The lobby. The arena, the history, and the wallet were all crammed onto one screen before — this
@@ -34,6 +36,15 @@ export function Menu({ api }: { api: MatchApi }) {
         <div className="mt-[clamp(0.75rem,2vh,1.25rem)] font-body text-[clamp(1rem,1.8vw,1.1875rem)] italic text-gilt-soft">
           AI agents play Mafia. Every move is TEE-verified and settled on-chain. You wager on the verdict.
         </div>
+
+        <button
+          type="button"
+          onClick={() => startTour()}
+          className="group mt-[clamp(0.5rem,1.5vh,0.875rem)] inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.16em] text-mute transition-colors hover:text-gilt"
+        >
+          <span aria-hidden className="text-gilt-soft transition-colors group-hover:text-gilt">✦</span>
+          New here? Take the guided tour
+        </button>
 
         <div className="mt-[clamp(1.75rem,5vh,3rem)] grid grid-cols-1 gap-px bg-line sm:grid-cols-2">
           <MenuCard
@@ -207,6 +218,8 @@ function WalletCard(p: {
         </button>
       </div>
 
+      {s.wallet.account && <NameEditor api={api} account={s.wallet.account} />}
+
       <div className="mt-4 border-t border-line pt-4">
         <div className="flex items-center justify-between gap-3">
           <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim">Gas-free betting</span>
@@ -226,6 +239,128 @@ function WalletCard(p: {
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The lobby handle editor. Everyone gets a deterministic pseudonym for free (shown as the default); a
+ * player can claim a custom handle here that's shared so it shows on OTHER viewers' match leaderboards.
+ * The name is signed locally by the session key (no pop-up) and verified server-side. Prefills from the
+ * shared handle (so it's consistent across devices), falling back to the local cache then the pseudonym.
+ */
+function NameEditor({ api, account }: { api: MatchApi; account: string }) {
+  const [serverName, setServerName] = useState<string | null>(() => getLocalName(account));
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Pull the authoritative shared handle (if any) so the lobby shows what others see, not just a stale
+  // local cache. Best-effort — a failure just leaves the local/pseudonym default.
+  useEffect(() => {
+    let alive = true;
+    void fetchDisplayNames([account]).then((names) => {
+      const n = names[account.toLowerCase()];
+      if (alive && n) setServerName(n);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [account]);
+
+  const current = serverName ?? getLocalName(account);
+  const display = current ?? pseudonymFor(account);
+
+  const start = () => {
+    setValue(current ?? "");
+    setError(null);
+    setEditing(true);
+  };
+  const save = async () => {
+    const name = value.trim();
+    if (!validHandle(name)) {
+      setError(`Use 1–${MAX_HANDLE_LEN} characters — no line breaks.`);
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await api.setDisplayName(name);
+      setServerName(name);
+      setEditing(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't save your handle.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 border-t border-line pt-4">
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim">Your handle</span>
+        {!editing && (
+          <button
+            type="button"
+            onClick={start}
+            className="rounded-sm border border-line-2 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-mute transition-colors hover:border-gilt hover:text-gilt"
+          >
+            Rename
+          </button>
+        )}
+      </div>
+
+      {editing ? (
+        <div className="mt-2">
+          <div className="flex items-center gap-2">
+            <input
+              autoFocus
+              value={value}
+              maxLength={MAX_HANDLE_LEN}
+              placeholder={pseudonymFor(account)}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void save();
+                if (e.key === "Escape") setEditing(false);
+              }}
+              className="flex-1 border border-line bg-ink-2 px-2.5 py-1.5 font-body text-[15px] text-cream outline-none focus:border-gilt"
+            />
+            <button
+              type="button"
+              onClick={() => void save()}
+              disabled={saving}
+              className="rounded-sm border border-gilt px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditing(false)}
+              disabled={saving}
+              className="font-mono text-[11px] uppercase tracking-[0.12em] text-mute transition-colors hover:text-cream disabled:opacity-60"
+            >
+              Cancel
+            </button>
+          </div>
+          {error ? (
+            <p className="mt-1.5 font-mono text-[11px] text-convict">{error}</p>
+          ) : (
+            <p className="mt-1.5 font-body text-[12px] leading-snug text-mute">
+              Shown on match leaderboards. Others see it after a moment.
+            </p>
+          )}
+        </div>
+      ) : (
+        <div className="mt-1.5 flex items-baseline gap-2">
+          <span className="font-body text-[17px] text-cream">{display}</span>
+          {!current && (
+            <span className="rounded-sm border border-line-2 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-mute" title="Auto-generated — tap Rename to choose your own">
+              auto
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

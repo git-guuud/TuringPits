@@ -39,6 +39,17 @@ function reclaimableTotal(r: HistoryRow): number {
   return a;
 }
 
+/** A signed CHIP figure coloured by sign: green profit, red loss, muted break-even. */
+function NetBadge({ net, className = "" }: { net: number; className?: string }) {
+  const cls = net > 0 ? "text-acquit" : net < 0 ? "text-convict" : "text-mute";
+  const sign = net > 0 ? "+" : net < 0 ? "−" : "±";
+  return (
+    <span className={["font-mono font-semibold tabular-nums", cls, className].join(" ")}>
+      {sign}◈ {Math.abs(net).toFixed(2)}
+    </span>
+  );
+}
+
 /** Nested lenses on the record — claimable ⊆ mine ⊆ all. One control instead of scanning 60 rows. */
 type FilterMode = "all" | "mine" | "claimable";
 
@@ -57,6 +68,14 @@ export function History({ api }: { api: MatchApi }) {
   const claimableRows = rows.filter(isClaimable);
   const owed = claimableRows.reduce((acc, r) => acc + reclaimableTotal(r), 0);
   const visibleRows = filter === "claimable" ? claimableRows : filter === "mine" ? mineRows : rows;
+
+  // Realized P&L across every battle the viewer settled (SETTLED/REFUND). `outcome` is only present once
+  // the verdict is in, so live/open wagers don't skew the total — and it counts entitled payouts whether
+  // or not they've been collected, so a won-but-unclaimed battle still reads as a win.
+  const settledMine = mineRows.filter((r) => r.mine?.outcome);
+  const totalStaked = settledMine.reduce((a, r) => a + (r.mine!.outcome!.staked), 0);
+  const totalReturned = settledMine.reduce((a, r) => a + (r.mine!.outcome!.returned), 0);
+  const netPnl = totalReturned - totalStaked;
 
   // Page the visible rows so we render 10 at a time, not the whole record. Reset to the first page
   // whenever the lens changes, and clamp so a shrinking list (e.g. after a claim) never strands us
@@ -159,6 +178,21 @@ export function History({ api }: { api: MatchApi }) {
             <span className="text-[16px]">◈ {owed.toFixed(2)}</span>
             <span className="ml-2 text-[12px] text-mute">
               across {claimableRows.length} {claimableRows.length === 1 ? "battle" : "battles"}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Realized profit/loss across every battle you've settled — staked vs. what those positions return. */}
+      {connected && settledMine.length > 0 && (
+        <div className="mt-4 border hairline px-4 py-3">
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-mute-2">
+            Your net across the record
+          </div>
+          <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <NetBadge net={netPnl} className="text-[20px]" />
+            <span className="font-mono text-[11px] text-mute-2">
+              across {settledMine.length} settled {settledMine.length === 1 ? "battle" : "battles"}
             </span>
           </div>
         </div>
@@ -379,6 +413,11 @@ function Row({
             >
               {busy ? "Collecting…" : `${isRefund ? "Reclaim all" : "Collect all"} ◈ ${propsTotal.toFixed(2)}`}
             </button>
+          </div>
+        ) : mine?.outcome ? (
+          <div className="flex-none text-right">
+            <NetBadge net={mine.outcome.net} className="text-[24px] leading-none" />
+            <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.16em] text-mute-2">net</div>
           </div>
         ) : mine?.participated ? (
           <div className="flex-none text-right">

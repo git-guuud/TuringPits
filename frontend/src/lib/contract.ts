@@ -6,7 +6,7 @@
  * prop. Pool sizes / market state arrive over the WebSocket (the server reads them from this same
  * contract), so this module stays narrow.
  */
-import { BrowserProvider, Contract, Interface, JsonRpcProvider, MaxUint256, Wallet as EthWallet, formatEther, keccak256, parseEther } from "ethers";
+import { BrowserProvider, Contract, Interface, JsonRpcProvider, MaxUint256, Wallet as EthWallet, formatEther, getAddress, keccak256, parseEther } from "ethers";
 import { MAFIA_MARKET_ABI, MOCK_BET_TOKEN_ABI } from "./abi.js";
 import type { MarketState, PropSnapshot } from "./types.js";
 
@@ -160,6 +160,52 @@ export function fetchMatchStatus(): Promise<MatchStatus | null> {
     .catch(() => null);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Display-name registry (the match leaderboard's names). Bettors are anonymous addresses; the
+// frontend gives each a deterministic pseudonym (lib/names.ts), and a player can claim a custom
+// handle in the lobby. Custom handles are shared via the server's /names route so OTHER viewers see
+// them; a set is SIGNED (server verifies the signer == the address) so nobody can rename anyone else.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The exact message signed to claim a handle. MUST byte-match the server's `nameMessage` (names.ts). */
+export const NAME_SET_MESSAGE = (name: string) => `Turing Pits — set my handle to "${name}"`;
+
+/**
+ * Fetch the custom handles for a set of addresses (lowercased-address → handle). Only addresses that
+ * have claimed a handle appear; the caller fills the rest with a deterministic pseudonym. Best-effort:
+ * returns {} on any failure so the leaderboard still renders (with pseudonyms).
+ */
+export async function fetchDisplayNames(addresses: string[]): Promise<Record<string, string>> {
+  const uniq = [...new Set(addresses.map((a) => a.toLowerCase()))];
+  if (uniq.length === 0) return {};
+  try {
+    const r = await fetch(`${resolveRelayBase()}/names?addresses=${encodeURIComponent(uniq.join(","))}`);
+    return r.ok ? ((await r.json()) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Claim a custom handle for the connected wallet. The wallet's in-browser session key signs the
+ * name message LOCALLY (no pop-up) — an injected signer would prompt, but connected identities here
+ * are always session/guest keys — and the server verifies the signature before storing. Throws a
+ * friendly line on rejection (e.g. an invalid handle).
+ */
+export async function setDisplayName(wallet: Wallet, name: string): Promise<void> {
+  const signer = wallet.session ?? (await wallet.provider.getSigner());
+  const signature = await signer.signMessage(NAME_SET_MESSAGE(name));
+  const res = await fetch(`${resolveRelayBase()}/names`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address: wallet.account, name, signature }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Couldn't save your handle — try a different one.");
+  }
+}
+
 /** Thrown when the gasless path can't be used (no relayer, or it's out of gas) — callers fall back. */
 export class RelayUnavailable extends Error {}
 
@@ -254,23 +300,98 @@ async function withGasless(
 }
 
 /**
- * Turn a raw wallet/ethers error into a single plain-language line for the bettor. Wallet errors
- * are verbose and scary ("user rejected action (action=…)", revert blobs); the UI shows this
- * instead, keeping the raw text only for the console.
+ * Known on-chain revert reasons — the exact `require(...)` strings the contracts throw
+ * (MafiaMarket.sol / MockBetToken.sol / Forwarder.sol) — mapped to plain-language bettor copy.
+ * Every ordered entry is a [substring-to-match, friendly-line]; first hit wins, so keep the more
+ * specific reasons above the generic ones. This is the allow-list that lets a decoded reason
+ * through: anything NOT here is treated as an opaque failure and never shown verbatim.
+ */
+const REVERT_COPY: ReadonlyArray<readonly [string, string]> = [
+  ["insufficient allowance", "Approval needed — confirm the token approval, then place your wager again."],
+  ["insufficient balance", "Not enough CHIP — tap “Get test CHIP” to mint more, then try again."],
+  ["below min bet", "That wager is below the minimum stake — raise it and try again."],
+  ["above max bet", "That wager is above the per-bet maximum — lower it and try again."],
+  ["betting not started", "Wagers haven't opened yet — hold on a moment."],
+  ["betting closed", "Wagers just closed for this market."],
+  ["betting locked", "Wagers just closed for this market."],
+  ["betting still open", "Wagers are still open — that action isn't available yet."],
+  ["deadline passed", "Wagers just closed for this market."],
+  ["prop closed", "This market is closed — no more wagers on it."],
+  ["bad outcome", "That pick isn't valid for this market — choose again."],
+  ["already opened", "That market is already open."],
+  ["nothing to claim", "Nothing to claim on this wallet."],
+  ["nothing to refund", "Nothing to reclaim on this wallet."],
+  ["already claimed", "You've already claimed this — nothing left to collect."],
+  ["already refunded", "You've already reclaimed this stake."],
+  ["no winning stake", "No winnings to claim on this market."],
+  ["no stake", "You have no stake on this market."],
+  ["not settled", "This match hasn't settled yet — check back once the verdict is in."],
+  ["not settleable", "This match can't be settled right now."],
+  ["not refundable", "This match can't be refunded right now."],
+  ["not refund mode", "This match isn't open for refunds yet."],
+  ["deadline not passed", "Too early to reclaim — the settlement window hasn't closed yet."],
+  ["not lockable", "This match can't be locked right now."],
+  ["request expired", "This wager request expired — place it again."],
+  ["invalid or expired signature", "This wager request expired — place it again."],
+  ["rate limit", "Slow down a moment — one wager at a time, then try again."],
+  ["already in flight", "A wager is still going through — give it a second, then try again."],
+  ["transfer failed", "The token transfer didn't go through — try again in a moment."],
+];
+
+/**
+ * Pull the on-chain revert reason out of whatever shape ethers / the relayer handed us. The reason
+ * can live in a clean `reason` field, be quoted inside `shortMessage` ("execution reverted: \"betting
+ * closed\""), or be buried in a nested RPC error. Returns a lowercased haystack of every place it
+ * might be — callers substring-match `REVERT_COPY` against it.
+ */
+function revertHaystack(err: {
+  reason?: string;
+  shortMessage?: string;
+  message?: string;
+  data?: { message?: string };
+  error?: { message?: string; reason?: string };
+  info?: { error?: { message?: string } };
+}): string {
+  return [
+    err?.reason,
+    err?.shortMessage,
+    err?.error?.reason,
+    err?.error?.message,
+    err?.data?.message,
+    err?.info?.error?.message,
+    err?.message,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+/**
+ * Turn a raw wallet/ethers/relayer error into a single plain-language line for the bettor. Raw
+ * chain errors are verbose and scary ("user rejected action (action=…)", CALL_EXCEPTION blobs,
+ * "missing revert data", ABI-encoded custom-error hex) — none of that ever reaches the UI. We map
+ * wallet codes and the contracts' known revert reasons to friendly copy; anything unrecognized
+ * collapses to a generic line, with the raw error kept ONLY in the console for debugging.
  */
 export function humanizeTxError(e: unknown): string {
-  const err = e as { code?: string | number; reason?: string; shortMessage?: string; message?: string };
+  const err = (e ?? {}) as {
+    code?: string | number;
+    reason?: string;
+    shortMessage?: string;
+    message?: string;
+    data?: { message?: string };
+    error?: { message?: string; reason?: string };
+    info?: { error?: { message?: string } };
+  };
   const code = err?.code;
-  const raw = `${err?.reason ?? ""} ${err?.shortMessage ?? ""} ${err?.message ?? ""}`.toLowerCase();
+  const raw = revertHaystack(err);
 
+  // Log the real error so hiding it from the UI never costs us debuggability.
+  if (e) console.error("[tx] humanized error →", e);
+
+  // ── Wallet / provider-level conditions (not contract reverts) ────────────────────────────────
   if (code === "ACTION_REJECTED" || code === 4001 || raw.includes("user rejected") || raw.includes("user denied")) {
     return "Wager cancelled.";
-  }
-  if (raw.includes("insufficient balance") || raw.includes("below min bet")) {
-    return "Not enough CHIP — tap “Get test CHIP” to mint more, then try again.";
-  }
-  if (raw.includes("insufficient allowance")) {
-    return "Approval needed — confirm the token approval, then place your wager again.";
   }
   if (code === "INSUFFICIENT_FUNDS" || raw.includes("insufficient funds")) {
     return "Not enough 0G for gas — top up from the faucet (faucet.0g.ai) and try again.";
@@ -278,16 +399,26 @@ export function humanizeTxError(e: unknown): string {
   if (raw.includes("no wallet found")) {
     return "No wallet found — install MetaMask, or tap “Play as guest” to bet with a browser wallet.";
   }
-  if (raw.includes("betting not started")) return "Wagers haven't opened yet — hold on a moment.";
-  if (raw.includes("betting closed") || raw.includes("betting locked")) return "Wagers just closed for this match.";
-  if (raw.includes("wrong network") || raw.includes("chain") || raw.includes("network")) {
+  if (raw.includes("relayer") && (raw.includes("out of gas") || raw.includes("offline"))) {
+    return "The gas relayer is offline right now — try again in a moment, or connect your own wallet.";
+  }
+  if (raw.includes("wrong network") || raw.includes("unsupported chain") || raw.includes("chainid")) {
     return "Wrong network — switch your wallet to 0G Galileo.";
   }
-  if (raw.includes("nothing to claim") || raw.includes("already claimed")) return "Nothing to claim on this wallet.";
 
-  // Fall back to the most specific message the wallet gave, trimmed to a sane length.
-  const msg = err?.shortMessage || err?.reason || err?.message || "Transaction failed.";
-  return msg.length > 140 ? `${msg.slice(0, 137)}…` : msg;
+  // ── Known contract revert reasons ────────────────────────────────────────────────────────────
+  for (const [needle, copy] of REVERT_COPY) {
+    if (raw.includes(needle)) return copy;
+  }
+
+  // ── Anything else: a generic, non-scary line. Never surface the raw revert/blob text. ────────
+  if (raw.includes("revert") || raw.includes("call_exception") || raw.includes("cannot estimate gas")) {
+    return "That transaction was rejected on-chain — it may no longer be valid. Refresh and try again.";
+  }
+  if (code === "TIMEOUT" || raw.includes("timeout") || raw.includes("network error") || raw.includes("failed to fetch")) {
+    return "Network hiccup — check your connection and try again.";
+  }
+  return "Something went wrong with that transaction — please try again.";
 }
 
 export interface Wallet {
@@ -720,6 +851,40 @@ export async function readPropPositions(address: string, matchId: number, accoun
       return { ...base, stakes: stakeWeis.map((s) => formatEther(s)), claimed };
     }),
   );
+}
+
+/**
+ * Enumerate every wallet that wagered on a match — the leaderboard roster. `propStake` is a mapping
+ * keyed by a known address (not iterable), so the only way to discover WHO bet is the PropBetPlaced
+ * event. Both `matchId` and `user` are indexed, so this is a cheap topic-filtered getLogs, bounded to
+ * the match's lifetime via its MatchCreated block (confirmed to work full-range on 0G, but bounding
+ * keeps it fast). Returns unique checksummed addresses in first-seen order.
+ */
+export async function readMatchBettors(matchId: number, address = MARKET_ADDRESS): Promise<string[]> {
+  const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
+  // Bound the scan to the match's creation block → head. Best-effort: a full-range topic query works
+  // on 0G, so if this lookup fails we still get the right logs, just over a wider range.
+  let fromBlock = 0;
+  try {
+    const created = await c.queryFilter(c.filters.MatchCreated!(matchId));
+    if (created.length > 0) fromBlock = created[0]!.blockNumber;
+  } catch {
+    /* leave fromBlock=0 */
+  }
+  const logs = await c.queryFilter(c.filters.PropBetPlaced!(matchId), fromBlock);
+  const seen = new Set<string>();
+  const bettors: string[] = [];
+  for (const log of logs) {
+    const user = (log as { args?: { user?: string } }).args?.user;
+    if (!user) continue;
+    const checksum = getAddress(user);
+    const key = checksum.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      bettors.push(checksum);
+    }
+  }
+  return bettors;
 }
 
 /**

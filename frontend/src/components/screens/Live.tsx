@@ -1,6 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { MatchApi, ViewState } from "../../state/matchStore.js";
+import { MatchLeaderboard } from "../MatchLeaderboard.js";
 import { useMusic } from "../../lib/useMusic.js";
 import { useSound } from "../../lib/useSound.js";
 import { useVoice } from "../../lib/useVoice.js";
@@ -65,6 +66,40 @@ export function Live({ api }: { api: MatchApi }) {
 
   const recordModal = recordOpen && <Record s={s} onClose={() => setRecordOpen(false)} />;
 
+  // ── Match leaderboard — the popup at match end (final standings + collect-all) ──────────────────
+  const [boardOpen, setBoardOpen] = useState(false);
+  const autoShownRef = useRef<number | null>(null);
+  const terminal = s.market.state === "SETTLED" || s.market.state === "REFUND";
+  // Auto-open once per match when it ends. A SETTLED match must wait for playbackComplete so the board
+  // (which shows the net result) can't flash before the on-stage verdict reveal; an abandoned (REFUND)
+  // match has no verdict to spoil, so it can open right away.
+  const boardReady = s.market.state === "REFUND" || (s.market.state === "SETTLED" && s.playbackComplete);
+  // A fresh match (new matchId) resets the board so last round's standings never linger into the next.
+  useEffect(() => setBoardOpen(false), [s.matchId]);
+  useEffect(() => {
+    if (s.matchId == null || !boardReady) return;
+    if (autoShownRef.current === s.matchId) return;
+    autoShownRef.current = s.matchId;
+    setBoardOpen(true);
+  }, [s.matchId, boardReady]);
+
+  // Rendered in both layouts: the popup itself + a quiet re-open pill once the match is over (so closing
+  // the board doesn't hide the final standings / the collect-all for good — the ClaimTray also persists).
+  const leaderboardLayer = (
+    <>
+      <MatchLeaderboard api={api} open={boardOpen} onClose={() => setBoardOpen(false)} />
+      {terminal && !boardOpen && (
+        <button
+          type="button"
+          onClick={() => setBoardOpen(true)}
+          className="fixed bottom-4 left-4 z-[56] flex items-center gap-2 rounded-sm border border-gilt/50 bg-ink-2/95 px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-gilt shadow-lg backdrop-blur transition-colors hover:bg-gilt hover:text-ink"
+        >
+          <span aria-hidden>⚖</span> Final standings
+        </button>
+      )}
+    </>
+  );
+
   // ── Desktop: the full courtroom, three panes side by side ──────────────────────
   if (wide) {
     return (
@@ -126,6 +161,7 @@ export function Live({ api }: { api: MatchApi }) {
         </div>
 
         {recordModal}
+        {leaderboardLayer}
       </main>
     );
   }
@@ -158,6 +194,7 @@ export function Live({ api }: { api: MatchApi }) {
       </AnimatePresence>
 
       {recordModal}
+      {leaderboardLayer}
     </main>
   );
 }

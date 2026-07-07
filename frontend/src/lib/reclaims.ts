@@ -51,3 +51,46 @@ export function propReclaimsOf(positions: PropPosition[], state: MatchSummary["s
   // Lead with the headline faction reclaim, then the side markets in prop order.
   return out.sort((a, b) => (a.market === "FACTION" ? -1 : 0) - (b.market === "FACTION" ? -1 : 0));
 }
+
+/** The viewer's realized result on a terminal battle — used for the History P&L. */
+export interface PropOutcome {
+  /** Total CHIP the viewer wagered across every market of this battle. */
+  staked: number;
+  /** Gross CHIP those positions return: winning pro-rata payouts + Void/refund stake returns. */
+  returned: number;
+  /** Net profit (returned − staked): positive is a win, negative a loss. */
+  net: number;
+}
+
+/**
+ * The viewer's net profit/loss on a terminal battle, across EVERY market. Mirrors propReclaimsOf's payout
+ * maths but counts the gross return the positions are *entitled* to whether or not they've been collected
+ * yet (so a won-but-unclaimed battle reads as a win, not a loss) — and, unlike the reclaim list, includes
+ * already-claimed positions so the P&L is complete. A losing outcome returns nothing; a Void/REFUND
+ * returns the stake in full (net 0). Only meaningful once the match is SETTLED or REFUND.
+ */
+export function propOutcomeOf(positions: PropPosition[], state: MatchSummary["state"]): PropOutcome {
+  let staked = 0;
+  let returned = 0;
+  for (const p of positions) {
+    const total = p.stakes.reduce((s, v) => s + parseFloat(v), 0);
+    if (total <= 0) continue;
+    staked += total;
+
+    if (state === "REFUND") {
+      returned += total; // abandoned match returns the stake in full
+      continue;
+    }
+    // SETTLED
+    if (p.state === "RESOLVED") {
+      const win = p.winningOutcome != null ? parseFloat(p.stakes[p.winningOutcome] ?? "0") : 0;
+      if (win <= 0) continue; // backed a losing outcome — nothing returns
+      const wp = parseFloat(p.winningPool);
+      const np = parseFloat(p.netPot);
+      returned += wp > 0 ? (np * win) / wp : 0;
+    } else if (p.state === "VOID") {
+      returned += total; // stake returned
+    }
+  }
+  return { staked, returned, net: returned - staked };
+}

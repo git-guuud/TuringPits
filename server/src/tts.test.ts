@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
@@ -181,6 +181,20 @@ describe("parseTaggerResponse — validate the LLM tagger reply against the line
   it("accepts a reply that only differs by inserted tags and spacing", () => {
     const tagged = "[serious] I think Vesper [whispers] is hiding something.";
     expect(() => parseTaggerResponse(tagged, original)).not.toThrow();
+  });
+
+  it("accepts a tag placed right before punctuation (the space it leaves is not drift)", () => {
+    // Observed from NIM: a tag before the period leaves `something [nervous].` → de-tags to
+    // `something .`; the guard must normalize that space, not reject a faithful tagging.
+    const tagged = "I think Vesper is hiding something [nervous]. [accusing]";
+    expect(parseTaggerResponse(tagged, original)).toBe(tagged);
+  });
+
+  it("throws when a small model APPENDED words beyond the original line", () => {
+    // Observed from llama-3.1-8b: it kept the line but tacked on a fabricated continuation. The voice
+    // must never speak words the player never said, so a reply longer than the original is rejected.
+    const appended = "I think Vesper is hiding something [accusing] and she keeps dodging every question.";
+    expect(() => parseTaggerResponse(appended, original)).toThrow(/drift/);
   });
 });
 
@@ -434,5 +448,65 @@ describe("createTts — enabled (injected synth + tagger)", () => {
     expect(codes[0]).toBe(200);
     expect(codes[1]).toBe(200);
     expect(codes[2]).toBe(429); // burst of 2 exhausted
+  });
+});
+
+describe("createTts — NVIDIA NIM tone tagger (real tag path, fetch mocked)", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  // Drive the REAL llmTaggedText/NIM path (no injected `tag`); only ElevenLabs synth is stubbed.
+  function nimTts(reply: string, opts: { ok?: boolean; status?: number } = {}) {
+    const calls: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
+    global.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({
+        url: String(url),
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: String(init?.body ?? ""),
+      });
+      return {
+        ok: opts.ok ?? true,
+        status: opts.status ?? 200,
+        json: async () => ({ choices: [{ message: { content: reply } }] }),
+        text: async () => reply,
+      } as unknown as Response;
+    }) as typeof fetch;
+    const tts = createTts(
+      { ...baseCfg, apiKey: "x", nimApiKey: "nvapi-test", llmModel: "meta/llama-3.3-70b-instruct" },
+      { synth: async (t) => Buffer.from(t) },
+    );
+    return { tts, calls };
+  }
+
+  it("hits the OpenAI-compatible NIM endpoint with a Bearer key + chosen model, then synthesizes the parsed reply", async () => {
+    const original = "I think Vesper is hiding something.";
+    const { tts, calls } = nimTts(`[nervous] ${original}`);
+    const audio = await tts.getAudio(line({ text: original }));
+
+    expect(calls).toHaveLength(1);
+    const call = calls[0]!;
+    expect(call.url).toBe("https://integrate.api.nvidia.com/v1/chat/completions");
+    expect(call.headers.authorization).toBe("Bearer nvapi-test");
+    const sent = JSON.parse(call.body);
+    expect(sent.model).toBe("meta/llama-3.3-70b-instruct");
+    expect(sent.messages[0].role).toBe("system");
+    expect(sent.messages[1].content).toContain(original);
+    expect(audio.toString()).toBe(`[nervous] ${original}`); // parsed reply reached synth
+  });
+
+  it("falls back to the heuristic when NIM returns a non-2xx", async () => {
+    const original = "Why so quiet, Nova?";
+    const { tts } = nimTts("ignored", { ok: false, status: 429 });
+    const audio = await tts.getAudio(line({ text: original }));
+    expect(audio.toString()).toBe(`[curious] ${original}`); // a rate-limit never breaks synthesis
+  });
+
+  it("falls back to the heuristic when NIM drifts from the original wording", async () => {
+    const original = "I vote for Vesper.";
+    const { tts } = nimTts("[curious] Sure! Here's a punchier version.");
+    const audio = await tts.getAudio(line({ kind: "vote", text: original }));
+    expect(audio.toString()).toBe(`[serious] ${original}`); // drift guard → heuristic vote tag
   });
 });

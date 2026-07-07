@@ -20,7 +20,7 @@ import {
   readPropPositions,
   type MatchSummary,
 } from "../lib/contract.js";
-import { propReclaimsOf, type PropReclaim } from "../lib/reclaims.js";
+import { propOutcomeOf, propReclaimsOf, type PropOutcome, type PropReclaim } from "../lib/reclaims.js";
 
 // Reclaim types now live in ../lib/reclaims (shared with the live winnings tray); re-exported so the
 // History screen's existing imports keep resolving.
@@ -36,6 +36,8 @@ export interface HistoryRow {
     props?: PropReclaim[];
     /** Set when the match is abandoned past its deadline: flip it to RefundMode (then reclaim each market). */
     enable?: { amount: string };
+    /** The viewer's realized P&L on this battle (staked vs. gross returned). Only on terminal matches. */
+    outcome?: PropOutcome;
   };
 }
 
@@ -88,10 +90,13 @@ export function useHistory(account: string | null, refreshSignal: unknown): { ro
       // RefundMode so the viewer can then reclaim each market they backed. Match-level, not per-market.
       const abandoned = (summary.rawState === 1 || summary.rawState === 2) && head > 0 && head > summary.settlementDeadlineBlock;
       const staked = positions.reduce((a, p) => a + p.stakes.reduce((s, v) => s + parseFloat(v), 0), 0);
+      // Realized P&L: only meaningful once the verdict is in (SETTLED pays winners, REFUND returns stakes).
+      const outcome = isTerminal(summary) ? propOutcomeOf(positions, summary.state) : undefined;
       return {
         participated,
         props: props.length ? props : undefined,
         enable: abandoned && staked > 0 ? { amount: staked.toFixed(4) } : undefined,
+        outcome,
       };
     },
     [account],

@@ -37,3 +37,5 @@ deployments.local.json
 
 
 handover.md
+# runtime display-name registry
+server/names.json

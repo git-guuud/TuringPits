@@ -21,6 +21,7 @@ import { createServer } from "node:http";
 loadEnv({ path: resolve(dirname(fileURLToPath(import.meta.url)), "../../.env") });
 import { Hub } from "./broadcast.js";
 import { createRelayer } from "./relayer.js";
+import { createNameRegistry } from "./names.js";
 import { createTts, parseKeys } from "./tts.js";
 import { DEFAULT_FALLBACK_VOICE, loadVoiceMap } from "./voices.js";
 import { runOneMatch, sweepAbandonedMatches, type OrchestratorConfig } from "./orchestrator.js";
@@ -101,13 +102,17 @@ async function main() {
     modelId: process.env.ELEVENLABS_MODEL_ID ?? "eleven_v3",
     voiceMap: loadVoiceMap(process.env.ELEVENLABS_VOICE_MAP),
     defaultVoiceId: process.env.ELEVENLABS_DEFAULT_VOICE_ID ?? DEFAULT_FALLBACK_VOICE,
-    anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
-    llmModel: process.env.TTS_LLM_MODEL ?? "claude-haiku-4-5",
+    nimApiKey: process.env.NVIDIA_NIM_API_KEY ?? "",
+    llmModel: process.env.TTS_LLM_MODEL ?? "meta/llama-3.1-8b-instruct",
   });
 
-  // One HTTP server shared by the WS hub (upgrade), the relay routes (/relay, /relay/info), and a
-  // read-only /status route. `hub` is assigned just below; the handler only dereferences it at
-  // request time, by which point it is set. Other paths get a 200 health response (Railway check).
+  // Address→handle registry for the leaderboard. Always on (a signed-set + public-read map); a
+  // deterministic pseudonym covers every address client-side, this just shares custom handles.
+  const names = createNameRegistry({});
+
+  // One HTTP server shared by the WS hub (upgrade), the relay routes (/relay, /relay/info), the name
+  // registry (/names), and a read-only /status route. `hub` is assigned just below; the handler only
+  // dereferences it at request time, by which point it is set. Other paths get a 200 health response.
   let hub: Hub | undefined;
   const httpServer = createServer((req, res) => {
     void (async () => {
@@ -119,6 +124,7 @@ async function main() {
         return;
       }
       if (relayer && (await relayer.handle(req, res))) return;
+      if (await names.handle(req, res)) return;
       if (await tts.handle(req, res)) return;
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("TuringPits sequencer OK");
