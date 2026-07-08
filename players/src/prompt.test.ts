@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildReasonPrompt, buildSpeechPrompt, buildDecisionPrompt, buildDiscussionPrompt, buildVoteSpeechPrompt, recentTranscript, TRANSCRIPT_MAX_ENTRIES } from "./prompt.js";
+import { buildReasonPrompt, buildSpeechPrompt, buildDecisionPrompt, buildDiscussionPrompt, buildVoteSpeechPrompt, recentTranscript, TRANSCRIPT_MAX_ENTRIES, SPEECH_MAX_WORDS } from "./prompt.js";
 import type { TurnContext } from "./types.js";
 
 const base: TurnContext = {
@@ -202,7 +202,7 @@ describe("buildDiscussionPrompt", () => {
     };
     const p = buildDiscussionPrompt(ctx);
     expect(p).toContain("The table is turning on YOU");
-    expect(p).toContain("Make your defence now");
+    expect(p).toContain("Fight back now");
     expect(p).not.toContain("move today's vote forward"); // not the generic reactor task
   });
 
@@ -388,7 +388,7 @@ describe("buildDiscussionPrompt — per-seat rhetorical angles (mode-collapse fi
   it("the defender angle targets whoever the table is piling on (the most-suspected seat)", () => {
     // Find the seat whose (seat+round)%6 === 2 (the defender angle): seat 0 at round 2.
     const t = taskOf(sixBase(0, 2));
-    expect(t).toContain("Dmitri is drawing the table's heat"); // the pile-on target, chosen concretely
+    expect(t).toContain("Dmitri is being mobbed"); // the pile-on target, chosen concretely
   });
 
   it("falls back to a name-free angle variant when no peer has spoken yet", () => {
@@ -437,8 +437,8 @@ describe("name-based addressing (roster present)", () => {
 
   it("names the vote target in the speech while keeping the seat number for the decision JSON", () => {
     const speech = buildSpeechPrompt({ ...namedCtx, stage: "vote" }, 1, "x");
-    expect(speech).toContain("make your case to the table for voting Boris today"); // named target
-    expect(speech).toContain("the case for Boris now"); // and named again in the closing command
+    expect(speech).toContain("build your case to the table for voting Boris out today"); // named target
+    expect(speech).toContain("go after Boris now"); // and named again in the closing command
     expect(speech).not.toContain("voting seat 1");      // the ask never refers to the target by seat number
 
     const reason = buildReasonPrompt({ ...namedCtx, decisionStub: { ...base.decisionStub, player: 2 } });
@@ -581,6 +581,52 @@ describe("buildVoteSpeechPrompt (merged reason+speech)", () => {
     const det = buildVoteSpeechPrompt({ ...ctx, role: "DETECTIVE", investigations: [{ round: 1, target: 1, faction: "MAFIA" }] });
     expect(det).toContain("CLAIM Detective");        // CLAIM_GUIDANCE present
     expect(det).toContain("investigation results");  // its certain facts are available to cite
+  });
+});
+
+describe("drama directive & speech budget", () => {
+  it("injects the DRAMA directive into every PUBLIC-speech prompt", () => {
+    for (const p of [
+      buildSpeechPrompt(base, 3, "x"),
+      buildVoteSpeechPrompt(base),
+      buildDiscussionPrompt({ ...base, stage: "discussion" }),
+    ]) {
+      expect(p).toContain("THIS IS LIVE THEATRE"); // the shared drama framing
+      expect(p.toLowerCase()).toContain("play to be watched");
+    }
+  });
+
+  it("keeps DRAMA out of the PRIVATE night reason (audit text, not performance)", () => {
+    const night: TurnContext = {
+      ...base, role: "MAFIA", teammates: [4],
+      decisionStub: { nonce: "deadbeef", phase: "night", round: 2, player: 2, action: "kill" },
+    };
+    expect(buildReasonPrompt(night)).not.toContain("THIS IS LIVE THEATRE");
+  });
+
+  it("marries the drama to grounding — never manufacture facts you could not know", () => {
+    const p = buildDiscussionPrompt({ ...base, stage: "discussion" }).toLowerCase();
+    expect(p).toContain("never manufacture facts you could not know");
+    expect(p).toContain("never read body language, tone, or nerves"); // NO_INVENTION still enforced
+  });
+
+  it("threads the (raised, env-tunable) speech-word budget into the public tasks", () => {
+    expect(SPEECH_MAX_WORDS).toBeGreaterThan(40); // bumped from the weak-model 40-word cap
+    const spec = `under ${SPEECH_MAX_WORDS} words`;
+    expect(buildSpeechPrompt(base, 3, "x")).toContain(spec);
+    expect(buildVoteSpeechPrompt(base)).toContain(spec);
+    expect(buildDiscussionPrompt({ ...base, stage: "discussion" })).toContain(spec);
+  });
+
+  it("still forbids a TOWN public speech from any deception framing after the rework", () => {
+    for (const p of [
+      buildSpeechPrompt(base, 3, "x").toLowerCase(),   // base is TOWN
+      buildVoteSpeechPrompt(base).toLowerCase(),
+      buildDiscussionPrompt({ ...base, stage: "discussion" }).toLowerCase(),
+    ]) {
+      expect(p).not.toContain("lie");
+      expect(p).not.toContain("cover");
+    }
   });
 });
 

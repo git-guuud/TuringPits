@@ -29,22 +29,22 @@ import type { Persona } from "./wire.js";
  * the max seat count (8) so a match never has to repeat a persona.
  */
 const ROSTER: Omit<Persona, "seat">[] = [
-  { name: "Atlas", blurb: "loud and certain; blunt one-line verdicts, no hedging" },
-  { name: "Vesper", blurb: "dry and wry; speaks in understatement and pointed questions" },
-  { name: "Nova", blurb: "earnest and eager; warm, open, thinks out loud" },
-  { name: "Kestrel", blurb: "sharp and restless; quick, clipped sentences" },
-  { name: "Mira", blurb: "measured and even; weighs both sides aloud before landing" },
-  { name: "Juno", blurb: "calm and plainspoken; unhurried and hard to rattle" },
-  { name: "Oracle", blurb: "sparing and cryptic; short, weighty, riddling lines" },
-  { name: "Cassius", blurb: "formal and precise; makes one careful, lawyerly point" },
-  { name: "Pip", blurb: "chatty and breezy; light, a little joking, disarming" },
-  { name: "Rook", blurb: "terse and grim; few words, and heavy ones" },
-  { name: "Lark", blurb: "bright and quick; upbeat, hopeful phrasing" },
-  { name: "Sable", blurb: "cool and cynical; distrusts the easy answer" },
-  { name: "Bram", blurb: "gruff and direct; no patience for waffle" },
-  { name: "Odette", blurb: "poised and precise; deliberate, exact word choice" },
-  { name: "Flint", blurb: "fiery and pushy; presses hard to force a decision" },
-  { name: "Wren", blurb: "soft-spoken and steady; gentle, careful phrasing" },
+  { name: "Atlas", blurb: "thunderous and absolute; hurls one-line verdicts like a gavel and dares you to argue" },
+  { name: "Vesper", blurb: "dry and lethal; needles with silky understatement and questions that draw blood" },
+  { name: "Nova", blurb: "burning-earnest; pleads, hopes aloud, and takes every betrayal to heart" },
+  { name: "Kestrel", blurb: "restless and razor-quick; fires clipped, staccato jabs and never sits still" },
+  { name: "Mira", blurb: "coolly judicial; weighs both sides aloud, then brings the hammer down hard" },
+  { name: "Juno", blurb: "unshakable and plainspoken; slow to anger, impossible to rattle, deadly once set" },
+  { name: "Oracle", blurb: "cryptic and grave; drops short, riddling lines that land like prophecy" },
+  { name: "Cassius", blurb: "icy and lawyerly; builds one airtight, merciless argument and closes the case" },
+  { name: "Pip", blurb: "breezy and mischievous; jokes, charms, and slips the knife in while you're laughing" },
+  { name: "Rook", blurb: "grim and sparing; a few heavy words that shut the room up" },
+  { name: "Lark", blurb: "bright and rallying; rousing, upbeat, forever calling the table to a banner" },
+  { name: "Sable", blurb: "cynical and cutting; sneers at the easy answer and trusts nobody's word" },
+  { name: "Bram", blurb: "gruff and bulldozing; no patience for waffle, demands you get to the point" },
+  { name: "Odette", blurb: "poised and glacial; exact, deliberate, and withering when crossed" },
+  { name: "Flint", blurb: "hot-tempered and relentless; slams the table and drives everyone toward a verdict" },
+  { name: "Wren", blurb: "soft-voiced but steel-spined; gentle phrasing wrapped around an unyielding read" },
 ];
 
 /** Deterministic PRNG (mulberry32) seeded from a string — same match seed → same cast, so persona
@@ -91,14 +91,23 @@ export async function buildProvider(): Promise<ProviderBundle> {
     const provider = await createZeroGDirectProvider({
       privateKey: computeKey,
       rpcUrl: process.env.COMPUTE_RPC_URL ?? process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai",
+      // Thread the compute chainId so a mainnet RPC (16661) isn't queried with the testnet default
+      // (16602) — ethers would mismatch the network and every call would fail. Unset →
+      // createZeroGDirectProvider keeps its Galileo-testnet (16602) fallback, so the default
+      // testnet path is unchanged. (MOVEOVER.md Step 2a.)
+      ...(process.env.COMPUTE_CHAIN_ID ? { chainId: Number(process.env.COMPUTE_CHAIN_ID) } : {}),
       providerAddress,
       // Token pacing is OPT-IN and off by default: the provider enforces only 10 requests/min (no
       // token cap — rate-probe confirmed), so the request throttle alone paces. Set TOKENS_PER_MIN
       // only if a real token limit ever surfaces.
       ...(process.env.TOKENS_PER_MIN ? { tokensPerMin: Number(process.env.TOKENS_PER_MIN) } : {}),
     });
-    // The live provider signs under a known registered signer.
-    const teeSigner = process.env.TEE_SIGNER_ADDRESS ?? "0x83df4B8EbA7c0B3B740019b8c9a77ffF77D508cF";
+    // Register the signer the provider ACTUALLY signs with — its probed `status.teeSignerAddress`,
+    // captured at setup as `provider.teeSignerAddress`. NOT a hardcoded/env address: any mismatch
+    // makes settle() revert "bad TEE signature". Using the probed value is chain-agnostic (works
+    // verbatim for testnet AND mainnet providers) and removes the trap of a stale testnet
+    // TEE_SIGNER_ADDRESS lingering in .env after a mainnet switch. (MOVEOVER.md Step 2b.)
+    const teeSigner = provider.teeSignerAddress;
     // Use the provider's REAL probed envelope meta (real tlsFingerprint), not the mock placeholder.
     if (!provider.meta) throw new Error("live provider meta was not captured at setup");
     return { provider, isMock: false, teeSigner, providerMeta: provider.meta };
