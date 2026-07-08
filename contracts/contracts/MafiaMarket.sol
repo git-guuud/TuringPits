@@ -850,4 +850,105 @@ contract MafiaMarket is ERC2771Context {
     function getProp(uint256 matchId, uint256 propIdx) external view returns (Prop memory) {
         return _props[matchId][propIdx];
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
+    // Batch read views. A match has many markets and a market has many outcomes, so reading "every
+    // market" or "one wallet's whole position" the naive way is propCount × numOutcomes separate
+    // eth_calls — a fan-out that trips the public RPC's load-shedding once a screen reads several
+    // wallets at once (the leaderboard reads EVERY bettor). These getters collapse each of those
+    // reads to a SINGLE call, which is the real fix for that pressure (clients keep a per-call gate
+    // only as a thin safety net, not as the mechanism). All are pure reads; they move no funds.
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// @notice Every market of a match in one call — the whole `_props[matchId]` array (kind, param,
+    ///         pools, settled outcome, …). Replaces a propCount-wide fan-out of getProp.
+    function getProps(uint256 matchId) external view returns (Prop[] memory) {
+        return _props[matchId];
+    }
+
+    /// @notice One market's full state PLUS `user`'s own stake on each outcome and their claimed flag.
+    ///         Mirrors `Prop` field-for-field and appends `stakes`/`claimed`, so a client decodes it
+    ///         just like getProp with the position folded in.
+    struct UserPropView {
+        PropKind kind;
+        uint8 param;
+        uint8 numOutcomes;
+        bool closed;
+        PropState state;
+        uint8 winningOutcome;
+        uint128 netPot;
+        uint128 winningPool;
+        uint128[] pools;   // total stake per outcome (length == numOutcomes)
+        uint128[] stakes;  // `user`'s stake per outcome (length == numOutcomes)
+        bool claimed;       // has `user` already claimed/refunded this market
+    }
+
+    /// @notice A wallet's ENTIRE position on a match — every market's state plus that wallet's
+    ///         per-outcome stakes and claimed flag — in ONE call. This is the read behind the
+    ///         "Your book" holdings and the History position/P&L; it replaces
+    ///         propCount × (getProp + propClaimed + numOutcomes × propStake) round-trips.
+    function getUserMatch(uint256 matchId, address user) external view returns (UserPropView[] memory views) {
+        Prop[] storage props = _props[matchId];
+        views = new UserPropView[](props.length);
+        for (uint256 i = 0; i < props.length; i++) {
+            Prop storage pr = props[i];
+            uint8 n = pr.numOutcomes;
+            uint128[] memory stakes = new uint128[](n);
+            for (uint8 o = 0; o < n; o++) stakes[o] = propStake[matchId][i][o][user];
+            views[i] = UserPropView({
+                kind: pr.kind, param: pr.param, numOutcomes: n, closed: pr.closed,
+                state: pr.state, winningOutcome: pr.winningOutcome, netPot: pr.netPot,
+                winningPool: pr.winningPool, pools: pr.pools, stakes: stakes,
+                claimed: propClaimed[matchId][i][user]
+            });
+        }
+    }
+
+    /// @notice A wallet's realized result on a match: total staked and total gross return across every
+    ///         market. Compact (two uint128 per wallet), so a whole leaderboard's worth of wallets
+    ///         resolves in a SINGLE call — the fix for the leaderboard's bettors × markets × outcomes
+    ///         fan-out. `net` (return − staked) is derived by the caller.
+    struct UserNet {
+        uint128 staked;    // total wagered across every market of the match
+        uint128 returned;  // total gross entitlement: winning pro-rata payouts + Void/refund stake returns
+    }
+
+    /// @notice `getUserMatchNets` for a list of wallets. On a RefundMode (abandoned) match every stake
+    ///         returns in full; otherwise each market pays its winning-outcome backers pro-rata and
+    ///         returns the stake on a Void — identical to what claimProp/batchClaim would actually pay
+    ///         (see `_userPropPayout`), so a board figure matches the collectable amount to the wei.
+    function getUserMatchNets(uint256 matchId, address[] calldata users) external view returns (UserNet[] memory nets) {
+        Prop[] storage props = _props[matchId];
+        bool refundMode = matches[matchId].state == MatchState.RefundMode;
+        nets = new UserNet[](users.length);
+        for (uint256 u = 0; u < users.length; u++) {
+            address user = users[u];
+            uint256 staked;
+            uint256 returned;
+            for (uint256 i = 0; i < props.length; i++) {
+                Prop storage pr = props[i];
+                uint256 t = _userPropTotal(matchId, i, user, pr.numOutcomes);
+                if (t == 0) continue; // no stake on this market — contributes nothing either way
+                staked += t;
+                returned += refundMode ? t : _userPropPayout(matchId, i, pr, user);
+            }
+            nets[u] = UserNet({ staked: uint128(staked), returned: uint128(returned) });
+        }
+    }
+
+    /// @dev The gross amount `user` is entitled to on a terminal prop: a Resolved winner's pro-rata
+    ///      slice of netPot, a Void prop's full stake back, else 0 (a losing bet or an unsettled prop).
+    ///      READ-ONLY twin of the payout arithmetic in claimProp/batchClaim — keep the three in
+    ///      lockstep. It moves no funds, so it can safely ignore the claimed flag (the caller decides
+    ///      whether to net gross entitlement or only-still-collectable).
+    function _userPropPayout(uint256 matchId, uint256 propIdx, Prop storage pr, address user) private view returns (uint256) {
+        if (pr.state == PropState.Resolved) {
+            uint256 s = propStake[matchId][propIdx][pr.winningOutcome][user];
+            if (s == 0 || pr.winningPool == 0) return 0;
+            return (uint256(pr.netPot) * s) / pr.winningPool;
+        } else if (pr.state == PropState.Void) {
+            return _userPropTotal(matchId, propIdx, user, pr.numOutcomes);
+        }
+        return 0;
+    }
 }

@@ -749,22 +749,117 @@ export interface MyPropStake {
   claimed: boolean;
 }
 
+/** A raw prop tuple as returned by getProp/getProps/getUserMatch (same leading field order). */
+type RawProp = {
+  kind: bigint | number;
+  param: bigint | number;
+  numOutcomes: bigint | number;
+  closed: boolean;
+  state: bigint | number;
+  winningOutcome: bigint | number;
+  netPot: bigint;
+  winningPool: bigint;
+  pools: bigint[];
+  stakes?: bigint[]; // present only on getUserMatch
+  claimed?: boolean; // present only on getUserMatch
+};
+
+/** Decode a prop tuple → PropSnapshot (the market's public state). Shared by readProps + getProps. */
+function toPropSnapshot(pr: RawProp, index: number): PropSnapshot {
+  const state = PROP_STATE[Number(pr.state)];
+  return {
+    index,
+    kind: PROP_KIND[Number(pr.kind)] ?? "PLAYER_FATE",
+    param: Number(pr.param),
+    numOutcomes: Number(pr.numOutcomes),
+    pools: pr.pools.map((p) => formatEther(p)),
+    closed: Boolean(pr.closed),
+    state,
+    winningOutcome: state === "RESOLVED" ? Number(pr.winningOutcome) : undefined,
+  };
+}
+
+/** Decode a getUserMatch view → PropPosition (public state + the viewer's per-outcome stakes/claimed). */
+function toPropPosition(uv: RawProp, index: number): PropPosition {
+  const state = PROP_STATE[Number(uv.state)];
+  return {
+    index,
+    kind: PROP_KIND[Number(uv.kind)] ?? "PLAYER_FATE",
+    param: Number(uv.param),
+    numOutcomes: Number(uv.numOutcomes),
+    state,
+    winningOutcome: state === "RESOLVED" ? Number(uv.winningOutcome) : undefined,
+    netPot: formatEther(uv.netPot),
+    winningPool: formatEther(uv.winningPool),
+    stakes: (uv.stakes ?? []).map((s) => formatEther(s)),
+    claimed: Boolean(uv.claimed),
+  };
+}
+
+/** Market addresses (lowercased) proven to predate the batch getters — probe once, then always go legacy. */
+const legacyMarkets = new Set<string>();
+
 /**
- * Read the connected wallet's own per-outcome stake + claimed flag on each prop of a match.
- *
- * This is the LIVE holdings read behind the whole "Your book" / per-option position UI, and it re-runs
- * after every bet, on open and on settle — so it has to be both light and resilient. Two guards make it
- * so (mirroring the History position read, which had the same fan-out problem):
- *   1. Gate every eth_call through `readGate` and SKIP `propStake` for any outcome whose total pool is
- *      zero — nobody staked it, so the viewer's stake there is provably zero. getProp already hands back
- *      the pools, so this costs no extra call and collapses the fan-out from (props × outcomes) to just
- *      the outcomes that actually drew a bet.
- *   2. Read each market independently and swallow a single market's failure (a transient RPC hiccup)
- *      into a dropped entry, instead of letting one rejected call reject the whole `Promise.all` and
- *      wipe EVERY position to empty — the bug that made holdings silently vanish under RPC pressure.
+ * True when `err` is the "this function doesn't exist on this contract" signature — i.e. an OLD market
+ * deployment that predates the batch getters. On 0G a missing selector reverts data-lessly as
+ * "execution reverted (no data present; likely require(false))"; ethers may also surface it as a decode
+ * failure. Deliberately NOT matched: "missing revert data", the DISTINCT string 0G uses for transient
+ * load-shedding (see isTransientReadError) — that's a healthy contract under pressure, not a missing
+ * getter, and must never be cached as legacy.
+ */
+function isMissingSelector(err: unknown): boolean {
+  const e = err as { shortMessage?: string; message?: string };
+  const msg = `${e?.shortMessage ?? ""} ${e?.message ?? ""}`;
+  return /no data present|require\(false\)|could not decode result data|unsupported method|method not found/i.test(msg);
+}
+
+/**
+ * Run `batch` (the single-call fast path) and, on failure, fall back to `legacy` (the per-call fan-out).
+ * The batch call is already retried on transient overload by readGate, so a failure here is almost always
+ * an older deployment lacking the getter — which we remember per `marketAddr` so every later read skips
+ * the doomed probe and goes straight to legacy (no added RPC load on old contracts). New deployments
+ * answer the batch call and never touch the fallback.
+ */
+async function batchOrLegacy<T>(marketAddr: string, batch: () => Promise<T>, legacy: () => Promise<T>): Promise<T> {
+  const key = marketAddr.toLowerCase();
+  if (legacyMarkets.has(key)) return legacy();
+  try {
+    return await batch();
+  } catch (err) {
+    if (isMissingSelector(err)) legacyMarkets.add(key); // old deployment — don't probe it again this session
+    return legacy();
+  }
+}
+
+/**
+ * Read the connected wallet's own per-outcome stake + claimed flag on each prop of a match — the LIVE
+ * holdings read behind the "Your book" / per-option position UI. It re-runs after every bet, on open and
+ * on settle, so it stays light: ONE getUserMatch call returns every market's numOutcomes + the wallet's
+ * stakes + claimed in a single round-trip. `propCount` is retained for the legacy fallback's fan-out.
  */
 export async function readMyPropStakes(address: string, matchId: number, propCount: number, wallet: Wallet): Promise<MyPropStake[]> {
   const c = readContract(address, wallet);
+  return batchOrLegacy(
+    address,
+    async () => {
+      const views = (await readGate(() => c.getFunction("getUserMatch")(matchId, wallet.account))) as RawProp[];
+      return views.map((uv, i): MyPropStake => ({
+        index: i,
+        numOutcomes: Number(uv.numOutcomes),
+        stakes: (uv.stakes ?? []).map((s) => formatEther(s)),
+        claimed: Boolean(uv.claimed),
+      }));
+    },
+    () => readMyPropStakesLegacy(c, matchId, propCount, wallet),
+  );
+}
+
+/**
+ * Pre-batch-getter fallback for readMyPropStakes on OLD market deployments: a per-market fan-out, each
+ * market read independently so one market's transient failure drops just that entry (not the whole book),
+ * and zero-pool outcomes skip their propStake read (the viewer's stake there is provably zero).
+ */
+async function readMyPropStakesLegacy(c: Contract, matchId: number, propCount: number, wallet: Wallet): Promise<MyPropStake[]> {
   const results = await Promise.all(
     Array.from({ length: propCount }, async (_, i): Promise<MyPropStake | null> => {
       try {
@@ -809,14 +904,30 @@ export interface PropPosition {
 }
 
 /**
- * Read the connected account's positions across EVERY market of a match — the headline FACTION market
- * and all the side markets — via the public provider (no wallet). Used by the History screen to detect
- * what the viewer wagered and surface any reclaimable pots. Safe to call on non-terminal matches too
- * (a zero-pool outcome is skipped, so an untouched market costs just its one getProp).
+ * Read an account's positions across EVERY market of a match — the headline FACTION market and all the
+ * side markets — via the public provider (no wallet). Used by the History screen to detect what the
+ * viewer wagered and by the leaderboard's legacy path. ONE getUserMatch call returns every market plus
+ * this account's per-outcome stakes and claimed flags; the fallback is the old per-market fan-out.
  */
 export async function readPropPositions(address: string, matchId: number, account: string): Promise<PropPosition[]> {
   const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
-  const count = Number((await readGate(() => c.getFunction("propCount")(matchId) as Promise<bigint>)));
+  return batchOrLegacy(
+    address,
+    async () => {
+      const views = (await readGate(() => c.getFunction("getUserMatch")(matchId, account))) as RawProp[];
+      return views.map((uv, i) => toPropPosition(uv, i));
+    },
+    () => readPropPositionsLegacy(c, matchId, account),
+  );
+}
+
+/**
+ * Pre-batch-getter fallback for readPropPositions on OLD market deployments. Reads propCount, then each
+ * market's getProp; a zero-pool outcome skips its propStake read (the account's stake there is provably
+ * zero), so an untouched market costs just its one getProp.
+ */
+async function readPropPositionsLegacy(c: Contract, matchId: number, account: string): Promise<PropPosition[]> {
+  const count = Number(await readGate(() => c.getFunction("propCount")(matchId) as Promise<bigint>));
   return Promise.all(
     Array.from({ length: count }, async (_, i) => {
       const pr = await readGate(() => c.getFunction("getProp")(matchId, i));
@@ -833,9 +944,6 @@ export async function readPropPositions(address: string, matchId: number, accoun
         netPot: formatEther(pr.netPot as bigint),
         winningPool: formatEther(pr.winningPool as bigint),
       };
-      // An outcome with a zero total pool had no bets at all, so the viewer's stake there is provably
-      // zero — skip the propStake read. A prop nobody touched costs just the one getProp above. This is
-      // what keeps the per-match fan-out (and thus the failure surface) small on sparsely-bet markets.
       const hasAnyPool = pools.some((p) => p > 0n);
       if (!hasAnyPool) {
         return { ...base, stakes: pools.map(() => "0"), claimed: false };
@@ -851,6 +959,48 @@ export async function readPropPositions(address: string, matchId: number, accoun
       return { ...base, stakes: stakeWeis.map((s) => formatEther(s)), claimed };
     }),
   );
+}
+
+/** One wallet's realized result on a terminal match — the leaderboard row before naming/ranking. */
+export interface MatchNet {
+  address: string;
+  /** Total CHIP wagered across every market. */
+  staked: number;
+  /** Gross CHIP returned (winning payouts + Void/refund returns), == what claim/batchClaim would pay. */
+  returned: number;
+  /** Net profit (returned − staked). */
+  net: number;
+}
+
+/**
+ * The realized (staked, returned, net) for a list of wallets on a match — the ENTIRE leaderboard in a
+ * single call (chunked only to bound one call's return size on a huge field). `returned` is computed
+ * on-chain with the same arithmetic claimProp/batchClaim pay, so a board figure is the exact collectable
+ * amount. Throws if the deployment predates getUserMatchNets (the leaderboard then falls back per-bettor).
+ */
+export async function readMatchNets(address: string, matchId: number, users: string[]): Promise<MatchNet[]> {
+  if (users.length === 0) return [];
+  // Share the legacy-market cache with the other batch readers: if this deployment is already known to
+  // predate the getters, don't probe it — throw straight to the leaderboard's per-bettor fallback.
+  if (legacyMarkets.has(address.toLowerCase())) throw new Error("legacy market: getUserMatchNets unavailable");
+  const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
+  const CHUNK = 100;
+  const out: MatchNet[] = [];
+  try {
+    for (let i = 0; i < users.length; i += CHUNK) {
+      const chunk = users.slice(i, i + CHUNK);
+      const nets = (await readGate(() => c.getFunction("getUserMatchNets")(matchId, chunk))) as { staked: bigint; returned: bigint }[];
+      nets.forEach((n, k) => {
+        const staked = parseFloat(formatEther(n.staked));
+        const returned = parseFloat(formatEther(n.returned));
+        out.push({ address: chunk[k]!, staked, returned, net: returned - staked });
+      });
+    }
+  } catch (err) {
+    if (isMissingSelector(err)) legacyMarkets.add(address.toLowerCase()); // old deployment — remember it
+    throw err;
+  }
+  return out;
 }
 
 /**
@@ -889,26 +1039,26 @@ export async function readMatchBettors(matchId: number, address = MARKET_ADDRESS
 
 /**
  * Read the side markets for a match from the contract (no wallet) — a fallback for when the server
- * isn't pushing `props` over the WebSocket (e.g. the History screen, or a crashed server).
+ * isn't pushing `props` over the WebSocket (e.g. the History screen, or a crashed server). ONE getProps
+ * call returns the whole array; the fallback is the old propCount-wide getProp fan-out.
  */
 export async function readProps(address: string, matchId: number): Promise<PropSnapshot[]> {
   const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
-  const count = Number((await c.getFunction("propCount")(matchId)) as bigint);
-  return Promise.all(
-    Array.from({ length: count }, async (_, i) => {
-      const pr = await c.getFunction("getProp")(matchId, i);
-      const state = PROP_STATE[Number(pr.state)];
-      return {
-        index: i,
-        kind: PROP_KIND[Number(pr.kind)] ?? "PLAYER_FATE",
-        param: Number(pr.param),
-        numOutcomes: Number(pr.numOutcomes),
-        pools: (pr.pools as bigint[]).map((p) => formatEther(p)),
-        closed: Boolean(pr.closed),
-        state,
-        winningOutcome: state === "RESOLVED" ? Number(pr.winningOutcome) : undefined,
-      };
-    }),
+  return batchOrLegacy(
+    address,
+    async () => {
+      const raw = (await readGate(() => c.getFunction("getProps")(matchId))) as RawProp[];
+      return raw.map((pr, i) => toPropSnapshot(pr, i));
+    },
+    async () => {
+      const count = Number((await readGate(() => c.getFunction("propCount")(matchId))) as bigint);
+      return Promise.all(
+        Array.from({ length: count }, async (_, i) => {
+          const pr = (await readGate(() => c.getFunction("getProp")(matchId, i))) as RawProp;
+          return toPropSnapshot(pr, i);
+        }),
+      );
+    },
   );
 }
 
@@ -969,7 +1119,54 @@ function makeLimiter(max: number) {
     }
   };
 }
-const readGate = makeLimiter(6);
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * True only for TRANSIENT node/overload failures worth retrying — NOT genuine contract reverts. When the
+ * public 0G node sheds a read under load it answers with a data-less `missing revert data` (ethers code
+ * CALL_EXCEPTION, no revert payload); a real `require`/`revert` instead carries data ("execution reverted:
+ * <reason>"). We must retry the former and never the latter, so match the overload signatures explicitly
+ * and leave everything with actual revert data to propagate. Also covers plain network/server hiccups.
+ */
+function isTransientReadError(err: unknown): boolean {
+  const e = err as { code?: string; shortMessage?: string; message?: string; info?: { error?: { message?: string } } };
+  if (e?.code === "SERVER_ERROR" || e?.code === "TIMEOUT" || e?.code === "NETWORK_ERROR") return true;
+  const msg = `${e?.shortMessage ?? ""} ${e?.message ?? ""} ${e?.info?.error?.message ?? ""}`;
+  return /missing revert data|could not coalesce|rate.?limit|too many requests|\b429\b|\b503\b|service unavailable|econnreset|failed to fetch|network error/i.test(
+    msg,
+  );
+}
+
+/**
+ * Retry a read on transient 0G overload with exponential backoff + jitter. Runs INSIDE the concurrency
+ * slot (see readGate) so the slot is held across the wait — a struggling node isn't re-flooded while we
+ * back off, which is what lets a burst actually drain instead of collapsing. Genuine reverts throw on the
+ * first try (isTransientReadError == false), so this never masks a real contract error.
+ */
+async function withReadRetry<T>(fn: () => Promise<T>, tries = 5): Promise<T> {
+  let last: unknown;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isTransientReadError(err)) throw err;
+      last = err;
+      await sleep(120 * 2 ** attempt + Math.random() * 120);
+    }
+  }
+  throw last;
+}
+
+const rawReadGate = makeLimiter(6);
+/**
+ * The single choke point for read-RPC: caps concurrency AND retries transient node overload. Before this,
+ * a large fan-out (e.g. the match leaderboard reading every bettor's position — ~300 eth_calls) tripped
+ * 0G's load-shedding, and each shed `missing revert data` rejected a whole bettor's `Promise.all`, so the
+ * board silently came back empty ("No wagers were placed"). Retrying the shed reads here fixes that for
+ * every fan-out (leaderboard, History, live holdings) with no change at the call sites.
+ */
+const readGate = <T>(fn: () => Promise<T>): Promise<T> => rawReadGate(() => withReadRetry(fn));
 
 export interface MarketRead {
   state: MarketState;

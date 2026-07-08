@@ -36,6 +36,18 @@ export const MAFIA_MARKET_ABI = [
   "function getProp(uint256 matchId, uint256 propIdx) view returns (tuple(uint8 kind, uint8 param, uint8 numOutcomes, bool closed, uint8 state, uint8 winningOutcome, uint128 netPot, uint128 winningPool, uint128[] pools))",
   "function propStake(uint256 matchId, uint256 propIdx, uint8 outcome, address user) view returns (uint128)",
   "function propClaimed(uint256 matchId, uint256 propIdx, address user) view returns (bool)",
+  // Batch read views — collapse a "read every market" / "read one wallet's whole position" / "rank every
+  // bettor" fan-out into ONE eth_call each, so a screen doesn't trip the public RPC's load-shedding.
+  //   getProps        — the whole prop array (replaces a propCount-wide getProp fan-out; no-wallet path).
+  //   getUserMatch    — every market's state + THIS wallet's per-outcome stakes + claimed, in one call
+  //                     (replaces propCount × (getProp + propClaimed + numOutcomes × propStake)).
+  //   getUserMatchNets — each listed wallet's (staked, returned) on the match — the whole leaderboard in
+  //                     one call; `returned` equals what claimProp/batchClaim would actually pay.
+  // Only present on the current market deployment; older contracts revert (no such selector), so the
+  // readers below try these first and fall back to the legacy per-call reads.
+  "function getProps(uint256 matchId) view returns (tuple(uint8 kind, uint8 param, uint8 numOutcomes, bool closed, uint8 state, uint8 winningOutcome, uint128 netPot, uint128 winningPool, uint128[] pools)[])",
+  "function getUserMatch(uint256 matchId, address user) view returns (tuple(uint8 kind, uint8 param, uint8 numOutcomes, bool closed, uint8 state, uint8 winningOutcome, uint128 netPot, uint128 winningPool, uint128[] pools, uint128[] stakes, bool claimed)[])",
+  "function getUserMatchNets(uint256 matchId, address[] users) view returns (tuple(uint128 staked, uint128 returned)[])",
   "function MIN_BET() view returns (uint256)",
   // total matches ever created — the History screen walks [0, nextMatchId) to list past battles.
   "function nextMatchId() view returns (uint256)",

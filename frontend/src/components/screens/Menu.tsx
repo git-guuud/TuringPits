@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { MatchApi } from "../../state/matchStore.js";
 import { fetchDisplayNames, type MatchStatus } from "../../lib/contract.js";
 import { getLocalName, pseudonymFor, validHandle, MAX_HANDLE_LEN } from "../../lib/names.js";
@@ -220,7 +220,7 @@ function WalletCard(p: {
 
       {s.wallet.account && <NameEditor api={api} account={s.wallet.account} />}
 
-      <div className="mt-4 border-t border-line pt-4">
+      {/*<div className="mt-4 border-t border-line pt-4">
         <div className="flex items-center justify-between gap-3">
           <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim">Gas-free betting</span>
           <span
@@ -238,7 +238,7 @@ function WalletCard(p: {
             Guest keys live in this browser — mock CHIP only. Connect a wallet to carry your identity across devices.
           </p>
         )}
-      </div>
+      </div>*/}
     </div>
   );
 }
@@ -272,10 +272,20 @@ function NameEditor({ api, account }: { api: MatchApi; account: string }) {
   const current = serverName ?? getLocalName(account);
   const display = current ?? pseudonymFor(account);
 
+  const inputRef = useRef<HTMLInputElement>(null);
+  // Focus the field when entering edit mode (autoFocus only fires on mount; the field stays mounted here).
+  useEffect(() => {
+    if (editing) inputRef.current?.focus();
+  }, [editing]);
+
   const start = () => {
     setValue(current ?? "");
     setError(null);
     setEditing(true);
+  };
+  const cancel = () => {
+    setEditing(false);
+    setError(null);
   };
   const save = async () => {
     const name = value.trim();
@@ -298,69 +308,49 @@ function NameEditor({ api, account }: { api: MatchApi; account: string }) {
 
   return (
     <div className="mt-4 border-t border-line pt-4">
-      <div className="flex items-center justify-between gap-3">
-        <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim">Your handle</span>
-        {!editing && (
-          <button
-            type="button"
-            onClick={start}
-            className="rounded-sm border border-line-2 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-mute transition-colors hover:border-gilt hover:text-gilt"
-          >
-            Rename
-          </button>
-        )}
+      <div className="flex items-center gap-2">
+        <span className="shrink-0 font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim">Your handle:</span>
+        <input
+          ref={inputRef}
+          value={editing ? value : display}
+          readOnly={!editing}
+          maxLength={MAX_HANDLE_LEN}
+          placeholder={pseudonymFor(account)}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (!editing) return;
+            if (e.key === "Enter") void save();
+            if (e.key === "Escape") cancel();
+          }}
+          // Clicking anywhere off the field (except Save, which suppresses the blur below) cancels the edit.
+          onBlur={() => {
+            if (editing && !saving) cancel();
+          }}
+          className={`flex-1 border px-2.5 py-1.5 font-body text-[15px] outline-none transition-colors ${
+            editing
+              ? "border-line bg-ink-2 text-cream focus:border-gilt"
+              : "border-transparent bg-transparent text-cream"
+          }`}
+        />
+        <button
+          type="button"
+          // Suppress the mousedown-driven blur so saving isn't cancelled before the click lands.
+          onMouseDown={(e) => editing && e.preventDefault()}
+          onClick={editing ? () => void save() : start}
+          disabled={saving}
+          className="shrink-0 rounded-sm border border-gilt px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
+        >
+          {editing ? (saving ? "Saving…" : "Save") : "Edit"}
+        </button>
       </div>
-
-      {editing ? (
-        <div className="mt-2">
-          <div className="flex items-center gap-2">
-            <input
-              autoFocus
-              value={value}
-              maxLength={MAX_HANDLE_LEN}
-              placeholder={pseudonymFor(account)}
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void save();
-                if (e.key === "Escape") setEditing(false);
-              }}
-              className="flex-1 border border-line bg-ink-2 px-2.5 py-1.5 font-body text-[15px] text-cream outline-none focus:border-gilt"
-            />
-            <button
-              type="button"
-              onClick={() => void save()}
-              disabled={saving}
-              className="rounded-sm border border-gilt px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
-            >
-              {saving ? "Saving…" : "Save"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setEditing(false)}
-              disabled={saving}
-              className="font-mono text-[11px] uppercase tracking-[0.12em] text-mute transition-colors hover:text-cream disabled:opacity-60"
-            >
-              Cancel
-            </button>
-          </div>
-          {error ? (
-            <p className="mt-1.5 font-mono text-[11px] text-convict">{error}</p>
-          ) : (
-            <p className="mt-1.5 font-body text-[12px] leading-snug text-mute">
-              Shown on match leaderboards. Others see it after a moment.
-            </p>
-          )}
-        </div>
-      ) : (
-        <div className="mt-1.5 flex items-baseline gap-2">
-          <span className="font-body text-[17px] text-cream">{display}</span>
-          {!current && (
-            <span className="rounded-sm border border-line-2 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-mute" title="Auto-generated — tap Rename to choose your own">
-              auto
-            </span>
-          )}
-        </div>
-      )}
+      {/* {editing &&
+        (error ? (
+          <p className="mt-1.5 font-mono text-[11px] text-convict">{error}</p>
+        ) : (
+          <p className="mt-1.5 font-body text-[12px] leading-snug text-mute">
+            Shown on match leaderboards. Others see it after a moment.
+          </p>
+        ))} */}
     </div>
   );
 }
