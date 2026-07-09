@@ -102,7 +102,7 @@ settlement transaction per market.
 
 | Contract                | Address                                      |
 | ----------------------- | -------------------------------------------- |
-| `MafiaMarket`           | `0x35fCb9De839700ED139077ECB183257dD10C581f` |
+| `MafiaMarket`           | `0x0f179Da6a8133F8fdD5A33ebd18e5Ff3C3fD341f` |
 | `MockBetToken` (CHIP)   | `0x48cF05921C8f042Ed337f56F947542aB89691aBb` |
 | `Forwarder` (EIP-2771)  | `0xaD341c0A01eaA8EBe8B9aee9FD1364C619fB770A` |
 

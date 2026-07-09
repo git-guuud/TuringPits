@@ -89,7 +89,7 @@ export function resolveStorageScanUrl(root: string): Promise<string | null> {
  * needs the address up front. Override per-env with VITE_MARKET_ADDRESS.
  */
 export const MARKET_ADDRESS =
-  (import.meta.env.VITE_MARKET_ADDRESS as string | undefined) || "0x35fCb9De839700ED139077ECB183257dD10C581f";
+  (import.meta.env.VITE_MARKET_ADDRESS as string | undefined) || "0x0f179Da6a8133F8fdD5A33ebd18e5Ff3C3fD341f";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Optional EIP-2771 gas relayer ("gasless" path). A bettor signs a ForwardRequest (free); the

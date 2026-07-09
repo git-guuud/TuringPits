@@ -58,37 +58,39 @@ function useValueFlash(value: number, ms = 800): "up" | "down" | null {
   return dir;
 }
 
-// Compact status-pill palettes (text + border), one per market state.
-const PILL = {
-  gilt: "text-gilt border-gilt/40",
-  acquit: "text-acquit border-acquit/50",
-  acquitDim: "text-acquit/70 border-acquit/30",
-  giltDim: "text-gilt/70 border-gilt/30",
-  mute: "text-mute border-line-2",
-  dim: "text-cream-dim border-line-2",
-} as const;
-
-function StateBadge({ s }: { s: ViewState }) {
-  const preOpen = s.market.state === "OPEN" && !s.market.bettingLive;
-  // The headline verdict rides in the FACTION prop now: VOID = a mistrial / unbacked verdict (full refund).
-  const factionVoid = (s.market.props ?? []).find((p) => p.kind === "FACTION")?.state === "VOID";
-  const settledText = factionVoid ? "No verdict backed · stakes returned" : "Verdict settled on-chain";
-  const map: Record<string, { text: string; cls: string }> = {
-    OPEN: preOpen
-      ? { text: "Opening shortly", cls: "text-cream-dim" }
-      : { text: "Open", cls: "text-gilt" },
-    LOCKED: { text: "Closed", cls: "text-cream-dim" },
-    SETTLED: { text: settledText, cls: "text-acquit border-acquit/40" },
-    REFUND: { text: "Match abandoned", cls: "text-gilt border-gilt/40" },
-  };
-  const m = map[s.market.state] ?? map.OPEN!;
-  return (
-    <span className={["mb-4 inline-flex items-center gap-2 rounded-sm border border-line-2 px-2.5 py-1.5 font-mono text-[11px] uppercase tracking-[0.16em]", m.cls].join(" ")}>
-      <span className="h-1.5 w-1.5 rounded-full bg-current" />
-      {m.text}
-    </span>
-  );
+/**
+ * A 0..1 progress fraction for the single header countdown, without any server-supplied duration: the
+ * first (largest) `ms` seen for a countdown identity becomes the denominator, so the bar starts full and
+ * eases down as the clock runs. Keyed so a fresh countdown (new window / round) resets the bar. Mutating
+ * the ref in render is safe here — it's a pure max() over the current key.
+ */
+function useCountdownProgress(key: string | null, ms: number | null): number {
+  const peak = useRef<{ key: string | null; max: number }>({ key: null, max: 0 });
+  if (key !== peak.current.key) peak.current = { key, max: ms ?? 0 };
+  if (ms != null && ms > peak.current.max) peak.current.max = ms;
+  if (ms == null || peak.current.max <= 0) return 0;
+  return Math.max(0, Math.min(1, ms / peak.current.max));
 }
+
+// ── per-UI-state chrome: badge word + left-accent + badge/title colours ──────────
+// A market is classified into one of these from its live view-model (bettable / claimable / pill), and
+// the whole row (accent stripe, badge, title, recede) is driven off the match.
+type UiState = "window" | "open" | "claim" | "soon" | "settled" | "sealed" | "void";
+const UI: Record<UiState, { badge: string; left: string; badgeCls: string; titleCls: string; dim: boolean }> = {
+  window: { badge: "WINDOW", left: "border-l-convict", badgeCls: "text-convict border-convict/60", titleCls: "text-cream", dim: false },
+  open: { badge: "OPEN", left: "border-l-gilt", badgeCls: "text-gilt border-gilt/50", titleCls: "text-cream", dim: false },
+  claim: { badge: "CLAIM", left: "border-l-acquit", badgeCls: "text-acquit border-acquit/50", titleCls: "text-cream", dim: false },
+  soon: { badge: "SOON", left: "border-l-mute", badgeCls: "text-mute border-line-2", titleCls: "text-cream-dim", dim: true },
+  settled: { badge: "SETTLED", left: "border-l-acquit/50", badgeCls: "text-acquit/70 border-acquit/30", titleCls: "text-cream-dim", dim: false },
+  sealed: { badge: "SEALED", left: "border-l-mute-2", badgeCls: "text-mute border-line-2", titleCls: "text-mute", dim: true },
+  void: { badge: "RETURNED", left: "border-l-gilt/50", badgeCls: "text-gilt/70 border-gilt/30", titleCls: "text-mute", dim: true },
+};
+
+// Nightfall dims the Wagers panel by SHIFTING its own surface colours to a cool moonlight palette
+// (the veil is lifted off this panel in Live.tsx, so a slab is never laid over the betting UI). Every
+// opaque surface has a warm day value and a cool night value; the swap cross-fades via transition-colors.
+const DAY = { panel: "#131009", header: "#131009", raised: "#1b1610", list: "#0f0c07", action: "#100d07", footer: "#0c0b08" } as const;
+const NIGHT = { panel: "#0e1322", header: "#101527", raised: "#182036", list: "#0b1020", action: "#0c1526", footer: "#080c18" } as const;
 
 // ── one outcome of a market ─────────────────────────────────────────────────────
 interface Choice {
@@ -111,95 +113,113 @@ interface Choice {
   winner: boolean;
 }
 
-function ChoiceCard({
+/** A wide two-up card — used only for the ≤2-outcome markets, where each side gets room to breathe. */
+function OutcomeCard({
   c,
   selected,
   selectable,
-  bettable,
   dimmed,
   onSelect,
 }: {
   c: Choice;
   selected: boolean;
   selectable: boolean;
-  /** The market still takes bets — drives whether the per-choice figure reads as a projection vs a result. */
-  bettable: boolean;
   dimmed: boolean;
   onSelect: () => void;
 }) {
-  // Odds/pool only read as data once the market actually holds wagers; before then a card would show a
-  // wall of "0% · ◈0.00 · —" noise, so an empty pool collapses to a single quiet line instead.
   const hasPool = parseFloat(c.total) > 0;
   const m = mult(c.pool, c.total);
-  // Precise pot fraction (not the rounded %) drives the bar width + the move-flash, so even a sub-1% shift
-  // registers — the rounded "%" text can sit still while the bar eases and the up/down cue fires.
+  // Precise pot fraction (not the rounded %) drives the bar + the flash, so even a sub-1% move registers.
   const frac = parseFloat(c.total) > 0 ? (parseFloat(c.pool) / parseFloat(c.total)) * 100 : 0;
   const dir = useValueFlash(Math.round(frac * 10) / 10);
-  const flashText = dir === "up" ? "text-acquit" : dir === "down" ? "text-convict" : "text-mute";
+  const flash = dir === "up" ? "animate-flashup text-acquit" : dir === "down" ? "animate-flashdown text-convict" : "text-cream";
   return (
     <button
       type="button"
       disabled={!selectable}
       onClick={onSelect}
       className={[
-        "relative w-full border px-3.5 py-2.5 text-left transition-colors",
+        "relative border-l-2 px-3 py-2.5 text-left transition-colors",
         selected
-          ? "border-gilt bg-gilt/[0.06]"
-          : c.mine > 0
-            ? "border-gilt/60 bg-gilt/[0.03]"
-            : c.winner
-              ? c.accent.replace("text-", "border-")
-              : "border-line-2",
-        selectable ? "cursor-pointer hover:border-gilt/60" : "cursor-default",
-        dimmed ? "opacity-40" : "",
+          ? "border-l-gilt bg-gilt/[0.07]"
+          : c.winner
+            ? "border-l-acquit bg-acquit/[0.04]"
+            : c.mine > 0
+              ? "border-l-gilt/50 bg-gilt/[0.03]"
+              : "border-l-line",
+        selectable ? "cursor-pointer hover:bg-gilt/[0.05]" : "cursor-default",
+        dimmed ? "opacity-45" : "",
       ].join(" ")}
     >
       {c.winner && (
-        <span className="absolute -right-px -top-px bg-acquit px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-ink">
-          Outcome
-        </span>
+        <span className="absolute right-1.5 top-1.5 font-mono text-[8px] uppercase tracking-[0.12em] text-acquit">● outcome</span>
       )}
-      {selected && !c.winner && (
-        <span className="absolute -right-px -top-px bg-gilt px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-ink">
-          ✓ Picked
-        </span>
-      )}
-      <div className="flex items-center justify-between gap-1.5">
-        <span className={["truncate font-mono text-[10px] uppercase tracking-[0.14em]", c.eyebrowClass].join(" ")}>{c.eyebrow}</span>
-        <span className={["shrink-0 font-mono text-[15px] tabular-nums", hasPool && m !== "—" ? "text-cream" : "text-mute-2"].join(" ")}>{m}</span>
-      </div>
-      <div className={["mt-1 font-display text-[21px] tracking-[0.1em]", c.accent].join(" ")}>{c.label}</div>
+      <div className={["truncate font-mono text-[9px] uppercase tracking-[0.2em]", c.eyebrowClass].join(" ")}>{c.eyebrow}</div>
+      <div className={["mt-0.5 font-display text-[22px] font-semibold leading-none tracking-[0.02em]", selected ? "text-lamp" : c.accent].join(" ")}>{c.label}</div>
       {hasPool ? (
         <>
-          <div className="mt-2 flex items-baseline justify-between font-mono text-[10.5px] tracking-[0.06em] text-mute">
-            <span className={["inline-flex items-center gap-1 transition-colors duration-700", flashText].join(" ")}>
-              {pct(c.pool, c.total)}% of pot
-              <span aria-hidden className={["text-[8px] leading-none transition-opacity duration-300", dir ? "opacity-100" : "opacity-0"].join(" ")}>
-                {dir === "down" ? "▼" : "▲"}
-              </span>
-            </span>
-            <span>◈ {parseFloat(c.pool).toFixed(2)}</span>
+          <div className="mt-2.5 flex items-baseline gap-1.5">
+            <span className={["rounded-[1px] px-1 font-mono text-[22px] font-semibold leading-none tabular-nums", flash].join(" ")}>{m}</span>
+            {dir && <span className={["text-[9px]", dir === "up" ? "text-acquit" : "text-convict"].join(" ")}>{dir === "up" ? "▲" : "▼"}</span>}
           </div>
-          <div className="mt-1.5 h-0.5 bg-line">
-            <div className={["h-full transition-[width] duration-500 ease-out", c.bar].join(" ")} style={{ width: `${Math.min(100, frac).toFixed(2)}%` }} />
+          <div className="mt-2 flex items-center justify-between font-mono text-[10px] tabular-nums text-mute">
+            <span>{pct(c.pool, c.total)}% of pot</span>
+            <span>◈{parseFloat(c.pool).toFixed(2)}</span>
+          </div>
+          <div className="mt-2 h-0.5 bg-line">
+            <div className={["h-full transition-[width] duration-500 ease-out", selected ? "bg-gilt" : "bg-gilt-soft"].join(" ")} style={{ width: `${Math.min(100, frac).toFixed(1)}%` }} />
           </div>
         </>
       ) : (
-        <div className="mt-1.5 font-mono text-[10px] tracking-[0.08em] text-mute-2">no wagers yet</div>
+        <div className="mt-2 font-mono text-[10px] tracking-[0.08em] text-mute-2">no wagers yet</div>
       )}
-      {/* Your position on THIS outcome — the amount always, plus the payout it stands to return (a live
-          projection while betting is open; the realized payout once it's the winning outcome). A losing /
-          voided outcome shows only the stake, so no wrong "to win" is implied after settlement. */}
       {c.mine > 0 && (
-        <div className="mt-2 flex items-center justify-between gap-1 rounded-sm border border-gilt/40 bg-gilt/[0.09] px-2 py-1 font-mono text-[10.5px] tracking-[0.03em]">
-          <span className="text-gilt">● ◈{c.mine.toFixed(2)} yours</span>
-          {c.winner ? (
-            <span className="text-acquit">pays ◈{existingWin(c.mine, c.pool, c.total).toFixed(2)}</span>
-          ) : bettable ? (
-            <span className="text-cream-dim">→ ◈{existingWin(c.mine, c.pool, c.total).toFixed(2)}</span>
-          ) : null}
+        <div className="mt-2.5 border-l-2 border-gilt pl-1.5 font-mono text-[9.5px] tracking-[0.06em] text-gilt">
+          ◈{c.mine.toFixed(2)} yours{c.winner ? ` · pays ◈${existingWin(c.mine, c.pool, c.total).toFixed(2)}` : ""}
         </div>
       )}
+    </button>
+  );
+}
+
+/** A slim single-line row — used for the many-outcome markets (seats / fate), inside an internal scroll. */
+function OutcomeRow({
+  c,
+  selected,
+  selectable,
+  onSelect,
+}: {
+  c: Choice;
+  selected: boolean;
+  selectable: boolean;
+  onSelect: () => void;
+}) {
+  const m = mult(c.pool, c.total);
+  const frac = parseFloat(c.total) > 0 ? (parseFloat(c.pool) / parseFloat(c.total)) * 100 : 0;
+  const dir = useValueFlash(Math.round(frac * 10) / 10);
+  const flash = dir === "up" ? "animate-flashup text-acquit" : dir === "down" ? "animate-flashdown text-convict" : "text-cream";
+  return (
+    <button
+      type="button"
+      disabled={!selectable}
+      onClick={onSelect}
+      className={[
+        "relative flex w-full items-center justify-between gap-2.5 overflow-hidden border-b border-l-2 hairline px-2.5 py-2 text-left transition-colors",
+        selected ? "border-l-gilt bg-gilt/[0.07]" : c.mine > 0 ? "border-l-gilt/40" : "border-l-transparent",
+        selectable ? "cursor-pointer hover:bg-gilt/[0.05]" : "cursor-default",
+      ].join(" ")}
+    >
+      <span aria-hidden className="absolute bottom-0 left-0 h-0.5" style={{ width: `${Math.min(100, frac).toFixed(1)}%`, background: selected ? "#c9a23f" : "#9c8038" }} />
+      <span className="relative flex min-w-0 items-center gap-2.5">
+        <span className="w-11 shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-mute-2">{c.eyebrow}</span>
+        <span className={["truncate font-display text-[18px] font-medium leading-none", selected ? "text-lamp" : c.winner ? "text-acquit" : "text-cream"].join(" ")}>{c.label}</span>
+        {c.mine > 0 && <span className="shrink-0 border-l-2 border-gilt pl-1.5 font-mono text-[8.5px] text-gilt">◈{c.mine.toFixed(2)}</span>}
+        {c.winner && <span className="shrink-0 font-mono text-[8px] text-acquit">● out</span>}
+      </span>
+      <span className="relative flex shrink-0 items-baseline gap-2 font-mono tabular-nums">
+        <span className="text-[9.5px] text-mute">{pct(c.pool, c.total)}% · ◈{parseFloat(c.pool).toFixed(2)}</span>
+        <span className={["rounded-[1px] px-1 text-[13px] font-semibold", flash].join(" ")}>{m}</span>
+      </span>
     </button>
   );
 }
@@ -230,6 +250,24 @@ interface BetMarket {
   status: string | null;
 }
 
+/** Classify a live market into the UI-state that drives its badge / accent / recede treatment. */
+function uiStateOf(m: BetMarket, isWindow: boolean): UiState {
+  if (m.canClaim) return "claim";
+  if (m.bettable) return isWindow ? "window" : "open";
+  switch (m.pill.text) {
+    case "soon":
+      return "soon";
+    case "returned":
+      return "void";
+    case "collected":
+    case "missed":
+    case "settled":
+      return "settled";
+    default:
+      return "sealed";
+  }
+}
+
 // PlayerFate death-round buckets (MafiaMarket.FATE_BUCKETS == 5), in outcome order.
 const FATE_COPY: ReadonlyArray<Pick<Choice, "eyebrow" | "eyebrowClass" | "label" | "accent" | "bar">> = [
   { eyebrow: "to the final bell", eyebrowClass: "text-acquit", label: "SURVIVES", accent: "text-acquit", bar: "bg-acquit" },
@@ -239,129 +277,100 @@ const FATE_COPY: ReadonlyArray<Pick<Choice, "eyebrow" | "eyebrowClass" | "label"
   { eyebrow: "the long game", eyebrowClass: "text-convict", label: "OUT · R4+", accent: "text-convict", bar: "bg-convict" },
 ];
 
-// ── a single market in the at-a-glance list: collapsed header + (when open) inline outcomes+action ──
+// ── a single market in the at-a-glance list: collapsed header + (when open) inline outcomes ──
 function MarketRow({
   m,
-  open,
+  expanded,
   onToggle,
   picked,
   setPicked,
   busy,
-  connected,
-  connecting,
-  connect,
-  connectBurner,
-  amount,
-  setAmount,
-  stepStake,
-  balance,
-  gasless,
-  getTestTokens,
-  minting,
+  isWindow,
+  miniCountdown,
+  night,
 }: {
   m: BetMarket;
-  open: boolean;
+  expanded: boolean;
   onToggle: () => void;
   picked: string | null;
   setPicked: (k: string) => void;
   busy: boolean;
-  connected: boolean;
-  connecting: boolean;
-  connect: () => void;
-  connectBurner: () => void;
-  amount: string;
-  setAmount: (a: string) => void;
-  stepStake: (dir: number) => void;
-  balance: number | null;
-  gasless: boolean;
-  getTestTokens: () => void;
-  minting: boolean;
+  /** This is the market a betting window is spotlighting — colours the fav peek + shows a mini clock. */
+  isWindow: boolean;
+  miniCountdown: string | null;
+  /** Nightfall — cool the expanded surfaces to moonlight. */
+  night: boolean;
 }) {
-  // Collapsed-row peek: the crowd favorite (largest pool) + pot, or the winning outcome once settled.
+  const surf = night ? NIGHT : DAY;
+  const ui = UI[uiStateOf(m, isWindow)];
   const fav = m.choices.length ? m.choices.reduce((a, b) => (parseFloat(b.pool) > parseFloat(a.pool) ? b : a)) : null;
   const winner = m.choices.find((c) => c.winner) ?? null;
   const potTotal = m.choices.length ? m.choices[0]!.total : "0";
-  // Flash the pot when money moves so a COLLAPSED row still reads as live (during betting the pot only
-  // grows, so this pulses green on any wager in the market — the at-a-glance "something's happening" cue).
   const potDir = useValueFlash(Math.round(parseFloat(potTotal) * 100) / 100);
-  // Name the outcome(s) the wallet is on right in the collapsed row — a lone pick reads "on CONVICTED",
-  // a hedge reads "across N picks" — so the position is legible without expanding the market.
-  const myPicks = m.choices.filter((c) => c.mine > 0);
-  const myPositionLabel = myPicks.length === 1 ? `on ${myPicks[0]!.label}` : `across ${myPicks.length} picks`;
 
-  // Projected payout for the staged pick (a NEW stake) — only meaningful while this row is open.
-  const stakeNum = parseFloat(amount);
-  const pickedChoice = open && picked ? (m.choices.find((c) => c.key === picked) ?? null) : null;
-  const projWin = pickedChoice ? projectWin(stakeNum, pickedChoice.pool, pickedChoice.total) : null;
-  // Guard the wager before it costs a tx: the stepper clamps to balance but the text input doesn't, so
-  // a typed stake can outrun the wallet. Only judge once we actually know the balance (null = unread).
-  const exceedsBalance = connected && balance != null && stakeNum > balance;
-  const canWager = !!picked && !busy && stakeNum > 0 && !exceedsBalance;
+  // Two outcome layouts: ≤2 gets wide side-by-side cards; more gets a compact internal-scroll list, so a
+  // 7-seat market never balloons the panel and the pinned action bar stays a tap away without scrolling.
+  const big = m.choices.length <= 2;
 
-  // A sealed / settled / missed market carries no live action — recede it in the list (dull frame +
-  // dimmed title) so the eye lands on the markets that are actually open or claimable.
-  const dull = !m.bettable && !m.canClaim;
+  const claimVerb = m.claimLabel.toLowerCase().startsWith("reclaim") ? "RECLAIM" : "CLAIM";
+  const claimAmt = claimVerb === "CLAIM" ? m.myProjWin : m.myStake;
+
+  // Collapsed "peek" chips — the at-a-glance line under the title. Live markets read pot / fav / your
+  // position; resolved ones read the outcome + a claim or a terse status.
+  const chips: { t: string; cls: string }[] = [];
+  if (m.canClaim) {
+    chips.push({ t: `● ${winner ? winner.label : "stake returned"}`, cls: "text-cream-dim" });
+    chips.push({ t: `${claimVerb} ◈${claimAmt.toFixed(2)}`, cls: "text-acquit" });
+  } else if (m.bettable && fav) {
+    chips.push({ t: `◈${parseFloat(potTotal).toFixed(2)}`, cls: potDir === "up" ? "text-acquit" : potDir === "down" ? "text-convict" : "text-mute" });
+    chips.push({ t: `${fav.label} ${mult(fav.pool, fav.total)}`, cls: isWindow ? "text-lamp" : "text-cream" });
+    if (m.myStake > 0) chips.push({ t: `you ◈${m.myStake.toFixed(2)}`, cls: "border-l-2 border-gilt pl-1.5 text-gilt" });
+  } else if (winner) {
+    chips.push({ t: `● ${winner.label}`, cls: "text-cream-dim" });
+    chips.push({ t: m.pill.text, cls: "text-mute" });
+  } else {
+    const s = (m.status ?? "").replace(/[🔒]/g, "").trim();
+    chips.push({ t: s || m.pill.text, cls: "text-mute" });
+  }
 
   return (
     <div
-      className={[
-        "border transition-colors",
-        open
-          ? dull
-            ? "border-line-2 bg-ink-2/20"
-            : "border-gilt/50 bg-ink-2/40"
-          : m.canClaim
-            ? "border-acquit/40 hover:border-acquit/60"
-            : dull
-              ? "border-line/50 hover:border-line-2"
-              : "border-gilt/40 hover:border-gilt/60",
-      ].join(" ")}
+      className={["border-b border-l-2 hairline transition-colors duration-[1400ms]", ui.left].join(" ")}
+      style={{ backgroundColor: expanded ? surf.raised : "transparent" }}
     >
-      {/* ── Collapsed header — title, status, odds peek, your position. Tap to expand. A sealed / settled
-          row carries no live action, so the whole collapsed row recedes (dimmed) and lifts back on hover
-          so it still reads as tappable. Only when collapsed — an expanded sealed market stays readable. ── */}
+      {/* ── Collapsed header — badge, title, (window clock), chevron, and a peek line. Tap to expand. ── */}
       <button
         type="button"
         onClick={onToggle}
-        className={[
-          "flex w-full items-start justify-between gap-2 px-3.5 py-2.5 text-left transition-opacity",
-          dull && !open ? "opacity-55 hover:opacity-90" : "",
-        ].join(" ")}
+        className={["flex w-full flex-col gap-1.5 px-3 py-2.5 text-left transition-opacity", ui.dim && !expanded ? "opacity-55 hover:opacity-90" : ""].join(" ")}
       >
-        <div className="min-w-0 flex-1">
-          <div className={["flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.14em]", dull ? "text-cream-dim" : "text-cream"].join(" ")}>
-            <span className="truncate">{m.title}</span>
-            {m.hasWager && <span className="shrink-0 text-gilt" title="You hold a wager here">●</span>}
-          </div>
-          <div className="mt-1 truncate font-mono text-[10.5px] tracking-[0.06em] text-mute">
-            {winner ? (
-              <span className="text-cream-dim">● {winner.label}</span>
-            ) : fav ? (
-              <>
-                pot <span className={["transition-colors duration-700", potDir === "up" ? "text-acquit" : potDir === "down" ? "text-convict" : ""].join(" ")}>◈{parseFloat(potTotal).toFixed(2)}</span> · fav <span className="text-cream-dim">{fav.label}</span> {mult(fav.pool, fav.total)}
-              </>
-            ) : (
-              "—"
-            )}
-            {m.myStake > 0 && <span className="text-gilt"> · ◈{m.myStake.toFixed(2)} {myPositionLabel}</span>}
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-2 pt-0.5">
-          <span className={["rounded-sm border px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.12em]", m.pill.cls].join(" ")}>{m.pill.text}</span>
+        <div className="flex items-center gap-2.5">
+          <span className={["shrink-0 border px-[5px] py-[1.5px] font-mono text-[8.5px] uppercase tracking-[0.16em]", ui.badgeCls].join(" ")}>{ui.badge}</span>
+          <span className={["min-w-0 flex-1 truncate font-display text-[19px] font-medium leading-none", ui.titleCls].join(" ")}>{m.title}</span>
+          {miniCountdown && (
+            <span className="shrink-0 border-l-2 border-convict pl-1.5 font-mono text-[11px] font-semibold tabular-nums text-lamp">{miniCountdown}</span>
+          )}
           <motion.span
             aria-hidden
-            animate={{ rotate: open ? 90 : 0 }}
+            animate={{ rotate: expanded ? 90 : 0 }}
             transition={{ duration: 0.24, ease: "easeInOut" }}
-            className="inline-block w-3 text-center font-mono text-[12px] leading-none text-mute"
+            className="inline-block w-3 shrink-0 text-center font-mono text-[11px] leading-none text-mute"
           >
             ▸
           </motion.span>
         </div>
+        {!expanded && (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] tabular-nums">
+            {chips.map((c, i) => (
+              <span key={i} className={c.cls}>{c.t}</span>
+            ))}
+          </div>
+        )}
       </button>
 
-      {/* ── Expanded body — the question, its outcomes, and the stake+confirm RIGHT HERE. ── */}
+      {/* ── Expanded body — the question and its outcomes. The stake+confirm lives in the pinned bar. ── */}
       <AnimatePresence initial={false}>
-        {open && (
+        {expanded && (
           <motion.div
             key="body"
             initial={{ height: 0, opacity: 0 }}
@@ -370,166 +379,225 @@ function MarketRow({
             transition={{ duration: 0.24, ease: "easeInOut" }}
             className="overflow-hidden"
           >
-            <div className="border-t hairline px-3.5 pb-3.5 pt-3">
-          <div className="mb-3 font-display text-[18px] leading-tight text-cream">{m.question}</div>
-          {/* Tile the outcomes to the panel width — as many per row as fit (≈165px each), instead of
-              one tall card per row with a wasteland of empty space beside it. */}
-          <div className="grid gap-2.5 grid-cols-[repeat(auto-fill,minmax(165px,1fr))]">
-            {m.choices.map((c) => (
-              <ChoiceCard
-                key={c.key}
-                c={c}
-                selected={picked === c.key}
-                selectable={m.bettable && !busy}
-                bettable={m.bettable}
-                dimmed={!m.bettable && !c.winner}
-                onSelect={() => setPicked(c.key)}
-              />
-            ))}
-          </div>
-
-          {/* Inline action zone — stake + the one wager/claim action, next to the cards. */}
-          <div className="mt-3.5 border-t hairline pt-3.5">
-            {m.bettable ? (
-              <>
-                {/* <div className="mb-2 flex items-center justify-between">
-                  <span className="eyebrow">Stake</span>
-                  <div className="flex items-center gap-2">
-                    {gasless && (
-                      <span className="rounded-sm border border-gilt/50 px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.12em] text-gilt">
-                        ⛽ gasless
-                      </span>
-                    )}
-                    {connected && balance != null && (
-                      <span className="font-mono text-[11px] tracking-[0.06em] text-mute">bal {balance.toFixed(3)} CHIP</span>
-                    )}
-                    {connected && (
-                      <button
-                        type="button"
-                        onClick={getTestTokens}
-                        disabled={busy}
-                        className="rounded-sm border border-line px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.12em] text-mute transition-colors hover:border-gilt hover:text-gilt disabled:opacity-50"
-                      >
-                        {minting ? "minting…" : "+ CHIP"}
-                      </button>
-                    )}
-                  </div>
-                </div> */}
-
-                {/* Stepper: big −/+ tap targets flanking the amount. */}
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    aria-label="Decrease stake"
-                    onClick={() => stepStake(-1)}
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border border-line font-mono text-[20px] leading-none text-mute transition-colors hover:border-line-2 hover:text-cream"
-                  >
-                    −
-                  </button>
-                  <div className="flex flex-1 items-center gap-1.5 border border-line bg-ink-2 px-2.5 py-1.5 focus-within:border-gilt">
-                    <span className="font-mono text-[12px] text-mute">◈</span>
-                    <input
-                      inputMode="decimal"
-                      value={amount}
-                      onChange={(e) => setAmount(e.target.value)}
-                      className="w-full bg-transparent font-mono text-[15px] tabular-nums text-cream outline-none"
+            <div className="px-3 pb-3">
+              <div className="mb-2.5 font-display text-[17px] italic leading-tight text-cream-dim">{m.question}</div>
+              {big ? (
+                <div className="grid grid-cols-2 gap-2">
+                  {m.choices.map((c) => (
+                    <OutcomeCard
+                      key={c.key}
+                      c={c}
+                      selected={picked === c.key}
+                      selectable={m.bettable && !busy}
+                      dimmed={!m.bettable && !c.winner}
+                      onSelect={() => setPicked(c.key)}
                     />
-                    <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-mute">CHIP</span>
-                  </div>
-                  <button
-                    type="button"
-                    aria-label="Increase stake"
-                    onClick={() => stepStake(1)}
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border border-line font-mono text-[20px] leading-none text-mute transition-colors hover:border-line-2 hover:text-cream"
-                  >
-                    +
-                  </button>
+                  ))}
                 </div>
-
-                {!connected ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => void connect()}
-                      disabled={busy}
-                      className="mt-3 w-full rounded-sm border border-gilt px-3 py-3 font-mono text-[12.5px] uppercase tracking-[0.16em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
-                    >
-                      {connecting ? "Connecting…" : "Connect wallet to wager"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void connectBurner()}
-                      disabled={busy}
-                      className="mt-2 w-full font-mono text-[10.5px] uppercase tracking-[0.14em] text-mute transition-colors hover:text-gilt disabled:opacity-60"
-                    >
-                      or play as guest — no wallet, no pop-ups
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      disabled={!canWager}
-                      onClick={() => picked && m.place(picked)}
-                      className={[
-                        "mt-3 w-full rounded-sm border px-3 py-3 font-mono text-[12.5px] uppercase tracking-[0.16em] transition-colors",
-                        canWager
-                          ? "border-gilt text-gilt hover:bg-gilt hover:text-ink"
-                          : "border-line text-mute cursor-default",
-                      ].join(" ")}
-                    >
-                      {busy
-                        ? "Confirming on-chain…"
-                        : !picked
-                          ? "Pick an outcome above to wager"
-                          : !(stakeNum > 0)
-                            ? "Enter a stake amount"
-                            : exceedsBalance
-                              ? "Stake exceeds balance"
-                              : projWin != null
-                                ? `Wager ◈${stakeNum.toFixed(3)} → win ◈${projWin.toFixed(3)}`
-                                : "Enter a stake amount"}
-                    </button>
-                    {/* The faucet lives only on the Menu, but you bet here — so when the stake outruns the
-                        wallet, surface the remedy inline instead of a dead-end "exceeds balance" error. */}
-                    {(exceedsBalance || minting) && (
-                      <button
-                        type="button"
-                        onClick={getTestTokens}
-                        disabled={busy}
-                        className="mt-2 w-full rounded-sm border border-gilt/50 bg-gilt/[0.04] px-3 py-2.5 font-mono text-[11.5px] uppercase tracking-[0.14em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
-                      >
-                        {minting ? "Minting CHIP…" : "Get test CHIP — free mock money"}
-                      </button>
-                    )}
-                  </>
-                )}
-                {picked && !busy && pickedChoice && (
-                  <div className="mt-1.5 text-center font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">
-                    on {pickedChoice.label}
-                    {m.hasWager ? " · adds to your wager" : ""}
-                  </div>
-                )}
-              </>
-            ) : m.canClaim ? (
-              <button
-                type="button"
-                onClick={m.doClaim}
-                disabled={busy}
-                className="w-full rounded-sm border border-acquit px-3 py-3 font-mono text-[12.5px] uppercase tracking-[0.16em] text-acquit transition-colors hover:bg-acquit hover:text-ink disabled:opacity-60"
-              >
-                {busy ? "Confirming on-chain…" : m.claimLabel}
-              </button>
-            ) : (
-              <div className="rounded-sm border border-line px-3 py-3 text-center font-mono text-[12px] uppercase tracking-[0.14em] text-mute">
-                {m.status ?? "—"}
-              </div>
-            )}
-          </div>
+              ) : (
+                <div className="max-h-[min(46vh,340px)] overflow-y-auto border hairline transition-colors duration-[1400ms] [scrollbar-width:thin]" style={{ backgroundColor: surf.list }}>
+                  {m.choices.map((c) => (
+                    <OutcomeRow
+                      key={c.key}
+                      c={c}
+                      selected={picked === c.key}
+                      selectable={m.bettable && !busy}
+                      onSelect={() => setPicked(c.key)}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  );
+}
+
+// ── the pinned action bar on the panel floor: pick summary + the one wager / claim / connect action ──
+function ActionBar({
+  m,
+  picked,
+  amount,
+  setAmount,
+  stepStake,
+  busy,
+  connected,
+  connecting,
+  connect,
+  connectBurner,
+  balance,
+  gasless,
+  getTestTokens,
+  minting,
+  night,
+}: {
+  m: BetMarket;
+  picked: string | null;
+  amount: string;
+  setAmount: (a: string) => void;
+  stepStake: (dir: number) => void;
+  busy: boolean;
+  connected: boolean;
+  connecting: boolean;
+  connect: () => void;
+  connectBurner: () => void;
+  balance: number | null;
+  gasless: boolean;
+  getTestTokens: () => void;
+  minting: boolean;
+  night: boolean;
+}) {
+  const stakeNum = parseFloat(amount) || 0;
+  const pickedChoice = picked ? m.choices.find((c) => c.key === picked) ?? null : null;
+  const projWin = pickedChoice ? projectWin(stakeNum, pickedChoice.pool, pickedChoice.total) : null;
+  const exceeds = connected && balance != null && stakeNum > balance;
+  const canWager = !!picked && !busy && stakeNum > 0 && !exceeds;
+
+  const claimVerb = m.claimLabel.toLowerCase().startsWith("reclaim") ? "RECLAIM" : "CLAIM";
+  const claimAmt = claimVerb === "CLAIM" ? m.myProjWin : m.myStake;
+  const winner = m.choices.find((c) => c.winner) ?? null;
+
+  // The summary line (pick + payout) shown above whatever control the state calls for.
+  let pre: string;
+  let word: string;
+  let wordCls: string;
+  let multStr: string | null = null;
+  let payLabel: string | null;
+  let pay: number;
+  let payCls: string;
+  if (m.canClaim) {
+    pre = "CLAIMABLE";
+    word = winner ? winner.label : "STAKE RETURNED";
+    wordCls = "text-acquit";
+    payLabel = "PAYOUT";
+    pay = claimAmt;
+    payCls = "text-acquit";
+  } else {
+    pre = "ON";
+    word = pickedChoice?.label ?? "—";
+    wordCls = "text-cream";
+    multStr = pickedChoice ? mult(pickedChoice.pool, pickedChoice.total) : null;
+    payLabel = m.bettable ? "TO WIN" : null;
+    pay = projWin ?? 0;
+    payCls = "text-gilt";
+  }
+
+  return (
+    <div className="flex-none border-t border-gilt px-4 py-3 shadow-[0_-14px_24px_-18px_rgba(0,0,0,0.9)] transition-colors duration-[1400ms]" style={{ backgroundColor: night ? NIGHT.action : DAY.action }}>
+      <div className="mb-2 flex items-baseline justify-between gap-2.5">
+        <div className="min-w-0 truncate">
+          <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-mute">{pre} </span>
+          <span className={["font-display text-[18px] font-semibold", wordCls].join(" ")}>{word}</span>
+          {multStr && <span className="ml-1.5 font-mono text-[12px] tabular-nums text-cream-dim">{multStr}</span>}
+          {gasless && m.bettable && connected && <span className="ml-1.5 font-mono text-[9px] uppercase tracking-[0.12em] text-gilt/70">· gasless</span>}
+        </div>
+        {payLabel && pay > 0 && (
+          <div className="shrink-0 text-right">
+            <div className="font-mono text-[9px] uppercase tracking-[0.14em] text-mute-2">{payLabel}</div>
+            <div className={["font-mono text-[16px] font-semibold tabular-nums", payCls].join(" ")}>◈{pay.toFixed(2)}</div>
+          </div>
+        )}
+      </div>
+
+      {m.canClaim ? (
+        <button
+          type="button"
+          onClick={m.doClaim}
+          disabled={busy}
+          className="h-11 w-full bg-acquit font-mono text-[12px] font-semibold uppercase tracking-[0.14em] text-ink transition hover:brightness-110 disabled:opacity-60"
+        >
+          {busy ? "Confirming on-chain…" : `${claimVerb} ◈${claimAmt.toFixed(2)}`}
+        </button>
+      ) : m.bettable ? (
+        !connected ? (
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => void connect()}
+              disabled={busy}
+              className="h-[42px] flex-1 bg-gilt font-mono text-[12px] font-semibold uppercase tracking-[0.14em] text-ink transition hover:brightness-110 disabled:opacity-60"
+            >
+              {connecting ? "Connecting…" : "Connect wallet"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void connectBurner()}
+              disabled={busy}
+              className="shrink-0 font-mono text-[10.5px] tracking-[0.04em] text-mute transition-colors hover:text-gilt disabled:opacity-60"
+            >
+              play as guest →
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="flex items-stretch gap-2">
+              <div className="flex items-center border border-line-2 bg-ink">
+                <button
+                  type="button"
+                  aria-label="Decrease stake"
+                  onClick={() => stepStake(-1)}
+                  className="h-[42px] w-[34px] border-r hairline font-mono text-[17px] leading-none text-cream-dim transition-colors hover:bg-gilt/[0.06] hover:text-gilt"
+                >
+                  −
+                </button>
+                <input
+                  inputMode="decimal"
+                  aria-label="Stake amount"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  className="w-[76px] bg-transparent text-center font-mono text-[15px] tabular-nums text-cream outline-none focus:text-lamp"
+                />
+                <button
+                  type="button"
+                  aria-label="Increase stake"
+                  onClick={() => stepStake(1)}
+                  className="h-[42px] w-[34px] border-l hairline font-mono text-[17px] leading-none text-cream-dim transition-colors hover:bg-gilt/[0.06] hover:text-gilt"
+                >
+                  +
+                </button>
+              </div>
+              <button
+                type="button"
+                disabled={!canWager}
+                onClick={() => picked && m.place(picked)}
+                className={[
+                  "h-[42px] flex-1 font-mono text-[12px] font-semibold uppercase tracking-[0.14em] transition",
+                  canWager ? "bg-gilt text-ink hover:brightness-110" : "border border-line-2 text-mute-2",
+                ].join(" ")}
+              >
+                {busy
+                  ? "Confirming…"
+                  : !picked
+                    ? "Pick an outcome"
+                    : !(stakeNum > 0)
+                      ? "Enter a stake"
+                      : exceeds
+                        ? "Exceeds balance"
+                        : `Wager ◈${stakeNum.toFixed(2)}`}
+              </button>
+            </div>
+            {(exceeds || minting) && (
+              <div className="mt-2 flex items-center justify-between gap-2 border-l-2 border-lamp pl-2">
+                <span className="font-mono text-[9.5px] tracking-[0.06em] text-mute">
+                  {connected && balance != null ? `balance ◈${balance.toFixed(2)}` : "low balance"}
+                </span>
+                <button
+                  type="button"
+                  onClick={getTestTokens}
+                  disabled={busy}
+                  className="font-mono text-[10px] uppercase tracking-[0.1em] text-lamp transition-colors hover:text-cream disabled:opacity-60"
+                >
+                  {minting ? "Minting…" : "Get test ◈ CHIP →"}
+                </button>
+              </div>
+            )}
+          </>
+        )
+      ) : (
+        <div className="border border-line py-2.5 text-center font-mono text-[11px] uppercase tracking-[0.12em] text-mute">{m.status ?? "—"}</div>
+      )}
     </div>
   );
 }
@@ -571,6 +639,10 @@ export function Verdict({ api }: { api: MatchApi }) {
   const refundMode = s.market.state === "REFUND";
   const connected = s.wallet.status === "connected";
   const busy = s.tx.pending || s.wallet.status === "connecting";
+  // Nightfall cools THIS panel's own surfaces (the moonlight veil is lifted off it in Live.tsx). The lamp
+  // goes out and the theme shifts cold — instead of a slab laid over the betting UI. Cross-fades over 1.4s.
+  const night = s.phase === "night";
+  const surf = night ? NIGHT : DAY;
 
   const seatName = (seat: number) => s.personas.find((p) => p.seat === seat)?.name ?? `Seat ${seat + 1}`;
 
@@ -799,20 +871,20 @@ export function Verdict({ api }: { api: MatchApi }) {
 
     const myProjWin = choices.reduce((acc, c) => acc + existingWin(c.mine, c.pool, c.total), 0);
     const pill = bettable
-      ? { text: "open", cls: PILL.gilt }
+      ? { text: "open", cls: "text-gilt border-gilt/40" }
       : canClaim
-        ? { text: "claim", cls: PILL.acquit }
+        ? { text: "claim", cls: "text-acquit border-acquit/50" }
         : preOpen
-          ? { text: "soon", cls: PILL.dim }
+          ? { text: "soon", cls: "text-cream-dim border-line-2" }
           : (isVoid || refundMode) && myTotalStake > 0
-            ? { text: "returned", cls: PILL.giltDim }
+            ? { text: "returned", cls: "text-gilt/70 border-gilt/30" }
             : myWin
-              ? { text: "collected", cls: PILL.acquitDim }
+              ? { text: "collected", cls: "text-acquit/70 border-acquit/30" }
               : (settled || refundMode) && myTotalStake > 0
-                ? { text: "missed", cls: PILL.mute }
+                ? { text: "missed", cls: "text-mute border-line-2" }
                 : settled
-                  ? { text: "settled", cls: PILL.mute }
-                  : { text: "sealed", cls: PILL.mute };
+                  ? { text: "settled", cls: "text-mute border-line-2" }
+                  : { text: "sealed", cls: "text-mute border-line-2" };
 
     return {
       key: `prop-${prop.index}`,
@@ -860,9 +932,21 @@ export function Verdict({ api }: { api: MatchApi }) {
           ? openKey
           : defaultKey;
   const toggle = (key: string) => setOpenKey(key === effectiveOpen ? "__none__" : key);
+  const openMarket = markets.find((mk) => mk.key === effectiveOpen) ?? null;
 
-  // Clear the staged pick whenever the open market changes.
-  useEffect(() => setPicked(null), [effectiveOpen]);
+  // Default the staged pick to the open market's favourite (largest pool) so the pinned action bar always
+  // previews a real payout the instant a market opens. Re-runs only when the open market changes — a live
+  // odds shift never yanks the user's chosen outcome out from under them.
+  useEffect(() => {
+    const mk = markets.find((x) => x.key === effectiveOpen);
+    if (!mk || mk.choices.length === 0) {
+      setPicked(null);
+      return;
+    }
+    const fav = mk.choices.reduce((a, b) => (parseFloat(b.pool) > parseFloat(a.pool) ? b : a));
+    setPicked(fav.key);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveOpen]);
 
   // When a betting window opens, snap the list back to the top so its freshly-hoisted, auto-expanded
   // market is in view (it may have been scrolled past). Keyed on windowKey → fires once per window.
@@ -882,165 +966,137 @@ export function Verdict({ api }: { api: MatchApi }) {
     setAmount(String(Number(next.toFixed(3))));
   };
 
-  const isRefundOutcome = factionVoid;
-
-  // Portfolio roll-up across every market the wallet holds a position in.
+  // Portfolio roll-up across every market the wallet holds a position in (inlined into the header).
   const myPositions = markets.filter((mk) => mk.myStake > 0);
   const portfolioStaked = myPositions.reduce((acc, mk) => acc + mk.myStake, 0);
   const portfolioWin = myPositions.reduce((acc, mk) => acc + mk.myProjWin, 0);
+  const showBook = connected && myPositions.length > 0;
+
+  // ── The single active header countdown — one of the window / pre-match / close clocks, never stacked. ──
+  const activeCd =
+    s.betWindow && windowCountdown
+      ? { key: `w-${windowKey}`, label: windowClosing ? "Closing" : "Betting window", time: windowCountdown.label, ms: windowCountdown.ms, urgent: windowClosing }
+      : preMatchOpen && preMatchCountdown
+        ? { key: "prematch", label: "First night in", time: preMatchCountdown.label, ms: preMatchCountdown.ms, urgent: false }
+        : live && countdown
+          ? { key: "close", label: closingSoon ? "Closing" : "Wagers close in", time: countdown.label, ms: countdown.ms, urgent: closingSoon }
+          : null;
+  const cdProgress = useCountdownProgress(activeCd?.key ?? null, activeCd?.ms ?? null);
+
+  // The header status word + lamp — a live pulse while betting, a steady tint once resolved.
+  const caseId = s.matchId != null ? `#${s.matchId}` : "";
+  const headStatus = live
+    ? { label: `Live · Case ${caseId} · R${Math.max(1, s.round)}`, dot: "bg-lamp animate-lamppulse" }
+    : preOpen || preMatchOpen
+      ? { label: `Case ${caseId} · convening`, dot: "bg-mute" }
+      : refundMode
+        ? { label: `Case ${caseId} · abandoned`, dot: "bg-gilt" }
+        : settled
+          ? { label: `Case ${caseId} · ${factionVoid ? "no verdict" : "settled"}`, dot: "bg-acquit" }
+          : { label: `Case ${caseId} · sealed`, dot: "bg-mute" };
+
+  // At night the lamp is out: the warm gilt wordmark cools to steel and the status dot stops pulsing.
+  const dotCls = night ? "bg-[#5b6d9e]" : headStatus.dot;
 
   return (
-    <aside className="panel flex h-full min-h-0 flex-col overflow-hidden px-5 py-5">
-      <div className="eyebrow mb-4 border-b hairline pb-0">Wagers&#x20;
-        <StateBadge s={s} />
+    <aside className="panel flex h-full min-h-0 flex-col overflow-hidden transition-colors duration-[1400ms]" style={{ backgroundColor: surf.panel }}>
+      {/* ── Compact header — the WAGERS mark + case status, the "your book" roll-up, and the one active
+          countdown with a thin progress bar. Everything that used to stack as separate ribbons lives here. ── */}
+      <div className="flex-none border-b hairline px-4 py-3 transition-colors duration-[1400ms]" style={{ backgroundColor: surf.header }}>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span className={["h-1.5 w-1.5 shrink-0 rounded-full transition-colors duration-700", dotCls].join(" ")} />
+            <span className={["shrink-0 font-mono text-[12px] font-semibold uppercase tracking-[0.26em] transition-colors duration-[1400ms]", night ? "text-[#9fb2e0]" : "text-gilt"].join(" ")}>Wagers</span>
+            <span className="truncate font-mono text-[9.5px] uppercase tracking-[0.14em] text-mute">{headStatus.label}</span>
+          </div>
+          {showBook && (
+            <div className="flex shrink-0 items-baseline gap-1.5 font-mono tabular-nums">
+              <span className="text-[9px] uppercase tracking-[0.16em] text-mute-2">book</span>
+              <span className="text-[12px] text-cream-dim">◈{portfolioStaked.toFixed(2)}</span>
+              <span className="text-mute-2">→</span>
+              <span className="text-[12px] text-gilt">◈{portfolioWin.toFixed(2)}</span>
+            </div>
+          )}
+        </div>
+
+        {activeCd && (
+          <div className={["mt-2.5 border-l-2 pl-2.5", activeCd.urgent ? "border-convict" : "border-gilt"].join(" ")}>
+            <div className="flex items-center justify-between gap-2.5">
+              <span className={["font-mono text-[9.5px] uppercase tracking-[0.2em]", activeCd.urgent ? "text-convict" : "text-gilt"].join(" ")}>{activeCd.label}</span>
+              <span className={["font-mono text-[15px] font-semibold tabular-nums tracking-[0.08em]", activeCd.urgent ? "animate-livepulse text-convict" : "text-gilt"].join(" ")}>{activeCd.time}</span>
+            </div>
+            <div className="mt-1.5 h-0.5 bg-line">
+              <div className={["h-full transition-[width] duration-500 ease-linear", activeCd.urgent ? "bg-convict" : "bg-gilt"].join(" ")} style={{ width: `${(cdProgress * 100).toFixed(1)}%` }} />
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Pre-match betting hold — a fresh case has convened and betting is open before the first night. A
-          visible countdown makes the new round unmistakable (not an instant cut to nightfall) and gives real
-          time to back the headline markets. Only before the first beat lands. */}
-      {preMatchOpen && (
-        <div className="mb-4 border-l-2 border-gilt bg-gilt/[0.06] px-3 py-2.5">
-          <div className="flex items-center justify-between">
-            <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-gilt">◈ A new case convenes</span>
-            <span className="font-mono text-[20px] tabular-nums tracking-[0.08em] text-gilt">{preMatchCountdown!.label}</span>
-          </div>
-          <div className="mt-1 font-display text-[15px] leading-tight text-cream">Wagers open before the first night</div>
-          <div className="mt-0.5 font-body text-[12px] italic leading-snug text-mute">
-            back the faction verdict &amp; who&apos;s the Mafia — the first night falls when the clock runs out
-          </div>
-        </div>
-      )}
-
-      {/* Betting-window ribbon — the match is paused on a dramatic beat and this market is spotlighted
-          (auto-expanded below, where its question + outcomes live). Kept to a single urgent line: the
-          question isn't repeated here since the spotlighted market shows it right below, and the stage
-          already frames it. Turns urgent as it closes. */}
-      {s.betWindow && windowCountdown && (
-        <div
-          className={[
-            "mb-3 flex items-center justify-between gap-3 border-l-2 px-3 py-2 transition-colors",
-            windowClosing ? "border-convict bg-convict/[0.07]" : "border-gilt bg-gilt/[0.06]",
-          ].join(" ")}
-        >
-          <span className={["flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.16em]", windowClosing ? "text-convict" : "text-gilt"].join(" ")}>
-            <span className={["h-1.5 w-1.5 animate-livepulse rounded-full", windowClosing ? "bg-convict" : "bg-gilt"].join(" ")} />
-            {windowClosing ? "Closing" : "Betting window"}
-          </span>
-          <span
-            className={[
-              "font-mono text-[20px] tabular-nums tracking-[0.08em]",
-              windowClosing ? "animate-livepulse text-convict" : "text-gilt",
-            ].join(" ")}
-          >
-            {windowCountdown.label}
-          </span>
-        </div>
-      )}
-
-      {/* Live betting countdown — the always-open faction market's close time. Suppressed while a
-          spotlighted window (or the pre-match hold) owns the countdown, so two strips never stack. */}
-      {live && countdown && !s.betWindow && !preMatchOpen && (
-        <div
-          className={[
-            "mb-4 flex items-baseline justify-between border-l-2 px-3 py-2 transition-colors",
-            closingSoon ? "border-convict bg-convict/[0.07]" : "border-gilt bg-gilt/[0.05]",
-          ].join(" ")}
-        >
-          <span className="font-mono text-[12.5px] uppercase tracking-[0.16em] text-mute">
-            {closingSoon ? "Closing" : "Wagers close in"}
-          </span>
-          <span
-            className={[
-              "font-mono text-[22px] tabular-nums tracking-[0.08em]",
-              closingSoon ? "animate-livepulse text-convict" : "text-gilt",
-            ].join(" ")}
-          >
-            {countdown.label}
-          </span>
-        </div>
-      )}
-
-      {(isRefundOutcome || refundMode) && (
-        <div className="mb-3 border-l-2 border-gilt/50 bg-gilt/[0.04] px-3 py-2.5 text-[13px] italic leading-snug text-cream-dim">
+      {/* A single slim note only when every stake is being returned — the per-market "RETURNED" badges and
+          the reclaim actions carry the rest, so this stays one line instead of a stacked banner. */}
+      {(refundMode || factionVoid) && (
+        <div className="flex-none border-b border-l-2 border-gilt/50 hairline bg-gilt/[0.04] px-4 py-2 font-body text-[12px] italic leading-snug text-cream-dim">
           {factionVoid
-            ? "No verdict settled on the faction market — a mistrial, or no wager backed the winner. Every stake is returned in full."
-            : "The match was abandoned before settlement. Reclaim your full stake on any market you backed."}
-        </div>
-      )}
-
-      {/* ── Your book — a slim roll-up of where your money sits, across every market. Shares the
-          left-accent strip treatment with the countdowns so the panel reads as one quiet column. ── */}
-      {connected && myPositions.length > 0 && (
-        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-l-2 border-gilt/40 bg-gilt/[0.035] px-3 py-2 font-mono">
-          <span className="text-[10px] uppercase tracking-[0.18em] text-gilt">
-            Your book <span className="text-mute">· {myPositions.length} {myPositions.length === 1 ? "market" : "markets"}</span>
-          </span>
-          <span className="flex items-baseline gap-2 tabular-nums">
-            <span className="text-[9.5px] uppercase tracking-[0.1em] text-mute">staked</span>
-            <span className="text-[13.5px] text-cream">◈{portfolioStaked.toFixed(2)}</span>
-            <span className="text-mute-2">→</span>
-            <span className="text-[9.5px] uppercase tracking-[0.1em] text-mute">to win</span>
-            <span className="text-[13.5px] text-acquit">◈{portfolioWin.toFixed(2)}</span>
-          </span>
+            ? "No verdict backed on the faction market — every stake is returned in full."
+            : "The match was abandoned before settlement — reclaim your full stake on any market you backed."}
         </div>
       )}
 
       {/* ── The market list — every bet on the table, scannable. Tap a row to expand one. ── */}
-      <div ref={listRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {markets.map((mk) => (
           <MarketRow
             key={mk.key}
             m={mk}
-            open={mk.key === effectiveOpen}
+            expanded={mk.key === effectiveOpen}
             onToggle={() => toggle(mk.key)}
             picked={picked}
             setPicked={setPicked}
             busy={busy}
-            connected={connected}
-            connecting={s.wallet.status === "connecting"}
-            connect={connect}
-            connectBurner={connectBurner}
-            amount={amount}
-            setAmount={setAmount}
-            stepStake={stepStake}
-            balance={balance}
-            gasless={api.gasless}
-            getTestTokens={mint}
-            minting={minting}
+            isWindow={mk.key === windowKey}
+            miniCountdown={mk.key === windowKey && windowCountdown ? windowCountdown.label : null}
+            night={night}
           />
         ))}
       </div>
 
-      {/* ── Slim global footer: cross-market wallet identity + on-chain receipts. ── */}
+      {/* ── The pinned action bar — always on the panel floor, so a bet is one tap away without scrolling. ── */}
+      {openMarket && (
+        <ActionBar
+          m={openMarket}
+          picked={picked}
+          amount={amount}
+          setAmount={setAmount}
+          stepStake={stepStake}
+          busy={busy}
+          connected={connected}
+          connecting={s.wallet.status === "connecting"}
+          connect={connect}
+          connectBurner={connectBurner}
+          balance={balance}
+          gasless={api.gasless}
+          getTestTokens={mint}
+          minting={minting}
+          night={night}
+        />
+      )}
+
+      {/* ── Slim receipt footer: on-chain proof of the last wager/claim and the settlement. ── */}
       {(s.tx.error || s.tx.lastHash || s.settleTxHash) && (
-        <div className="mt-4 border-t hairline pt-3">
-          {s.tx.error && <div className="mb-2 text-center font-mono text-[11px] leading-snug text-convict">{s.tx.error}</div>}
-
-          {/* Receipt: on-chain proof of the last wager/claim. */}
-          {s.tx.lastHash && !s.tx.pending && (
-            <a
-              href={explorerTx(s.tx.lastHash)}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center justify-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-acquit transition-colors hover:text-cream"
-            >
-              ✓ Confirmed on-chain · {s.tx.lastHash.slice(0, 6)}…{s.tx.lastHash.slice(-4)}
-              <span aria-hidden>↗</span>
-            </a>
-          )}
-
-          {/* The settlement tx that verified the transcript and resolved the markets. */}
-          {settled && s.settleTxHash && (
-            <a
-              href={explorerTx(s.settleTxHash)}
-              target="_blank"
-              rel="noreferrer"
-              className="mt-2 flex items-center justify-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-mute transition-colors hover:text-cream"
-            >
-              ⚖ Verdict settled on-chain · {s.settleTxHash.slice(0, 6)}…{s.settleTxHash.slice(-4)}
-              <span aria-hidden>↗</span>
-            </a>
-          )}
+        <div className="flex-none border-t hairline px-4 py-2 transition-colors duration-[1400ms]" style={{ backgroundColor: surf.footer }}>
+          {s.tx.error && <div className="mb-1.5 text-center font-mono text-[10.5px] leading-snug text-convict">{s.tx.error}</div>}
+          <div className="flex items-center justify-center gap-4 font-mono text-[9.5px] uppercase tracking-[0.1em]">
+            {s.tx.lastHash && !s.tx.pending && (
+              <a href={explorerTx(s.tx.lastHash)} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-acquit transition-colors hover:text-cream">
+                ✓ Confirmed {s.tx.lastHash.slice(0, 6)}…{s.tx.lastHash.slice(-4)} <span aria-hidden>↗</span>
+              </a>
+            )}
+            {settled && s.settleTxHash && (
+              <a href={explorerTx(s.settleTxHash)} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-mute transition-colors hover:text-cream">
+                ⚖ Settle {s.settleTxHash.slice(0, 6)}…{s.settleTxHash.slice(-4)} <span aria-hidden>↗</span>
+              </a>
+            )}
+          </div>
         </div>
       )}
     </aside>

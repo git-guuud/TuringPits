@@ -144,7 +144,9 @@ export function Live({ api }: { api: MatchApi }) {
           ) : (
             <>
               <ResizeHandle onDrag={resizeWagers} />
-              <div className="relative min-h-0 shrink-0" style={{ width: wagersWidth }}>
+              {/* Raised above the moonlight veil (z-30): nightfall must NOT lay a slab over the betting UI —
+                  the Wagers panel dims itself (lamp out + cool theme) instead. See Verdict's `night`. */}
+              <div className="relative z-40 min-h-0 shrink-0" style={{ width: wagersWidth }}>
                 <button
                   type="button"
                   onClick={() => setWagersCollapsed(true)}
@@ -264,7 +266,7 @@ function WagersRail({ s, onExpand }: { s: ViewState; onExpand: () => void }) {
       onClick={onExpand}
       aria-label="Expand the wagers"
       title={live ? "Wagers open — expand to bet" : "Expand the wagers"}
-      className="panel group flex w-10 shrink-0 flex-col items-center gap-4 border-l border-line py-4 transition-colors hover:bg-gilt/[0.05]"
+      className="panel group relative z-40 flex w-10 shrink-0 flex-col items-center gap-4 border-l border-line py-4 transition-colors hover:bg-gilt/[0.05]"
     >
       <span className="font-mono text-[13px] leading-none text-mute transition-colors group-hover:text-gilt">«</span>
       <span className="eyebrow tracking-[0.3em] [writing-mode:vertical-rl]">The Wagers</span>

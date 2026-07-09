@@ -26,10 +26,17 @@ export default {
           "100%": { boxShadow: "0 0 0 0 rgba(181,48,46,0)" },
         },
         blink: { "50%": { opacity: "0" } },
+        // The Wagers-panel odds-move flash (bg fades from tinted → transparent) + the header lamp pulse.
+        lamppulse: { "0%,100%": { opacity: ".4" }, "50%": { opacity: "1" } },
+        flashup: { "0%": { backgroundColor: "rgba(127,160,126,.28)" }, "100%": { backgroundColor: "transparent" } },
+        flashdown: { "0%": { backgroundColor: "rgba(181,48,46,.28)" }, "100%": { backgroundColor: "transparent" } },
       },
       animation: {
         livepulse: "livepulse 2.4s infinite",
         blink: "blink 1s steps(1) infinite",
+        lamppulse: "lamppulse 1.8s infinite",
+        flashup: "flashup 0.8s ease-out",
+        flashdown: "flashdown 0.8s ease-out",
       },
     },
   },
