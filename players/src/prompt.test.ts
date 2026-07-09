@@ -217,6 +217,21 @@ describe("buildDiscussionPrompt", () => {
     expect(p).not.toContain("move today's vote forward"); // not the generic accuse-someone reactor task
   });
 
+  it("makes a Detective's claim ALL-OR-NOTHING — a full explicit claim or no hint at all", () => {
+    // Live failure this pins down: the Detective half-revealed most rounds ("X is town, I checked")
+    // without ever saying it is the Detective — too vague to convince the table AND invisible to
+    // claimsDetective (so the claim beat/market never fired). The guidance + cleared-Town branch now
+    // demand either the full claim (role, target, result) or complete silence about secret knowledge.
+    const ctx: TurnContext = {
+      ...base, roster, role: "DETECTIVE",
+      investigations: [{ round: 1, target: 1, faction: "TOWN" }],
+    };
+    const p = buildDiscussionPrompt(ctx);
+    expect(p).toContain("ALL-OR-NOTHING");                            // CLAIM_GUIDANCE header rule
+    expect(p).toContain("no hint that you checked anyone");           // hidden mode = zero leakage
+    expect(p).toContain("who you investigated, and what you found");  // full-claim beats when going public
+  });
+
   it("a Detective that has CAUGHT a Mafia still reveals (caught outranks vouch), now de-scripted", () => {
     const ctx: TurnContext = {
       ...base, roster, role: "DETECTIVE",
@@ -496,8 +511,19 @@ describe("drama directive & speech budget", () => {
       buildVoteSpeechPrompt(base),
       buildDiscussionPrompt({ ...base, stage: "discussion" }),
     ]) {
-      expect(p).toContain("THIS IS LIVE THEATRE"); // the shared drama framing
-      expect(p.toLowerCase()).toContain("play to be watched");
+      expect(p).toContain("PLAY TO WIN, AND PLAY TO BE WATCHED"); // the shared drama framing
+      expect(p).toContain("take a side, name names");
+    }
+  });
+
+  it("pairs DRAMA with the plain-English register directive in every PUBLIC-speech prompt", () => {
+    for (const p of [
+      buildSpeechPrompt(base, 3, "x"),
+      buildVoteSpeechPrompt(base),
+      buildDiscussionPrompt({ ...base, stage: "discussion" }),
+    ]) {
+      expect(p).toContain("TALK LIKE A REAL PERSON"); // the shared register framing
+      expect(p.toLowerCase()).toContain("plain, everyday english");
     }
   });
 
@@ -506,7 +532,7 @@ describe("drama directive & speech budget", () => {
       ...base, role: "MAFIA", teammates: [4],
       decisionStub: { nonce: "deadbeef", phase: "night", round: 2, player: 2, action: "kill" },
     };
-    expect(buildReasonPrompt(night)).not.toContain("THIS IS LIVE THEATRE");
+    expect(buildReasonPrompt(night)).not.toContain("PLAY TO WIN, AND PLAY TO BE WATCHED");
   });
 
   it("marries the drama to grounding — never manufacture facts you could not know", () => {

@@ -27,41 +27,43 @@ export function Menu({ api }: { api: MatchApi }) {
   const status = useLiveStatus();
 
   return (
-    <main className="flex min-h-screen w-full flex-col items-center justify-center px-6 py-[clamp(1.5rem,5vh,3rem)]">
+    <main className="flex min-h-[100dvh] w-full flex-col items-center justify-center px-5 py-[clamp(1.5rem,5vh,3rem)] sm:px-6">
       <div className="w-full max-w-[760px] text-center">
-        <div className="eyebrow mb-[clamp(0.5rem,1.5vh,1rem)]">The People v. The Hidden Hand</div>
-        <h1 className="font-display text-[clamp(2.5rem,8vw,4rem)] font-semibold uppercase leading-none tracking-[0.4em] text-cream">
+        <div className="eyebrow mb-[clamp(0.5rem,1.5vh,1rem)]">The People v/s The Hidden Hand</div>
+        {/* The wide 0.4em tracking blows past narrow viewports; ease it (and the min size) on phones so
+            the wordmark never overflows or clips. */}
+        <h1 className="font-display text-[clamp(1.9rem,8vw,4rem)] font-semibold uppercase leading-none tracking-[0.18em] text-cream sm:tracking-[0.4em]">
           Turing Pits
         </h1>
         <div className="mt-[clamp(0.75rem,2vh,1.25rem)] font-body text-[clamp(1rem,1.8vw,1.1875rem)] italic text-gilt-soft">
-          AI agents play Mafia. Every move is TEE-verified and settled on-chain. You wager on the verdict.
+          AI agents play Mafia. You predict the verdict.
         </div>
 
         <button
           type="button"
           onClick={() => startTour()}
-          className="group mt-[clamp(0.5rem,1.5vh,0.875rem)] inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.16em] text-mute transition-colors hover:text-gilt"
+          className="group mt-[clamp(0.5rem,1.5vh,0.875rem)] inline-flex items-center gap-2 font-mono text-[15px] uppercase underline tracking-[0.16em] text-mute transition-colors hover:text-gilt"
         >
-          <span aria-hidden className="text-gilt-soft transition-colors group-hover:text-gilt">✦</span>
           New here? Take the guided tour
         </button>
 
         <div className="mt-[clamp(1.75rem,5vh,3rem)] grid grid-cols-1 gap-px bg-line sm:grid-cols-2">
           <MenuCard
-            kicker="The arena"
+            kicker=""
             title="Enter the Court"
-            blurb="Watch a live match unfold and wager on whether the hidden hand walks free."
+            blurb="Watch a live match unfold and make predictions."
             cta="Watch live ›"
             onClick={() => navigate("live")}
             primary
-            status={<LiveChip status={status} />}
+            status={status && !status.live && <LiveChip status={status} />}
           />
           <MenuCard
-            kicker="The record"
+            kicker=""
             title="Battle History"
-            blurb="Every past battle, its on-chain verdict, and any winnings or refunds left to collect."
-            cta="Browse history ›"
+            blurb="Every past battle, its verdict, and winnings."
+            cta="Open history ›"
             onClick={() => navigate("history")}
+            status={<></>}
           />
         </div>
 
@@ -93,16 +95,12 @@ export function Menu({ api }: { api: MatchApi }) {
  */
 function LiveChip({ status }: { status: MatchStatus | null }) {
   if (!status || !status.live) {
-    return (
-      <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-mute">
-        Court is dark — be the first in
-      </span>
-    );
+    return;
   }
   const pot = parseFloat(status.pot);
   const potLabel = pot > 0 && pot < 10 ? pot.toFixed(1) : Math.round(pot).toString();
   const round = status.round > 0 ? `round ${status.round}` : "opening";
-  const tail = status.bettingLive ? `◈${potLabel} pot · wagers open` : "wagers open soon";
+  const tail = status.bettingLive ? `◈${potLabel} pot · predictions open` : "predictions open soon";
   return (
     <span className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em] text-gilt">
       <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-convict animate-livepulse" />
@@ -160,10 +158,10 @@ function WalletCard(p: {
   if (!connected) {
     return (
       <div className="panel hairline mx-auto mt-[clamp(1.5rem,4vh,2rem)] w-full max-w-[440px] border px-6 py-[clamp(1.25rem,3vh,1.5rem)] text-center">
-        <div className="font-display text-[22px] tracking-[0.04em] text-cream">Connect to wager</div>
+        <div className="font-display text-[22px] tracking-[0.04em] text-cream">Connect to predict</div>
         <p className="mx-auto mt-1.5 max-w-[360px] font-body text-[14px] leading-snug text-cream-dim">
-          CHIP is free mock test money. Connect once, then place wagers with{" "}
-          <span className="text-cream">no pop-up on every bet</span> — the relayer covers gas.
+          CHIP is free mock test money. Connect once, then place predictions with{" "}
+          <span className="text-cream">no pop-up on every prediction</span> — the relayer covers gas.
         </p>
         <button
           type="button"
@@ -189,10 +187,10 @@ function WalletCard(p: {
   // A session / guest wallet always bets through the relayer (it holds no 0G), so there is no gas toggle —
   // just the live relayer state, in plain words. Offline/broke is a hard stop for session wagering.
   const relayExplain = !relayLive
-    ? "Gas relayer is offline — session wagering is paused. Try again shortly."
+    ? "Gas relayer is offline — session predictions are paused. Try again shortly."
     : !relayFunded
-      ? "Relayer is out of 0G — wagering is paused until it's topped up."
-      : "Gas-free & pop-up-free — you're signed in, so the relayer covers gas and every wager is instant.";
+      ? "Relayer is out of 0G — predictions are paused until it's topped up."
+      : "Gas-free & pop-up-free — you're signed in, so the relayer covers gas and every prediction is instant.";
 
   return (
     <div className="panel hairline mx-auto mt-[clamp(1.5rem,4vh,2rem)] w-full max-w-[440px] border px-6 py-5 text-left">
@@ -222,7 +220,7 @@ function WalletCard(p: {
 
       {/*<div className="mt-4 border-t border-line pt-4">
         <div className="flex items-center justify-between gap-3">
-          <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim">Gas-free betting</span>
+          <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim">Gas-free predictions</span>
           <span
             className={[
               "rounded-full border px-3 py-1 font-mono text-[10px] uppercase tracking-[0.18em]",

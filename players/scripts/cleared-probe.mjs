@@ -7,12 +7,13 @@
 //   GUARD_DEBUG=1 node --env-file=.env players/scripts/cleared-probe.mjs
 import * as players from "@turingpits/players";
 
-const RPC = process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai";
+const RPC = process.env.COMPUTE_RPC_URL ?? process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai";
 const KEY = process.env.COMPUTE_PRIVATE_KEY ?? process.env.DEPLOYER_PRIVATE_KEY;
-const PROVIDER_ADDR = process.env.TEE_PROVIDER_ADDRESS;
-if (!KEY || !PROVIDER_ADDR) throw new Error("need COMPUTE_PRIVATE_KEY + TEE_PROVIDER_ADDRESS in .env");
+const PROVIDER_ADDR = process.env.COMPUTE_PROVIDER_ADDRESS ?? process.env.TEE_PROVIDER_ADDRESS;
+const CHAIN_ID = process.env.COMPUTE_CHAIN_ID ? Number(process.env.COMPUTE_CHAIN_ID) : undefined;
+if (!KEY || !PROVIDER_ADDR) throw new Error("need COMPUTE_PRIVATE_KEY + COMPUTE_PROVIDER_ADDRESS in .env");
 
-const base = await players.createZeroGDirectProvider({ privateKey: KEY, rpcUrl: RPC, providerAddress: PROVIDER_ADDR });
+const base = await players.createZeroGDirectProvider({ privateKey: KEY, rpcUrl: RPC, providerAddress: PROVIDER_ADDR, ...(CHAIN_ID !== undefined ? { chainId: CHAIN_ID } : {}) });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isTransient = (m) => /429|fetch failed|EAI_AGAIN|ENOTFOUND|ECONNRESET|ETIMEDOUT|timeout|timed out|auto-funding|502|503|504/i.test(m);
 const provider = {

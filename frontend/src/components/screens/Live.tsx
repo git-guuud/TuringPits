@@ -150,8 +150,8 @@ export function Live({ api }: { api: MatchApi }) {
                 <button
                   type="button"
                   onClick={() => setWagersCollapsed(true)}
-                  aria-label="Collapse the wagers"
-                  title="Collapse the wagers"
+                  aria-label="Collapse the predictions"
+                  title="Collapse the predictions"
                   className="absolute right-3 top-4 z-10 flex h-6 w-6 items-center justify-center rounded-sm border border-line-2 font-mono text-[13px] leading-none text-mute transition-colors hover:border-gilt hover:text-gilt"
                 >
                   »
@@ -211,7 +211,7 @@ function ResizeHandle({ onDrag }: { onDrag: (clientX: number) => void }) {
     <div
       role="separator"
       aria-orientation="vertical"
-      aria-label="Resize the dialogue and wagers panels"
+      aria-label="Resize the dialogue and predictions panels"
       title="Drag to resize"
       onPointerDown={(e) => {
         dragging.current = true;
@@ -264,14 +264,14 @@ function WagersRail({ s, onExpand }: { s: ViewState; onExpand: () => void }) {
     <button
       type="button"
       onClick={onExpand}
-      aria-label="Expand the wagers"
-      title={live ? "Wagers open — expand to bet" : "Expand the wagers"}
+      aria-label="Expand the predictions"
+      title={live ? "Predictions open — expand to predict" : "Expand the predictions"}
       className="panel group relative z-40 flex w-10 shrink-0 flex-col items-center gap-4 border-l border-line py-4 transition-colors hover:bg-gilt/[0.05]"
     >
       <span className="font-mono text-[13px] leading-none text-mute transition-colors group-hover:text-gilt">«</span>
-      <span className="eyebrow tracking-[0.3em] [writing-mode:vertical-rl]">The Wagers</span>
+      <span className="eyebrow tracking-[0.3em] [writing-mode:vertical-rl]">The Predictions</span>
       {live && (
-        <span aria-hidden className="mt-auto h-1.5 w-1.5 animate-livepulse rounded-full bg-gilt" title="Wagers open" />
+        <span aria-hidden className="mt-auto h-1.5 w-1.5 animate-livepulse rounded-full bg-gilt" title="Predictions open" />
       )}
     </button>
   );
@@ -586,22 +586,22 @@ function BottomDock({ s, onOpen }: { s: ViewState; onOpen: () => void }) {
   if (s.betWindow) {
     label =
       s.betWindow.market === "NIGHT_KILL"
-        ? "Betting window · who dies tonight?"
+        ? "Prediction window · who dies tonight?"
         : s.betWindow.market === "ROUND_VOTED_OUT"
-          ? "Betting window · who hangs?"
-          : "Betting window · real or bluff?";
-    cta = "Bet now";
+          ? "Prediction window · who hangs?"
+          : "Prediction window · real or bluff?";
+    cta = "Predict now";
     tone = "live";
   } else if (live) {
-    label = "Wagers open · bet now";
-    cta = "Wager";
+    label = "Predictions open · predict now";
+    cta = "Predict";
     tone = "live";
   } else if (s.market.state === "OPEN") {
     label = "Sealing the record…";
-    cta = "Wagers";
+    cta = "Predictions";
     tone = "soft";
   } else if (s.market.state === "LOCKED") {
-    label = "Wagers sealed · match running";
+    label = "Predictions sealed · match running";
     cta = "View";
     tone = "mute";
   } else if (s.market.state === "REFUND") {
@@ -610,7 +610,7 @@ function BottomDock({ s, onOpen }: { s: ViewState; onOpen: () => void }) {
     tone = "claim";
   } else {
     const factionVoid = (s.market.props ?? []).find((p) => p.kind === "FACTION")?.state === "VOID";
-    label = factionVoid ? "Stakes returned" : "Verdict settled on-chain";
+    label = factionVoid ? "Stakes returned" : "Verdict settled";
     cta = "Results";
     tone = "claim";
   }
@@ -628,9 +628,9 @@ function BottomDock({ s, onOpen }: { s: ViewState; onOpen: () => void }) {
       <button type="button" onClick={onOpen} className="flex w-full items-center gap-3 px-4 py-3 text-left">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="eyebrow">The Wagers</span>
+            <span className="eyebrow">The Predictions</span>
             {hasWager && (
-              <span className="text-[10px] text-gilt" title="You hold a wager">
+              <span className="text-[10px] text-gilt" title="You hold a prediction">
                 ●
               </span>
             )}
@@ -719,7 +719,7 @@ function WagersSheet({ api, onClose }: { api: MatchApi; onClose: () => void }) {
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Wagers"
+        aria-label="Predictions"
         className="panel fixed inset-x-0 bottom-0 z-50 flex h-[86dvh] flex-col rounded-t-2xl border-t border-line-2"
         initial={{ y: "100%" }}
         animate={{ y: 0 }}
@@ -731,7 +731,7 @@ function WagersSheet({ api, onClose }: { api: MatchApi; onClose: () => void }) {
         </div>
         <button
           type="button"
-          aria-label="Close wagers"
+          aria-label="Close predictions"
           onClick={onClose}
           className="absolute right-4 top-3 z-10 font-mono text-[20px] leading-none text-mute transition-colors hover:text-cream"
         >

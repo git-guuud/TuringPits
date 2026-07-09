@@ -4,6 +4,7 @@ import { useHistory, type HistoryRow, type PropReclaim, type ReclaimKind } from 
 import { navigate } from "../../lib/useRoute.js";
 import { betTokenAddress, explorerAddress, explorerToken, explorerTx, MARKET_ADDRESS } from "../../lib/contract.js";
 import { useStorageLink } from "../../lib/useStorageLink.js";
+import { LeaderboardDialog, type Collectable } from "../MatchLeaderboard.js";
 import type { MatchSummary } from "../../lib/contract.js";
 
 /** The verdict as the record phrases it (from the FACTION prop; mirrors the Verdict panel's framing). */
@@ -16,7 +17,18 @@ function verdictOf(s: MatchSummary): { label: string; cls: string } {
   }
   if (s.state === "REFUND") return { label: "Abandoned", cls: "text-gilt" };
   if (s.state === "LOCKED") return { label: "In session", cls: "text-gilt" };
-  return { label: "Wagers open", cls: "text-gilt" };
+  return { label: "Predictions open", cls: "text-gilt" };
+}
+
+/** A battle whose final standings exist: SETTLED or REFUND, i.e. terminal on-chain. */
+const hasStandings = (s: MatchSummary) => s.state === "SETTLED" || s.state === "REFUND";
+
+/** The battle's headline verdict, phrased for the leaderboard subtitle (mirrors the live popup's). */
+function standingsVerdict(s: MatchSummary): string {
+  if (s.state === "REFUND") return "Abandoned · stakes returned";
+  if (s.factionState === "VOID") return "Mistrial · stakes returned";
+  if (s.factionState === "RESOLVED") return s.factionWinner === 1 ? "Mafia acquitted" : "Mafia convicted";
+  return "Settled";
 }
 
 const RECLAIM_CTA: Record<ReclaimKind, string> = {
@@ -90,7 +102,7 @@ export function History({ api }: { api: MatchApi }) {
   // Only the lenses that hold something: drop "Claimable" when nothing's outstanding.
   const segments: [FilterMode, string, number][] = [
     ["all", "All", rows.length],
-    ["mine", "My wagers", mineRows.length],
+    ["mine", "My predictions", mineRows.length],
   ];
   if (claimableRows.length > 0) segments.push(["claimable", "Claimable", claimableRows.length]);
 
@@ -121,6 +133,29 @@ export function History({ api }: { api: MatchApi }) {
     void api.claimAllProps(matchId, idxs, refund);
   };
 
+  // Clicking a finished battle opens its final standings — the same leaderboard popup the Live screen
+  // shows at match end, read fresh from the chain for that matchId. Only terminal (SETTLED/REFUND)
+  // battles have standings; live rows stay non-clickable.
+  const [board, setBoard] = useState<HistoryRow | null>(null);
+  const boardProps = board?.mine?.props ?? [];
+  const boardRefund = board?.summary.state === "REFUND";
+  // Anything you can still reclaim on the opened battle powers the dialog's one-tap collect footer.
+  const boardWinnings: Collectable | null =
+    board && boardProps.length > 0
+      ? {
+          refund: boardRefund,
+          total: boardProps.reduce((a, p) => a + parseFloat(p.amount), 0).toFixed(2),
+          count: boardProps.length,
+        }
+      : null;
+  // Same contract as the live popup: collect, then close. A failed tx surfaces in the error banner
+  // and the row's own "Collect all" stays available.
+  const collectFromBoard = async () => {
+    if (!board || busy) return;
+    await api.claimAllProps(board.summary.matchId, boardProps.map((p) => p.index), boardRefund);
+    setBoard(null);
+  };
+
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-[920px] flex-col px-6 py-8">
       <div className="flex items-center gap-4">
@@ -141,13 +176,9 @@ export function History({ api }: { api: MatchApi }) {
       </div>
 
       <header className="mt-6 border-b hairline pb-5">
-        <div className="eyebrow mb-2">The record</div>
         <h1 className="font-display text-[40px] font-semibold uppercase leading-none tracking-[0.18em] text-cream">
           Battle History
         </h1>
-        <div className="mt-2 font-body text-[15px] italic text-gilt-soft">
-          Every battle, read straight from the chain · newest first
-        </div>
         {!connected && (
           <div className="mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
             <button
@@ -228,7 +259,7 @@ export function History({ api }: { api: MatchApi }) {
           rel="noreferrer"
           className="mt-3 inline-flex items-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-acquit transition-colors hover:text-cream"
         >
-          ✓ Confirmed on-chain · {s.tx.lastHash.slice(0, 6)}…{s.tx.lastHash.slice(-4)} <span aria-hidden>↗</span>
+          ✓ Confirmed · {s.tx.lastHash.slice(0, 6)}…{s.tx.lastHash.slice(-4)} <span aria-hidden>↗</span>
         </a>
       )}
 
@@ -243,14 +274,22 @@ export function History({ api }: { api: MatchApi }) {
           </div>
         ) : visibleRows.length === 0 ? (
           <div className="py-16 text-center font-body text-[16px] italic text-mute">
-            {filter === "claimable" ? "Nothing left to reclaim." : "No wagers of yours on record yet."}{" "}
+            {filter === "claimable" ? "Nothing left to reclaim." : "No predictions of yours on record yet."}{" "}
             <button type="button" onClick={() => setFilter("all")} className="text-gilt underline-offset-2 hover:underline">Show all battles</button>.
           </div>
         ) : (
           <>
             <ul className="flex flex-col gap-px bg-line">
               {pageRows.map((r) => (
-                <Row key={r.summary.matchId} row={r} busy={busy} claimable={isClaimable(r)} onEnableRefund={onEnableRefund} onClaimAll={onClaimAll} />
+                <Row
+                  key={r.summary.matchId}
+                  row={r}
+                  busy={busy}
+                  claimable={isClaimable(r)}
+                  onEnableRefund={onEnableRefund}
+                  onClaimAll={onClaimAll}
+                  onOpen={hasStandings(r.summary) ? () => setBoard(r) : undefined}
+                />
               ))}
             </ul>
 
@@ -284,7 +323,6 @@ export function History({ api }: { api: MatchApi }) {
 
       {/* Verifiable source: the single market every match settles in, and the CHIP stake token. */}
       <footer className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t hairline pt-4 font-mono text-[11px] tracking-[0.06em] text-mute">
-        <span className="uppercase tracking-[0.12em] text-mute-2">On-chain ·</span>
         <a
           href={explorerAddress(MARKET_ADDRESS)}
           target="_blank"
@@ -304,6 +342,19 @@ export function History({ api }: { api: MatchApi }) {
           </a>
         )}
       </footer>
+
+      {/* Final standings for the clicked battle — every bettor ranked by net P&L (same popup as Live). */}
+      <LeaderboardDialog
+        open={board != null}
+        onClose={() => setBoard(null)}
+        matchId={board?.summary.matchId ?? null}
+        state={board ? (board.summary.state as "SETTLED" | "REFUND") : null}
+        verdict={board ? standingsVerdict(board.summary) : ""}
+        account={s.wallet.account}
+        winnings={boardWinnings}
+        busy={busy}
+        onCollect={collectFromBoard}
+      />
     </main>
   );
 }
@@ -320,6 +371,7 @@ function EvidenceRef({ href, label, root }: { href: string; label: string; root:
       target="_blank"
       rel="noreferrer"
       title={root}
+      onClick={(e) => e.stopPropagation()}
       className="inline-flex items-center gap-1 text-gilt-soft transition-colors hover:text-gilt"
     >
       {label} <span className="text-mute">{shortHash(root)}</span> <span aria-hidden>↗</span>
@@ -345,12 +397,15 @@ function Row({
   claimable,
   onEnableRefund,
   onClaimAll,
+  onOpen,
 }: {
   row: HistoryRow;
   busy: boolean;
   claimable: boolean;
   onEnableRefund: (matchId: number) => void;
   onClaimAll: (matchId: number, idxs: number[], refund: boolean) => void;
+  /** Present on finished battles: open this battle's final standings (leaderboard popup). */
+  onOpen?: () => void;
 }) {
   const { summary: s, mine } = row;
   const v = verdictOf(s);
@@ -369,7 +424,27 @@ function Row({
   const propsTotal = props.reduce((a, p) => a + parseFloat(p.amount), 0);
 
   return (
-    <li className={["panel flex flex-col gap-3 px-5 py-4", claimable ? "border-l-2 border-gilt" : ""].join(" ")}>
+    <li
+      onClick={onOpen}
+      onKeyDown={
+        onOpen &&
+        ((e) => {
+          if (e.target !== e.currentTarget) return; // let inner buttons/links keep their own keys
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpen();
+          }
+        })
+      }
+      role={onOpen ? "button" : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+      aria-label={onOpen ? `Battle #${s.matchId} — open final standings` : undefined}
+      className={[
+        "panel flex flex-col gap-3 px-5 py-4",
+        claimable ? "border-l-2 border-gilt" : "",
+        onOpen ? "group cursor-pointer transition-colors hover:bg-gilt/[0.05]" : "",
+      ].join(" ")}
+    >
       <div className="flex items-center gap-4">
         <div className="w-16 flex-none">
           <div className="font-mono text-[12px] text-cream">#{s.matchId}</div>
@@ -396,7 +471,10 @@ function Row({
           <div className="flex-none text-right">
             <button
               type="button"
-              onClick={() => onEnableRefund(s.matchId)}
+              onClick={(e) => {
+                e.stopPropagation();
+                onEnableRefund(s.matchId);
+              }}
               disabled={busy}
               className="rounded-sm border border-gilt px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-gilt transition-colors hover:bg-gilt hover:text-ink disabled:opacity-60"
             >
@@ -407,7 +485,10 @@ function Row({
           <div className="flex-none text-right">
             <button
               type="button"
-              onClick={() => onClaimAll(s.matchId, props.map((p) => p.index), isRefund)}
+              onClick={(e) => {
+                e.stopPropagation();
+                onClaimAll(s.matchId, props.map((p) => p.index), isRefund);
+              }}
               disabled={busy}
               className="rounded-sm border border-acquit px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-acquit transition-colors hover:bg-acquit hover:text-ink disabled:opacity-60"
             >
@@ -421,9 +502,19 @@ function Row({
           </div>
         ) : mine?.participated ? (
           <div className="flex-none text-right">
-            <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">Wagered</span>
+            <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">Staked</span>
           </div>
         ) : null}
+
+        {/* Affordance: a finished battle opens its final standings on click. */}
+        {onOpen && (
+          <span
+            aria-hidden
+            className="flex-none font-mono text-[18px] leading-none text-mute-2 transition-colors group-hover:text-gilt"
+          >
+            ›
+          </span>
+        )}
       </div>
 
       {/* Breakdown of what "Collect all" sweeps — the faction verdict first, then each side market you

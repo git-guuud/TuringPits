@@ -287,7 +287,7 @@ async function withGasless(
       if (mustRelay) {
         if (e instanceof RelayUnavailable) {
           throw new Error(
-            "The gas relayer is offline right now — a session wallet needs it to bet. Try again in a moment, or connect your own wallet.",
+            "The gas relayer is offline right now — a session wallet needs it to predict. Try again in a moment, or connect your own wallet.",
           );
         }
         throw e;
@@ -307,16 +307,16 @@ async function withGasless(
  * through: anything NOT here is treated as an opaque failure and never shown verbatim.
  */
 const REVERT_COPY: ReadonlyArray<readonly [string, string]> = [
-  ["insufficient allowance", "Approval needed — confirm the token approval, then place your wager again."],
+  ["insufficient allowance", "Approval needed — confirm the token approval, then place your prediction again."],
   ["insufficient balance", "Not enough CHIP — tap “Get test CHIP” to mint more, then try again."],
-  ["below min bet", "That wager is below the minimum stake — raise it and try again."],
-  ["above max bet", "That wager is above the per-bet maximum — lower it and try again."],
-  ["betting not started", "Wagers haven't opened yet — hold on a moment."],
-  ["betting closed", "Wagers just closed for this market."],
-  ["betting locked", "Wagers just closed for this market."],
-  ["betting still open", "Wagers are still open — that action isn't available yet."],
-  ["deadline passed", "Wagers just closed for this market."],
-  ["prop closed", "This market is closed — no more wagers on it."],
+  ["below min bet", "That prediction is below the minimum stake — raise it and try again."],
+  ["above max bet", "That prediction is above the per-prediction maximum — lower it and try again."],
+  ["betting not started", "Predictions haven't opened yet — hold on a moment."],
+  ["betting closed", "Predictions just closed for this market."],
+  ["betting locked", "Predictions just closed for this market."],
+  ["betting still open", "Predictions are still open — that action isn't available yet."],
+  ["deadline passed", "Predictions just closed for this market."],
+  ["prop closed", "This market is closed — no more predictions on it."],
   ["bad outcome", "That pick isn't valid for this market — choose again."],
   ["already opened", "That market is already open."],
   ["nothing to claim", "Nothing to claim on this wallet."],
@@ -331,10 +331,10 @@ const REVERT_COPY: ReadonlyArray<readonly [string, string]> = [
   ["not refund mode", "This match isn't open for refunds yet."],
   ["deadline not passed", "Too early to reclaim — the settlement window hasn't closed yet."],
   ["not lockable", "This match can't be locked right now."],
-  ["request expired", "This wager request expired — place it again."],
-  ["invalid or expired signature", "This wager request expired — place it again."],
-  ["rate limit", "Slow down a moment — one wager at a time, then try again."],
-  ["already in flight", "A wager is still going through — give it a second, then try again."],
+  ["request expired", "This prediction request expired — place it again."],
+  ["invalid or expired signature", "This prediction request expired — place it again."],
+  ["rate limit", "Slow down a moment — one prediction at a time, then try again."],
+  ["already in flight", "A prediction is still going through — give it a second, then try again."],
   ["transfer failed", "The token transfer didn't go through — try again in a moment."],
 ];
 
@@ -391,13 +391,13 @@ export function humanizeTxError(e: unknown): string {
 
   // ── Wallet / provider-level conditions (not contract reverts) ────────────────────────────────
   if (code === "ACTION_REJECTED" || code === 4001 || raw.includes("user rejected") || raw.includes("user denied")) {
-    return "Wager cancelled.";
+    return "Prediction cancelled.";
   }
   if (code === "INSUFFICIENT_FUNDS" || raw.includes("insufficient funds")) {
     return "Not enough 0G for gas — top up from the faucet (faucet.0g.ai) and try again.";
   }
   if (raw.includes("no wallet found")) {
-    return "No wallet found — install MetaMask, or tap “Play as guest” to bet with a browser wallet.";
+    return "No wallet found — install MetaMask, or tap “Play as guest” to predict with a browser wallet.";
   }
   if (raw.includes("relayer") && (raw.includes("out of gas") || raw.includes("offline"))) {
     return "The gas relayer is offline right now — try again in a moment, or connect your own wallet.";
@@ -439,7 +439,7 @@ export interface Wallet {
 
 function injected(): import("ethers").Eip1193Provider {
   const eth = (window as unknown as { ethereum?: import("ethers").Eip1193Provider }).ethereum;
-  if (!eth) throw new Error("No wallet found. Install MetaMask (or any EIP-1193 wallet) to bet.");
+  if (!eth) throw new Error("No wallet found. Install MetaMask (or any EIP-1193 wallet) to predict.");
   return eth;
 }
 

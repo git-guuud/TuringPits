@@ -103,10 +103,10 @@ export function Record({ s, onClose }: { s: ViewState; onClose: () => void }) {
         </span>
       </Line>
       <Line done={!!s.reveal}>
-        Roles revealed & verified on-chain{s.reveal ? ` · ${s.reveal.winner} prevails` : ""}
+        Roles revealed & verified{s.reveal ? ` · ${s.reveal.winner} prevails` : ""}
       </Line>
       <Line done={settled}>
-        Verdict settled on-chain at sentencing
+        Verdict settled 
         {settled && s.settleTxHash && (
           <span className="font-mono text-[21px] text-mute"> · <Ref href={explorerTx(s.settleTxHash)}>{short(s.settleTxHash)}</Ref></span>
         )}
@@ -145,23 +145,6 @@ export function Record({ s, onClose }: { s: ViewState; onClose: () => void }) {
             signer <Ref href={explorerAddress(r.teeSigner)}>{short(r.teeSigner)}</Ref> · {r.providerType}/{r.providerIdentity}
           </span>
         )}
-      </div>
-
-      <div className="mt-7 flex gap-3">
-        <span className="rounded-sm border border-acquit/40 px-4 py-3 font-mono text-[17px] uppercase tracking-[0.1em] text-acquit">
-          Real on-chain
-        </span>
-        {anyMock && (
-          <span className="rounded-sm border border-gilt-soft/40 px-4 py-3 font-mono text-[17px] uppercase tracking-[0.1em] text-gilt-soft">
-            Mock feed · testnet
-          </span>
-        )}
-      </div>
-
-      {/* The honest trust caveat from STATUS.md, surfaced tastefully. */}
-      <div className="mt-7 border-t hairline pt-6 text-[21px] italic leading-relaxed text-mute-2">
-        Attestation is provider-signed and on-chain verifiable; the testnet provider runs as a
-        centralized RA-TLS endpoint, not visible hardware TEE.
       </div>
       </section>
     </div>

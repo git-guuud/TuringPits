@@ -1,9 +1,9 @@
 # Turing Pits
 
-**A decentralized prediction market where AI agents play Mafia and you bet on the verdict.**
+**A decentralized prediction market where AI agents play Mafia and you predict the verdict.**
 
 A hidden Mafia minority of LLMs schemes against an uninformed Town majority — debating, lying, and
-voting each other out round by round — while spectators wager on which faction prevails. Every AI
+voting each other out round by round — while spectators predict which faction prevails. Every AI
 move is generated inside a [0G Compute](https://0g.ai) TEE under deterministic decoding, signed by
 the provider, and **verified on 0G Chain at settlement**. A forged, replayed, or re-ordered move
 makes settlement revert. No payout on a rigged game.
@@ -20,7 +20,7 @@ It feels like a Web2 live stream; it settles like a trustless contract.
 ```
                               ┌──────────────────────────────────────────┐
                               │  server (Sequencer)                      │
-   bettors ──CHIP wager──►    │  • drives the deterministic moderator    │
+predictors ──CHIP stake──►    │  • drives the deterministic moderator    │
         │                     │  • per turn → 0G Compute (TEE inference) │
         │                     │  • streams turns to the UI (WebSocket)   │
         ▼                     └───────────────┬──────────────────────────┘
@@ -38,10 +38,10 @@ It feels like a Web2 live stream; it settles like a trustless contract.
 
 - **0G Compute** runs the AI players under TEE attestation — the inference *is* the game, and the
   signature is what makes the stream un-riggable.
-- **0G Chain** holds the parimutuel betting market and performs **fully on-chain settlement**: it
+- **0G Chain** holds the parimutuel prediction market and performs **fully on-chain settlement**: it
   re-checks every move's TEE signature, the commit-revealed role assignment, and runs Mafia's rules
   in Solidity to compute the winning faction.
-- **0G Storage** holds the immutable evidence: persona prompts (committed before betting) and the
+- **0G Storage** holds the immutable evidence: persona prompts (committed before predictions open) and the
   full signed transcript (committed at settlement).
 
 This is a **Verified Game Engine** — settlement is *pessimistically* verified, not optimistic. Every
@@ -62,25 +62,25 @@ settlement transaction per market.
   it at dawn.
 - **Voted out — "Who hangs this round?"** *(recurring, per round).* Over the living seats plus a
   "no one" outcome (a tie / no elimination). Round 1 opens with the match; a fresh one floats each day
-  and freezes once that vote resolves. Only the currently-bettable round shows live; resolved rounds
+  and freezes once that vote resolves. Only the currently-open round shows live; resolved rounds
   drop to History.
 - **Who is the Mafia?** *(on-demand).* One outcome per seat.
 - **Detective claim — "real, or a bluff?"** *(on-demand, per claiming seat).* Fires when a player
   claims the Detective role.
 - **Mechanism:** parimutuel pools with one pool per outcome. Backers of the resolved (winning) outcome
-  split the pot pro-rata, minus a small protocol fee — always solvent regardless of bet skew. If nobody
+  split the pot pro-rata, minus a small protocol fee — always solvent regardless of stake skew. If nobody
   backed the winning outcome, the market **Voids** and every stake is refunded.
-- **Currency:** wagers are placed in **CHIP**, a faucet-mintable mock ERC20 (`MockBetToken`) — test
+- **Currency:** predictions are placed in **CHIP**, a faucet-mintable mock ERC20 (`MockBetToken`) — test
   money with no value. Tap **"Get test tokens"** in the UI to mint some.
 - **Gasless by default (EIP-2771):** when the host runs a funded relayer, a spectator with **zero
   native 0G** can play — the wallet signs each action off-chain and a backend relayer submits it through
-  a trusted `Forwarder` and pays the gas, while the user stays the on-chain bettor. It's the default
+  a trusted `Forwarder` and pays the gas, while the user stays the on-chain predictor. It's the default
   whenever the relayer is live and funded (a "⛽ Gasless" toggle opts out); otherwise the UI falls back
   to the normal path where gas is paid in native 0G. Real on-chain mechanism, not a mock.
-- **Pop-up-free betting:** an in-browser **session key** (derived from one signature) or a **guest
-  burner** key is the on-chain bettor and signs relayed requests locally — no wallet pop-up per wager.
+- **Pop-up-free predictions:** an in-browser **session key** (derived from one signature) or a **guest
+  burner** key is the on-chain predictor and signs relayed requests locally — no wallet pop-up per prediction.
 - **Batch claim:** one tap collects every winning/refund for a match in a single transfer.
-- **Open until settled:** betting stays open for the whole match and only closes when the verdict is
+- **Open until settled:** predictions stay open for the whole match and only closes when the verdict is
   settled on-chain. Draws and "nobody backed the winner" (Void) refund stakes.
 
 ---
@@ -94,7 +94,7 @@ settlement transaction per market.
 | `server/`    | Sequencer: drives the match, streams turns, settles on-chain| Live Arena          |
 | `contracts/` | `MafiaMarket` + `MockBetToken` + on-chain verifier (Solidity)| Market Ledger (0G Chain) |
 | `storage/`   | 0G Storage uploads/retrieval (personas + transcripts)       | Evidence Layer      |
-| `frontend/`  | Live arena UI, betting panel, session/guest wallets, batch claim, CHIP faucet | Live Arena (UI)     |
+| `frontend/`  | Live arena UI, prediction panel, session/guest wallets, batch claim, CHIP faucet | Live Arena (UI)     |
 
 ---
 
@@ -132,7 +132,7 @@ npm run dev -w @turingpits/server      # Sequencer + WebSocket stream (needs .en
 npm run dev -w @turingpits/frontend    # Live arena UI (Vite)
 ```
 
-Then open the UI, connect a wallet on 0G Galileo, tap **Get test tokens**, and wager on a live match.
+Then open the UI, connect a wallet on 0G Galileo, tap **Get test tokens**, and predict on a live match.
 
 > Most 0G-touching packages need testnet credentials/funds first.
 > Contract tests run under Hardhat in `contracts/`.

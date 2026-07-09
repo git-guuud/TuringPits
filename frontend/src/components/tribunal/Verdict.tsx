@@ -171,7 +171,7 @@ function OutcomeCard({
           </div>
         </>
       ) : (
-        <div className="mt-2 font-mono text-[10px] tracking-[0.08em] text-mute-2">no wagers yet</div>
+        <div className="mt-2 font-mono text-[10px] tracking-[0.08em] text-mute-2">no bets yet</div>
       )}
       {c.mine > 0 && (
         <div className="mt-2.5 border-l-2 border-gilt pl-1.5 font-mono text-[9.5px] tracking-[0.06em] text-gilt">
@@ -468,18 +468,18 @@ function ActionBar({
   let pay: number;
   let payCls: string;
   if (m.canClaim) {
-    pre = "CLAIMABLE";
+    pre = "READY TO CLAIM";
     word = winner ? winner.label : "STAKE RETURNED";
     wordCls = "text-acquit";
     payLabel = "PAYOUT";
     pay = claimAmt;
     payCls = "text-acquit";
   } else {
-    pre = "ON";
+    pre = "BET ON";
     word = pickedChoice?.label ?? "—";
     wordCls = "text-cream";
     multStr = pickedChoice ? mult(pickedChoice.pool, pickedChoice.total) : null;
-    payLabel = m.bettable ? "TO WIN" : null;
+    payLabel = m.bettable ? "CAN WIN" : null;
     pay = projWin ?? 0;
     payCls = "text-gilt";
   }
@@ -491,7 +491,7 @@ function ActionBar({
           <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-mute">{pre} </span>
           <span className={["font-display text-[18px] font-semibold", wordCls].join(" ")}>{word}</span>
           {multStr && <span className="ml-1.5 font-mono text-[12px] tabular-nums text-cream-dim">{multStr}</span>}
-          {gasless && m.bettable && connected && <span className="ml-1.5 font-mono text-[9px] uppercase tracking-[0.12em] text-gilt/70">· gasless</span>}
+          {gasless && m.bettable && connected && <span className="ml-1.5 font-mono text-[9px] uppercase tracking-[0.12em] text-gilt/70">· no gas</span>}
         </div>
         {payLabel && pay > 0 && (
           <div className="shrink-0 text-right">
@@ -508,7 +508,7 @@ function ActionBar({
           disabled={busy}
           className="h-11 w-full bg-acquit font-mono text-[12px] font-semibold uppercase tracking-[0.14em] text-ink transition hover:brightness-110 disabled:opacity-60"
         >
-          {busy ? "Confirming on-chain…" : `${claimVerb} ◈${claimAmt.toFixed(2)}`}
+          {busy ? "Confirming transaction…" : `${claimVerb} ◈${claimAmt.toFixed(2)}`}
         </button>
       ) : m.bettable ? (
         !connected ? (
@@ -527,7 +527,7 @@ function ActionBar({
               disabled={busy}
               className="shrink-0 font-mono text-[10.5px] tracking-[0.04em] text-mute transition-colors hover:text-gilt disabled:opacity-60"
             >
-              play as guest →
+              Play as guest →
             </button>
           </div>
         ) : (
@@ -570,12 +570,12 @@ function ActionBar({
                 {busy
                   ? "Confirming…"
                   : !picked
-                    ? "Pick an outcome"
+                    ? "Choose an option"
                     : !(stakeNum > 0)
-                      ? "Enter a stake"
+                      ? "Enter an amount"
                       : exceeds
-                        ? "Exceeds balance"
-                        : `Wager ◈${stakeNum.toFixed(2)}`}
+                        ? "Over balance"
+                        : `Place bet ◈${stakeNum.toFixed(2)}`}
               </button>
             </div>
             {(exceeds || minting) && (
@@ -589,7 +589,7 @@ function ActionBar({
                   disabled={busy}
                   className="font-mono text-[10px] uppercase tracking-[0.1em] text-lamp transition-colors hover:text-cream disabled:opacity-60"
                 >
-                  {minting ? "Minting…" : "Get test ◈ CHIP →"}
+                  {minting ? "Minting…" : "Get test CHIP →"}
                 </button>
               </div>
             )}
@@ -679,22 +679,13 @@ export function Verdict({ api }: { api: MatchApi }) {
 
   const propMarket = (prop: PropSnapshot): BetMarket => {
     const mine = stakeByIdx.get(prop.index);
-    const authMine = (o: number) => (mine ? parseFloat(mine.stakes[o] ?? "0") : 0);
-    // Optimistic overlay: fold any just-placed local wager on THIS market into the pools + own-stake so the
-    // odds move on the click, not after the chain round-trip. Each wager keeps contributing to a field only
-    // until that field's authoritative source catches up — the server pool (basePool + amount) and the
-    // own-stake read (baseMine + amount) reconcile INDEPENDENTLY, so the book never double-counts your bet.
-    const opt = s.optimisticBets.filter((b) => b.propIdx === prop.index);
-    const mineAdd = (o: number) =>
-      opt.reduce((acc, b) => (b.outcome === o ? acc + Math.max(0, b.baseMine + b.amount - authMine(o)) : acc), 0);
-    const augPools = prop.pools.map((p, o) => {
-      const raw = parseFloat(p);
-      const add = opt.reduce((acc, b) => (b.outcome === o ? acc + Math.max(0, b.basePool + b.amount - raw) : acc), 0);
-      return String(raw + add);
-    });
-    const total = augPools.reduce((acc, p) => acc + parseFloat(p), 0).toString();
-    const myStakeFor = (o: number) => authMine(o) + mineAdd(o);
-    const myTotalStake = augPools.reduce((acc, _p, o) => acc + myStakeFor(o), 0);
+    const myStakeFor = (o: number) => (mine ? parseFloat(mine.stakes[o] ?? "0") : 0);
+    // The book renders purely from the AUTHORITATIVE pools — no optimistic overlay. A wager moves the odds
+    // only when the real pool push lands (the moment every spectator sees it), so the bar eases + flashes on
+    // genuine money movement instead of jumping on the local click and then reconciling back.
+    const pools = prop.pools;
+    const total = pools.reduce((acc, p) => acc + parseFloat(p), 0).toString();
+    const myTotalStake = pools.reduce((acc, _p, o) => acc + myStakeFor(o), 0);
     const claimed = mine?.claimed ?? false;
     const win = prop.state === "RESOLVED" ? prop.winningOutcome : undefined;
     const isVoid = prop.state === "VOID";
@@ -713,28 +704,28 @@ export function Verdict({ api }: { api: MatchApi }) {
     let choices: Choice[];
     if (prop.kind === "FACTION") {
       // The headline market — binary: outcome 1 = MAFIA wins (ACQUITTED), 0 = TOWN wins (CONVICTED).
-      title = "Faction verdict";
-      question = "Will the hidden hand walk free?";
+      title = "Faction win";
+      question = "Will Mafia win?";
       choices = [
         {
           key: "o1", eyebrow: "Mafia faction", eyebrowClass: "text-[#d98a55]",
           label: "ACQUITTED", accent: "text-[#d98a55]", bar: "bg-[#d98a55]",
-          pool: augPools[1] ?? "0", total, mine: myStakeFor(1), winner: win === 1,
+          pool: pools[1] ?? "0", total, mine: myStakeFor(1), winner: win === 1,
         },
         {
           key: "o0", eyebrow: "Town faction", eyebrowClass: "text-acquit",
           label: "CONVICTED", accent: "text-acquit", bar: "bg-acquit",
-          pool: augPools[0] ?? "0", total, mine: myStakeFor(0), winner: win === 0,
+          pool: pools[0] ?? "0", total, mine: myStakeFor(0), winner: win === 0,
         },
       ];
     } else if (prop.kind === "PLAYER_FATE") {
       const name = seatName(prop.param);
       title = `${name} · fate`;
-      question = `What becomes of ${name}?`;
+      question = `What happens to ${name}?`;
       choices = FATE_COPY.map((copy, o) => ({
         key: `o${o}`,
         ...copy,
-        pool: augPools[o] ?? "0",
+        pool: pools[o] ?? "0",
         total,
         mine: myStakeFor(o),
         winner: win === o,
@@ -744,24 +735,24 @@ export function Verdict({ api }: { api: MatchApi }) {
       // resolves from the revealed roles at settle. REAL first (the claim as stated), then BLUFF.
       const name = seatName(prop.param);
       title = `${name} · claim`;
-      question = `Is ${name}'s Detective claim real — or a bluff?`;
+      question = `Is ${name}'s Detective claim real?`;
       choices = [
         {
-          key: "o1", eyebrow: "the real detective", eyebrowClass: "text-acquit",
+          key: "o1", eyebrow: "real detective", eyebrowClass: "text-acquit",
           label: "REAL", accent: "text-acquit", bar: "bg-acquit",
-          pool: augPools[1] ?? "0", total, mine: myStakeFor(1), winner: win === 1,
+          pool: pools[1] ?? "0", total, mine: myStakeFor(1), winner: win === 1,
         },
         {
-          key: "o0", eyebrow: "a fake claim", eyebrowClass: "text-convict",
+          key: "o0", eyebrow: "fake claim", eyebrowClass: "text-convict",
           label: "BLUFF", accent: "text-convict", bar: "bg-convict",
-          pool: augPools[0] ?? "0", total, mine: myStakeFor(0), winner: win === 0,
+          pool: pools[0] ?? "0", total, mine: myStakeFor(0), winner: win === 0,
         },
       ];
     } else if (prop.kind === "MAFIA_SEAT") {
       // "Who is the Mafia?" — one outcome per seat, resolved to the Mafia seat from the revealed roles at
       // settle. A dead seat can still be unmasked as the Mafia, so every seat stays shown the whole match.
-      title = "Who is the Mafia?";
-      question = "Which player is secretly the Mafia?";
+      title = "Who is Mafia?";
+      question = "Which player is Mafia?";
       choices = [];
       for (let seat = 0; seat < prop.numOutcomes; seat++) {
         choices.push({
@@ -771,7 +762,7 @@ export function Verdict({ api }: { api: MatchApi }) {
           label: seatName(seat),
           accent: "text-convict",
           bar: "bg-convict",
-          pool: augPools[seat] ?? "0",
+          pool: pools[seat] ?? "0",
           total,
           mine: myStakeFor(seat),
           winner: win === seat,
@@ -782,13 +773,13 @@ export function Verdict({ api }: { api: MatchApi }) {
       // "no one" — differing only in framing (the day vote vs the night's kill before dawn).
       const isNight = prop.kind === "NIGHT_KILL";
       const r = prop.param; // the round this market predicts (recurring)
-      const noOne = prop.numOutcomes - 1; // the last outcome — a hung vote / a quiet night
+      const noOne = prop.numOutcomes - 1; // the last outcome — no one / a quiet night
       title = isNight ? `Night ${r} kill` : `Round ${r} vote`;
-      question = isNight ? `Who falls before dawn in night ${r}?` : `Who hangs in the round ${r} vote?`;
+      question = isNight ? `Who is killed in night ${r}?` : `Who is voted out in round ${r}?`;
       choices = [];
       for (let seat = 0; seat < noOne; seat++) {
         const aliveNow = aliveBySeat.get(seat) ?? true;
-        const seatPool = parseFloat(augPools[seat] ?? "0");
+        const seatPool = parseFloat(pools[seat] ?? "0");
         // Live: only living seats are realistic targets. Settled/past: also surface the winner and any
         // seat that drew a wager, so the resolved card and reclaimable pots are always visible.
         if (!aliveNow && win !== seat && seatPool === 0 && myStakeFor(seat) === 0) continue;
@@ -799,7 +790,7 @@ export function Verdict({ api }: { api: MatchApi }) {
           label: seatName(seat),
           accent: "text-convict",
           bar: "bg-convict",
-          pool: augPools[seat] ?? "0",
+          pool: pools[seat] ?? "0",
           total,
           mine: myStakeFor(seat),
           winner: win === seat,
@@ -807,12 +798,12 @@ export function Verdict({ api }: { api: MatchApi }) {
       }
       choices.push({
         key: `o${noOne}`,
-        eyebrow: isNight ? "a quiet night" : "a hung vote",
+        eyebrow: isNight ? "no kill" : "no vote",
         eyebrowClass: "text-acquit",
-        label: isNight ? "ALL SPARED" : "NO ONE",
+        label: isNight ? "NO KILL" : "NO ONE",
         accent: "text-acquit",
         bar: "bg-acquit",
-        pool: augPools[noOne] ?? "0",
+        pool: pools[noOne] ?? "0",
         total,
         mine: myStakeFor(noOne),
         winner: win === noOne,
@@ -822,15 +813,15 @@ export function Verdict({ api }: { api: MatchApi }) {
     const awaiting = myTotalStake > 0 ? " · awaiting settlement" : "";
     const closedText =
       prop.kind === "FACTION"
-        ? `the verdict is in · market closed${awaiting}`
+        ? `verdict in · market closed${awaiting}`
         : prop.kind === "ROUND_VOTED_OUT"
-          ? `the round ${prop.param} vote is in · market closed${awaiting}`
+          ? `round ${prop.param} vote in · market closed${awaiting}`
           : prop.kind === "NIGHT_KILL"
-            ? `dawn broke on night ${prop.param} · market closed${awaiting}`
+            ? `night ${prop.param} ended · market closed${awaiting}`
             : prop.kind === "DETECTIVE_CLAIM"
               ? `${seatName(prop.param)}'s claim · market closed${awaiting}`
               : prop.kind === "MAFIA_SEAT"
-                ? `the Mafia stands unmasked · market closed${awaiting}`
+                ? `Mafia found · market closed${awaiting}`
                 : `${seatName(prop.param)} fell · market closed${awaiting}`;
     const wonStatus = isVoid
       ? "Void · stakes returned"
@@ -838,22 +829,22 @@ export function Verdict({ api }: { api: MatchApi }) {
         ? "Settled"
         : prop.kind === "FACTION"
           ? win === 1
-            ? "The hidden hand walked · Mafia acquitted"
-            : "The Town prevailed · Mafia convicted"
+            ? "Mafia won"
+            : "Town won"
           : prop.kind === "ROUND_VOTED_OUT"
             ? win === prop.numOutcomes - 1
-              ? "Hung vote · no one fell"
+              ? "No one was voted out"
               : `${seatName(win)} was voted out`
             : prop.kind === "NIGHT_KILL"
               ? win === prop.numOutcomes - 1
-                ? "A quiet night · all spared"
-                : `${seatName(win)} fell in the night`
+                ? "No one was killed"
+                : `${seatName(win)} was killed`
               : prop.kind === "DETECTIVE_CLAIM"
                 ? win === 1
-                  ? `${seatName(prop.param)} was the real Detective`
-                  : `${seatName(prop.param)} was bluffing`
+                  ? `${seatName(prop.param)}'s claim was real`
+                  : `${seatName(prop.param)}'s claim was false`
                 : prop.kind === "MAFIA_SEAT"
-                  ? `${seatName(win)} was the Mafia`
+                  ? `${seatName(win)} was Mafia`
                   : `Fate · ${FATE_COPY[win]?.label ?? "settled"}`;
     const status = bettable
       ? null
@@ -861,13 +852,13 @@ export function Verdict({ api }: { api: MatchApi }) {
         ? claimed
           ? myWin || isVoid
             ? "Collected ✓"
-            : "Settled · your wager missed"
+            : "Settled · your prediction missed"
           : wonStatus
         : decided && open
           ? closedText
           : preOpen
-            ? "Wagers open shortly"
-            : "🔒 Market sealed";
+            ? "Bets open soon"
+            : "Market closed";
 
     const myProjWin = choices.reduce((acc, c) => acc + existingWin(c.mine, c.pool, c.total), 0);
     const pill = bettable
@@ -896,7 +887,7 @@ export function Verdict({ api }: { api: MatchApi }) {
       myProjWin,
       pill,
       canClaim,
-      claimLabel: isVoid || refundMode ? "Reclaim stake" : "Claim winnings",
+      claimLabel: isVoid || refundMode ? "Reclaim stake" : "Claim",
       doClaim: () => void (refundMode ? refundProp(prop.index) : claimProp(prop.index)),
       place: (key) => void (bettable && !busy && placePropBet(prop.index, Number(key.slice(1)), amount)),
       status,
@@ -979,7 +970,7 @@ export function Verdict({ api }: { api: MatchApi }) {
       : preMatchOpen && preMatchCountdown
         ? { key: "prematch", label: "First night in", time: preMatchCountdown.label, ms: preMatchCountdown.ms, urgent: false }
         : live && countdown
-          ? { key: "close", label: closingSoon ? "Closing" : "Wagers close in", time: countdown.label, ms: countdown.ms, urgent: closingSoon }
+          ? { key: "close", label: closingSoon ? "Closing" : "Bets close in", time: countdown.label, ms: countdown.ms, urgent: closingSoon }
           : null;
   const cdProgress = useCountdownProgress(activeCd?.key ?? null, activeCd?.ms ?? null);
 
@@ -988,7 +979,7 @@ export function Verdict({ api }: { api: MatchApi }) {
   const headStatus = live
     ? { label: `Live · Case ${caseId} · R${Math.max(1, s.round)}`, dot: "bg-lamp animate-lamppulse" }
     : preOpen || preMatchOpen
-      ? { label: `Case ${caseId} · convening`, dot: "bg-mute" }
+      ? { label: `Case ${caseId} · starting`, dot: "bg-mute" }
       : refundMode
         ? { label: `Case ${caseId} · abandoned`, dot: "bg-gilt" }
         : settled
@@ -1006,12 +997,12 @@ export function Verdict({ api }: { api: MatchApi }) {
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2.5">
             <span className={["h-1.5 w-1.5 shrink-0 rounded-full transition-colors duration-700", dotCls].join(" ")} />
-            <span className={["shrink-0 font-mono text-[12px] font-semibold uppercase tracking-[0.26em] transition-colors duration-[1400ms]", night ? "text-[#9fb2e0]" : "text-gilt"].join(" ")}>Wagers</span>
+            <span className={["shrink-0 font-mono text-[12px] font-semibold uppercase tracking-[0.26em] transition-colors duration-[1400ms]", night ? "text-[#9fb2e0]" : "text-gilt"].join(" ")}>Bets</span>
             <span className="truncate font-mono text-[9.5px] uppercase tracking-[0.14em] text-mute">{headStatus.label}</span>
           </div>
           {showBook && (
             <div className="flex shrink-0 items-baseline gap-1.5 font-mono tabular-nums">
-              <span className="text-[9px] uppercase tracking-[0.16em] text-mute-2">book</span>
+              <span className="text-[9px] uppercase tracking-[0.16em] text-mute-2">your bets</span>
               <span className="text-[12px] text-cream-dim">◈{portfolioStaked.toFixed(2)}</span>
               <span className="text-mute-2">→</span>
               <span className="text-[12px] text-gilt">◈{portfolioWin.toFixed(2)}</span>
@@ -1037,8 +1028,8 @@ export function Verdict({ api }: { api: MatchApi }) {
       {(refundMode || factionVoid) && (
         <div className="flex-none border-b border-l-2 border-gilt/50 hairline bg-gilt/[0.04] px-4 py-2 font-body text-[12px] italic leading-snug text-cream-dim">
           {factionVoid
-            ? "No verdict backed on the faction market — every stake is returned in full."
-            : "The match was abandoned before settlement — reclaim your full stake on any market you backed."}
+            ? "No result was backed on the faction market. Every stake is returned."
+            : "The match ended before settlement. Claim back your full stake on any market you backed."}
         </div>
       )}
 

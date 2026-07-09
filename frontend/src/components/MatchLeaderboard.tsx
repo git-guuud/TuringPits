@@ -7,6 +7,9 @@
  * Data is read straight from the chain (leaderboard.ts → PropBetPlaced logs + per-bettor P&L) with custom
  * handles fetched from the server; both are best-effort, so the board still renders (with pseudonyms) if
  * the name service is down. Auto-opened once per match by the Live screen; also re-openable there.
+ *
+ * The dialog itself (LeaderboardDialog) is match-agnostic — it takes an explicit matchId + terminal
+ * state — so Battle History opens it for any past battle; MatchLeaderboard is the live-match wrapper.
  */
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
@@ -27,13 +30,75 @@ function Net({ net, className = "" }: { net: number; className?: string }) {
   );
 }
 
+/** What the footer's one-tap collect needs to render — a structural subset of the store's Winnings. */
+export interface Collectable {
+  /** true → abandoned match, stakes come back via batchRefund; false → settled, batchClaim pays out. */
+  refund: boolean;
+  /** Total CHIP across every collectable market, formatted. */
+  total: string;
+  /** How many markets are in the batch — powers "across N markets". */
+  count: number;
+}
+
 export function MatchLeaderboard({ api, open, onClose }: { api: MatchApi; open: boolean; onClose: () => void }) {
   const s = api.state;
   const matchId = s.matchId;
   const marketState = s.market.state;
-  const account = s.wallet.account;
   const terminal = marketState === "SETTLED" || marketState === "REFUND";
 
+  // The connected wallet's collectable pots on THIS match (snapshotted by the store at settlement).
+  const w = api.winnings && api.winnings.matchId === matchId ? api.winnings : null;
+  // Claim, then close — "Close popup on clicking claim all". A failed claim leaves the persistent
+  // ClaimTray behind (under the modal) so nothing is stranded.
+  const collectAndClose = async () => {
+    await api.claimAllWinnings();
+    onClose();
+  };
+
+  return (
+    <LeaderboardDialog
+      open={open}
+      onClose={onClose}
+      matchId={matchId}
+      state={terminal ? (marketState as "SETTLED" | "REFUND") : null}
+      marketAddress={s.marketAddress ?? undefined}
+      verdict={verdictLabel(s)}
+      account={s.wallet.account}
+      winnings={w}
+      busy={s.tx.pending}
+      onCollect={collectAndClose}
+    />
+  );
+}
+
+/**
+ * The leaderboard modal for ANY terminal match — pass the matchId and its SETTLED/REFUND state and it
+ * reads the board itself. `state === null` (match not terminal yet) renders nothing on open, matching
+ * the old behaviour of never fetching a live match's board.
+ */
+export function LeaderboardDialog({
+  open,
+  onClose,
+  matchId,
+  state,
+  marketAddress,
+  verdict,
+  account,
+  winnings,
+  busy,
+  onCollect,
+}: {
+  open: boolean;
+  onClose: () => void;
+  matchId: number | null;
+  state: "SETTLED" | "REFUND" | null;
+  marketAddress?: string;
+  verdict: string;
+  account: string | null;
+  winnings: Collectable | null;
+  busy: boolean;
+  onCollect: () => void;
+}) {
   const [rows, setRows] = useState<LeaderRow[] | null>(null);
   const [customNames, setCustomNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
@@ -41,13 +106,13 @@ export function MatchLeaderboard({ api, open, onClose }: { api: MatchApi; open: 
   // Read the board (bettors + P&L from chain, custom handles from the server) whenever the popup opens
   // for a terminal match. Race-guarded so a stale fetch can't overwrite a newer one.
   useEffect(() => {
-    if (!open || matchId == null || !terminal) return;
+    if (!open || matchId == null || state == null) return;
     let cancelled = false;
     setLoading(true);
     setRows(null);
     void (async () => {
       try {
-        const board = await readMatchLeaderboard(matchId, marketState as "SETTLED" | "REFUND", s.marketAddress ?? undefined);
+        const board = await readMatchLeaderboard(matchId, state, marketAddress);
         if (cancelled) return;
         setRows(board);
         const names = await fetchDisplayNames(board.map((r) => r.address));
@@ -61,19 +126,9 @@ export function MatchLeaderboard({ api, open, onClose }: { api: MatchApi; open: 
     return () => {
       cancelled = true;
     };
-  }, [open, matchId, terminal, marketState, s.marketAddress]);
+  }, [open, matchId, state, marketAddress]);
 
   const nameCtx = { customNames, account, myLocalName: getLocalName(account) };
-
-  // The connected wallet's collectable pots on THIS match (snapshotted by the store at settlement).
-  const w = api.winnings && api.winnings.matchId === matchId ? api.winnings : null;
-  const busy = s.tx.pending;
-  // Claim, then close — "Close popup on clicking claim all". A failed claim leaves the persistent
-  // ClaimTray behind (under the modal) so nothing is stranded.
-  const collectAndClose = async () => {
-    await api.claimAllWinnings();
-    onClose();
-  };
 
   return (
     <AnimatePresence>
@@ -81,13 +136,13 @@ export function MatchLeaderboard({ api, open, onClose }: { api: MatchApi; open: 
         <Panel
           onClose={onClose}
           matchId={matchId}
-          verdict={verdictLabel(s)}
+          verdict={verdict}
           rows={rows}
           loading={loading}
           nameCtx={nameCtx}
-          winnings={w}
+          winnings={winnings}
           busy={busy}
-          onCollect={collectAndClose}
+          onCollect={onCollect}
         />
       )}
     </AnimatePresence>
@@ -111,7 +166,7 @@ function Panel({
   rows: LeaderRow[] | null;
   loading: boolean;
   nameCtx: Parameters<typeof resolveName>[1];
-  winnings: MatchApi["winnings"];
+  winnings: Collectable | null;
   busy: boolean;
   onCollect: () => void;
 }) {
@@ -167,7 +222,7 @@ function Panel({
               </div>
             ) : rows.length === 0 ? (
               <div className="py-14 text-center font-body text-[15px] italic text-mute">
-                No wagers were placed on this match.
+                No predictions were placed on this match.
               </div>
             ) : (
               <ul className="flex flex-col">

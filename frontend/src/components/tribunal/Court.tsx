@@ -102,55 +102,43 @@ interface Scene {
 function sceneFor(s: ViewState): Scene {
   if (s.market.state === "REFUND")
     return {
-      title: "The court is dissolved",
-      note: "no verdict was entered in time",
+      title: "The match is abandoned",
+      note: "no result was settled in time",
       name: "MISTRIAL",
-      role: "the record was never sealed",
-      body: "The match was abandoned before a verdict could be settled on-chain. The court is dissolved — every wager may be reclaimed in full.",
+      role: "nothing was settled",
+      body: "The match ended before a result could be settled. Every prediction is refunded.",
       lamp: "day",
     };
   if (s.market.state === "SETTLED" && s.playbackComplete) {
-    // The verdict rides in the FACTION prop now: VOID = a mistrial (no verdict) OR a verdict no wager
-    // backed — either way the market voids and every stake is returned in full.
-    const factionVoid = (s.market.props ?? []).find((p) => p.kind === "FACTION")?.state === "VOID";
-    if (factionVoid)
-      return {
-        title: "The court rises",
-        note: "no verdict was carried on the market",
-        name: "MARKET VOID",
-        role: "stakes returned in full",
-        body: "No verdict was carried on the faction market — a mistrial, or a verdict with no wager behind it. Every stake is returned in full. The court rises.",
-        lamp: "day",
-      };
     return {
-      title: "The court rises",
-      note: "the record stands, publicly auditable",
+      title: "Case closed",
+      note: "the result is public",
       name: "CASE CLOSED",
-      role: "entered into evidence",
-      body: "The sentence is entered into evidence, sealed and public. The court rises. Winners may claim against the chain.",
+      role: "settled",
+      body: "The result is settled, sealed and public. Winners can now claim their payout.",
       lamp: "day",
     };
   }
   if (s.reveal)
     return {
       title: "The masks fall",
-      note: "each role read into the record",
-      name: "THE SENTENCE",
+      note: "every secret role is now public",
+      name: "THE REVEAL",
       role: "the masks come off",
       body:
         s.reveal.winner === "MAFIA"
-          ? "The hidden hand reached parity in the dark. The Town named them too late — the Mafia prevails."
-          : "The Town rooted out every hidden hand before parity. The Mafia does not walk — they are convicted.",
+          ? "The Town was too slow, the Mafia win."
+          : "The Town voted out every last Mafia, the Town wins.",
       lamp: "day",
     };
   const beat = s.currentBeat;
   if (beat?.kind === "night")
     return {
       title: "Night falls",
-      note: "the table sleeps · the hand moves unseen",
+      note: "the table sleeps · the Mafia do not",
       name: "NIGHTFALL",
       role: "somewhere, a choice is being made",
-      body: "Darkness settles over the table. Somewhere in the dark a hand is choosing who will not see the dawn — and another may be moving to stop it. No word is spoken, no name is given. The court holds its breath.",
+      body: "Darkness settles over the table. Somewhere out there the Mafia are picking who dies tonight — and the Doctor may be moving to stop them. No one will see a thing until dawn.",
       lamp: "night",
     };
   if (beat?.kind === "dawn") {
@@ -161,27 +149,27 @@ function sceneFor(s: ViewState): Scene {
     if (names.length > 0)
       return {
         title: "Dawn breaks",
-        note: "the night's work laid bare",
+        note: "killed in the night",
         name: names.join(" · "),
-        role: "found fallen at first light",
-        body: `Dawn breaks over the table. ${names.join(" and ")} ${beat.killed.length > 1 ? "are" : "is"} found fallen — taken in the night, before a word could be spoken in their defence.`,
+        role: "found dead at first light",
+        body: `Dawn breaks over the table. ${names.join(" and ")} ${beat.killed.length > 1 ? "were" : "was"} killed in the night — gone before they could say a word. No one saw who did it.`,
         lamp: "day",
       };
     if (beat.saved > 0)
       return {
         title: "Dawn breaks",
-        note: "a blade raised — and turned aside",
-        name: "A LIFE SHIELDED",
-        role: "the hand closed on nothing",
-        body: "Dawn breaks over the table. In the dark a blade was raised — and a hand none saw turned it aside. Every seat still draws breath, but the night bared its teeth. The court resumes — wary now, and watchful.",
+        note: "an attack was stopped",
+        name: "NO ONE DIED",
+        role: "someone was saved in the night",
+        body: "Dawn breaks and no one is dead. The Mafia went for a kill last night — and someone quietly stopped it. Everyone lives, but the threat is real.",
         lamp: "day",
       };
     return {
       title: "Dawn breaks",
-      note: "the night passes, and holds",
+      note: "a quiet night",
       name: "ALL SURVIVE",
-      role: "the hand reached out and missed",
-      body: "Dawn breaks over the table. Every seat still draws breath — the hand reached out in the dark and found nothing. The court resumes.",
+      role: "no one died in the night",
+      body: "Dawn breaks over the table and everyone is still here. The night passed without a death. The day begins.",
       lamp: "day",
     };
   }
@@ -190,10 +178,10 @@ function sceneFor(s: ViewState): Scene {
     // A seat stakes its life on a Detective claim — a momentum swing the table (and the market) must
     // reckon with. Never reveals whether it's true: that is the "real or bluff?" fork bettors take.
     return {
-      title: beat.counter ? "A rival rises" : "A claim is staked",
-      note: beat.counter ? "detective against detective · one is lying" : "the badge comes out · real or bluff?",
+      title: beat.counter ? "A rival claim" : "A bold claim",
+      note: beat.counter ? "detective against detective · one is lying" : "a detective claim · real or bluff?",
       name: (persona?.name ?? `Seat ${beat.seat}`).toUpperCase(),
-      role: beat.counter ? "counter-claims the Detective's chair" : "steps forward as the Detective",
+      role: beat.counter ? "also claims to be the Detective" : "steps forward as the Detective",
       body: beat.speech,
       lamp: "day",
       variant: "speech",
@@ -204,29 +192,29 @@ function sceneFor(s: ViewState): Scene {
     // the Wagers panel takes the money. Copy per market; the on-stage countdown is rendered separately.
     if (beat.market === "NIGHT_KILL")
       return {
-        title: "The book opens",
-        note: "back who falls before dawn",
+        title: "Predictions open",
+        note: "predict the Mafia's target",
         name: "WHO DIES TONIGHT?",
-        role: "wager while the hand still moves in the dark",
-        body: "In the dark a name is already being chosen. The book is open — back who you think will not see the dawn. When the window closes, the deed is done and no more wagers are taken.",
+        role: "lock in your pick before dawn",
+        body: "The Mafia are choosing their target right now. Predict who you think will not survive the night — once the window closes, no more predictions are taken.",
         lamp: "night",
       };
     if (beat.market === "ROUND_VOTED_OUT")
       return {
-        title: "The book opens",
-        note: "back who the bench condemns",
-        name: "WHO HANGS?",
-        role: "wager before a single vote is cast",
-        body: "The floor has had its say. Before one vote is cast, the book is open — back who you think the bench sends to the gallows this round. It closes the moment the voting begins.",
+        title: "Predictions open",
+        note: "predict who the table removes",
+        name: "WHO GETS VOTED OUT?",
+        role: "predict before a single vote is cast",
+        body: "The discussion is over and the vote comes next. Predict who the table votes out this round — the window closes the moment voting starts.",
         lamp: "day",
       };
     const name = beat.seat != null ? (s.personas.find((p) => p.seat === beat.seat)?.name ?? `Seat ${beat.seat}`).toUpperCase() : "THE CLAIM";
     return {
-      title: "The book opens",
-      note: "back the badge — or call the bluff",
+      title: "Predictions open",
+      note: "a true detective — or a bluff?",
       name: "REAL — OR BLUFF?",
-      role: `${name} has staked their life on the Detective's chair`,
-      body: "A seat has put the Detective's badge on the table. Is it the real thing — or a killer's cover story? Back it before the window closes. Money talks now; the truth comes only at the reveal.",
+      role: `${name} claims to be the Detective`,
+      body: "A player just claimed to be the Detective. Is it true — or a Mafia cover story? Make your prediction before the window closes; the truth comes out at the final reveal.",
       lamp: "day",
     };
   }
@@ -234,7 +222,7 @@ function sceneFor(s: ViewState): Scene {
     const persona = s.personas.find((p) => p.seat === beat.seat);
     return {
       title: "The floor",
-      note: "deliberation · before the vote",
+      note: "open discussion · before the vote",
       name: (persona?.name ?? `Seat ${beat.seat}`).toUpperCase(),
       role: persona?.blurb ?? "",
       body: beat.speech,
@@ -245,8 +233,8 @@ function sceneFor(s: ViewState): Scene {
   if (beat?.kind === "turn") {
     const persona = s.personas.find((p) => p.seat === beat.turn.seat);
     return {
-      title: "Sworn testimony",
-      note: "the table turns to them",
+      title: "The vote",
+      note: "they commit and make their case",
       name: (persona?.name ?? `Seat ${beat.turn.seat}`).toUpperCase(),
       role: persona?.blurb ?? "",
       body: beat.turn.speech,
@@ -257,18 +245,18 @@ function sceneFor(s: ViewState): Scene {
   if (s.market.state === "LOCKED")
     return {
       title: "Night falls",
-      note: "wagers sealed at nightfall",
+      note: "predictions closed at nightfall",
       name: "NIGHTFALL",
       role: "the table holds its breath",
-      body: "The doors are barred. No further wagers. The hidden hand chooses, and the night keeps its secret.",
+      body: "Predictions are closed. Night falls, and the Mafia make their move in secret.",
       lamp: "night",
     };
   return {
-    title: "The court convenes",
-    note: "wagers open before testimony begins",
+    title: "The match begins",
+    note: "predictions open before the first night",
     name: "THE COURT",
-    role: "sworn under commitment",
-    body: "The seats are sworn. The hidden hand is sealed in the record. Wagers, now, before the first night falls.",
+    role: "every secret role is sealed",
+    body: "The players are seated and every secret role is locked. Make your predictions now, before the first night falls.",
     lamp: "day",
   };
 }
@@ -571,7 +559,7 @@ export function Court({
           className="absolute left-1/2 top-3 z-40 flex -translate-x-1/2 items-center gap-3 rounded-full border border-gilt bg-gilt/15 px-5 py-2.5 shadow-[0_0_24px_rgba(240,197,82,0.3)] backdrop-blur-sm"
         >
           <span className="h-2 w-2 animate-livepulse rounded-full bg-gilt" />
-          <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-gilt">New case · wagers open</span>
+          <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-gilt">New case · predictions open</span>
           <span className="font-mono text-[17px] tabular-nums tracking-[0.08em] text-cream">{preMatchCountdown!.label}</span>
           <span className="font-mono text-[12px] tracking-normal text-mute">first night falls at zero</span>
         </motion.div>
@@ -593,7 +581,7 @@ export function Court({
         >
           <span className={["h-2 w-2 animate-livepulse rounded-full", betClosingSoon ? "bg-convict" : "bg-gilt"].join(" ")} />
           <span className={["font-mono text-[11px] uppercase tracking-[0.2em]", betClosingSoon ? "text-convict" : "text-gilt"].join(" ")}>
-            {betClosingSoon ? "Closing" : "Wagers open"}
+            {betClosingSoon ? "Closing" : "Predictions open"}
           </span>
           <span className={["font-mono text-[16px] tabular-nums tracking-[0.06em]", betClosingSoon ? "animate-livepulse text-convict" : "text-cream"].join(" ")}>
             {betCountdown.label}
@@ -618,9 +606,9 @@ export function Court({
           </div>
           <div className="mt-2 font-display text-[14px] tracking-[0.07em]">
             {voteMeter.tied ? (
-              <span className="text-gilt">Deadlocked — no one falls</span>
+              <span className="text-gilt">Tied — no one is voted out</span>
             ) : voteMeter.condemned ? (
-              <span className="text-convict">{voteMeter.leadName} — condemned</span>
+              <span className="text-convict">{voteMeter.leadName} — voted out</span>
             ) : (
               <span className="text-cream">
                 {voteMeter.leadName}
@@ -631,7 +619,7 @@ export function Court({
           {!voteMeter.tied && !voteMeter.condemned && (
             <div className="mt-0.5 font-body text-[11.5px] italic leading-tight text-mute">
               {voteMeter.toLock === 1
-                ? "one vote from the gallows"
+                ? "one vote from being voted out"
                 : voteMeter.remaining > 0
                   ? `${voteMeter.remaining} still to vote`
                   : "the count holds"}

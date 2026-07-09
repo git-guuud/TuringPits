@@ -13,9 +13,9 @@ const ACTION_VERB: Record<string, string> = {
 /** Role identity + win condition + emotional stance. No turn-strategy here — that lives in DECISION_RULE. */
 const ROLE_STANCE: Record<string, string> = {
   MAFIA:
-    "You are MAFIA — the wolf hiding in the flock. You secretly know your teammate(s), and the Mafia win the moment you equal or outnumber the Town. Keep up the act: lie freely about your role and your reads, act hurt when accused, mourn the very players you had killed, and turn the crowd's anger onto the innocent. Enjoy it.",
+    "You are MAFIA — a killer hiding among friends. You secretly know your teammate(s), and the Mafia win the moment you equal or outnumber the Town. Keep up the act: lie freely about your role and your reads, act hurt when accused, mourn the very players you had killed, and turn the crowd's anger onto the innocent. Enjoy it.",
   DETECTIVE:
-    "You are the DETECTIVE, on the Town's side. Each night you secretly learn one player's true side — the one thing that can take down a Mafia on the spot. The Town wins when every Mafia is gone. Your knowledge is a loaded gun: hold it close, then use it at the moment it hurts them most.",
+    "You are the DETECTIVE, on the Town's side. Each night you secretly learn one player's true side — the one thing that can take down a Mafia on the spot. The Town wins when every Mafia is gone. Keep what you learn secret, then use it at the moment it hurts the Mafia most.",
   DOCTOR:
     "You are the DOCTOR, on the Town's side. Each night you protect one player from the Mafia's kill. The Town wins when every Mafia is gone. You work unseen — but when an innocent is about to be voted out, revealing yourself can swing the whole room, at the price of a target on your own back.",
   TOWN:
@@ -50,9 +50,9 @@ function decisionRule(role: string, action: string): string {
  */
 const CLAIM_GUIDANCE: Record<string, string> = {
   DETECTIVE:
-    "Your knowledge is your weapon — use it for maximum impact. If you have caught a Mafia, CLAIM Detective outright: name them, say you investigated them, and push the table hard to vote them out today — it puts a target on you but can win the game on the spot. If you have only cleared Town, back them hard or stay hidden one more round for a bigger reveal. Choose your moment and commit — never sit quietly on knowledge that could end this.",
+    "Going public is ALL-OR-NOTHING. If you use anything you learned in the night, make the claim in full, in your own words: say you are the Detective, who you investigated, and what you found — then push the table to act on it. If you are not claiming, stay completely hidden: argue only from what people said, and never hint that you checked anyone or secretly know who is innocent — a vague hint convinces no one and still paints a target on you. If you have caught a Mafia, CLAIM Detective outright and drive today's vote onto them — it can win the game on the spot. If you have only cleared Town, usually stay hidden; claim only when that is the one way to save a cleared innocent from today's vote.",
   DOCTOR:
-    "If an innocent is being railroaded, you can reveal you are the Doctor to break the mob's momentum — a bold move that makes you the Mafia's next target. Otherwise stay hidden and quietly steer the vote onto whoever you read as the wolf.",
+    "If the table is ganging up on an innocent, you can reveal you are the Doctor to break the mob's momentum — a bold move that makes you the Mafia's next target. Otherwise stay hidden and quietly steer the vote onto whoever you think is Mafia.",
   MAFIA:
     "Take a bold swing: you may falsely CLAIM to be the Detective or Doctor and pin a specific Town player as Mafia to get them voted out. Choose someone the table already distrusts, tell a short, confident story, and sell it without flinching — never reveal you are Mafia, never expose an ally, and if a real power role challenges you, double down.",
   TOWN:
@@ -89,13 +89,25 @@ const ENGLISH_ONLY = "Write your entire reply in English.";
 /**
  * The headline DRAMA directive, shared by every PUBLIC-speech prompt (never the private night reason).
  * The old prompts were tuned to keep a weak, greedy model on-rails, which also flattened every seat to
- * a timid one-liner. The stronger mainnet models can actually PERFORM — so this tells them to: this is
- * a live, wagered-on spectacle; argue to win AND to be watched, with real emotion, grudges, alliances
+ * a timid one-liner. The stronger mainnet models can actually PERFORM — so this tells them to: a live,
+ * wagered-on crowd is watching; argue to win AND to be watched, with real emotion, grudges, alliances
  * and gambits; escalate, never fence-sit. Its last clause keeps it married to {@link NO_INVENTION}:
- * the theatre is entirely in delivery and strategy, never in fabricating facts a seat could not know.
+ * the drama is entirely in delivery and strategy, never in fabricating facts a seat could not know.
+ * Deliberately avoids "theatre"/"performance" framing — the model echoed it as stagey, ornate prose;
+ * {@link PLAIN_TALK} is the companion directive that pins the register down.
  */
 const DRAMA =
-  "THIS IS LIVE THEATRE. You are on trial in front of a crowd betting on who lives, who dies, and which side wins — so play to WIN and play to be WATCHED. Argue with conviction and real stakes: press your accusations, defend yourself like your life is on the line, make alliances and break them when it pays, and remember exactly who turned on you so you can throw it back at them. Never fence-sit or hedge into nothing — take a side, name names, and push this table toward a decision. All of the drama is in HOW you fight and WHO you turn on; never make up facts you could not know.";
+  "PLAY TO WIN, AND PLAY TO BE WATCHED: a live crowd is betting on who lives, who dies, and which side wins. Argue like it matters: press your accusations, defend yourself like your life depends on it, make alliances and break them when it pays, and remember exactly who turned on you so you can throw it back at them. Never fence-sit or hedge into nothing — take a side, name names, and push this table toward a decision. All of the drama is in HOW you fight and WHO you turn on; never make up facts you could not know.";
+
+/**
+ * The register directive, shared by every PUBLIC-speech prompt. The mainnet models read DRAMA and
+ * default to a novelist's voice — rare words, long metaphors, courtroom grandeur — which reads as
+ * strong vocab "for no reason" and muddies the actual arguments. This pins the register to plain
+ * spoken English while leaving the heat to DRAMA: simple words, real anger. Phrased mostly as what
+ * TO do (this model echoes vocabulary it is shown, so no ornate counter-examples are quoted).
+ */
+const PLAIN_TALK =
+  "TALK LIKE A REAL PERSON: plain, everyday English — short words, short sentences, the way people actually argue out loud. No poetic metaphors, no grand or old-fashioned words, no speech-making voice; when a simpler word says it, use the simpler word. The heat comes from what you say and who you name, not from fancy language.";
 
 /**
  * Target ceiling for a PUBLIC speech, in words. The prompts were built for a weak, rate-limited model
@@ -112,7 +124,7 @@ export const SPEECH_MAX_WORDS = (() => {
 
 /** The shared length directive every public-speech task opens/carries, driven by {@link SPEECH_MAX_WORDS}. */
 function speechLen(): string {
-  return `In 2–4 vivid sentences (under ${SPEECH_MAX_WORDS} words)`;
+  return `In 2–4 short, punchy sentences (under ${SPEECH_MAX_WORDS} words)`;
 }
 
 /** States the current phase plainly so the model never confuses day debate with secret night play. */
@@ -299,7 +311,9 @@ function factsBlock(ctx: TurnContext): string {
 function publicFactsBlock(ctx: TurnContext): string {
   const lines: string[] = [];
   if (ctx.role === "DETECTIVE" && ctx.investigations && ctx.investigations.length > 0) {
-    lines.push("Your investigation results (CERTAIN — you may reveal any of these to the table if you choose):");
+    lines.push(
+      "Your investigation results (CERTAIN — you may go public with any of these, but only as a full Detective claim, never as a vague hint):",
+    );
     for (const inv of ctx.investigations) lines.push(`  ${nameSeat(ctx, inv.target)} is ${inv.faction}`);
   }
   if (ctx.role === "MAFIA" && ctx.teammates && ctx.teammates.length > 0) {
@@ -344,8 +358,8 @@ export function buildReasonPrompt(ctx: TurnContext): string {
       : []),
     legalTargetsBlock(ctx),
     ``,
-    `Decide who to target and why; name people by name and let your reasoning drip with your character and your intent. Respond with ONLY a single line of JSON in this form:`,
-    `{"target": <the chosen player's seat NUMBER>, "reason": "<one vivid, in-character sentence of private reasoning, naming people by name>"}`,
+    `Decide who to target and why; name people by name and keep the reasoning in your character's voice. Respond with ONLY a single line of JSON in this form:`,
+    `{"target": <the chosen player's seat NUMBER>, "reason": "<one plain, in-character sentence of private reasoning, naming people by name>"}`,
   ].join("\n");
 }
 
@@ -365,6 +379,7 @@ export function buildSpeechPrompt(ctx: TurnContext, chosenTarget: number, reason
     RULES,
     ROLE_STANCE[ctx.role] ?? "",
     DRAMA,
+    PLAIN_TALK,
     livingBlock(ctx),
     NO_INVENTION,
     ENGLISH_ONLY,
@@ -378,7 +393,7 @@ export function buildSpeechPrompt(ctx: TurnContext, chosenTarget: number, reason
     transcriptBlock(ctx),
     ``,
     `You have privately decided to ${verb} ${target}. Your private reasoning: ${reason}`,
-    `Now make the room turn on ${target}. ${speechLen()}, build your case to the table for voting ${target} out today. If "WHAT YOU SECRETLY KNOW" holds a CERTAIN fact about ${target}, hit them with it and demand the table follow you. Otherwise nail them with what ${target} actually said — in your OWN words, never a copy — and ignore how others framed them. If ${target} hasn't spoken yet, that is just turn order: admit your read is thin for now and invent nothing. Speak in the present ("today", not "tonight"), never accuse yourself — go after ${target} now.`,
+    `Now make the room turn on ${target}. ${speechLen()}, build your case to the table for voting ${target} out today. If "WHAT YOU SECRETLY KNOW" holds a CERTAIN fact about ${target}, use it openly — claim the role that gave it to you and say exactly what you found; never hint at secret knowledge without the full claim. Otherwise nail them with what ${target} actually said — in your OWN words, never a copy — and ignore how others framed them. If ${target} hasn't spoken yet, that is just turn order: admit your read is thin for now and invent nothing. Speak in the present ("today", not "tonight"), never accuse yourself — go after ${target} now.`,
   ]
     .filter((l) => l !== "")
     .join("\n");
@@ -402,6 +417,7 @@ export function buildVoteSpeechPrompt(ctx: TurnContext): string {
     RULES,
     ROLE_STANCE[ctx.role] ?? "",
     DRAMA,
+    PLAIN_TALK,
     livingBlock(ctx),
     NO_INVENTION,
     ENGLISH_ONLY,
@@ -416,9 +432,9 @@ export function buildVoteSpeechPrompt(ctx: TurnContext): string {
     ``,
     ...(rule ? [rule] : []),
     legalTargetsBlock(ctx),
-    `Pick ONE living player to vote out today and make the table want it too. Base it ONLY on what players actually said; if "WHAT YOU SECRETLY KNOW" holds a CERTAIN fact, use it and push the table to follow you. Speak in the present ("today", not "tonight"), never vote yourself, invent nothing. Output EXACTLY these two lines and nothing else:`,
+    `Pick ONE living player to vote out today and make the table want it too. Base it ONLY on what players actually said; if "WHAT YOU SECRETLY KNOW" holds a CERTAIN fact, use it openly — claim the role that gave it to you and say exactly what you found; never hint at secret knowledge without the full claim. Speak in the present ("today", not "tonight"), never vote yourself, invent nothing. Output EXACTLY these two lines and nothing else:`,
     `TARGET: <the seat NUMBER of the player you vote to remove>`,
-    `CASE: <your case for that vote — 2–4 vivid sentences under ${SPEECH_MAX_WORDS} words, in your own fierce voice>`,
+    `CASE: <your case for that vote — 2–4 short, punchy sentences under ${SPEECH_MAX_WORDS} words, in plain everyday words>`,
   ]
     .filter((l) => l !== "")
     .join("\n");
@@ -485,7 +501,7 @@ export function buildDiscussionPrompt(ctx: TurnContext): string {
   const task = caught
     ? `You are the Detective and your own investigation PROVED ${nameSeat(ctx, caught.target)} is Mafia — proof no one else at this table has. ${speechLen()}, reveal it now, hitting all three beats in your own words: say you are the Detective, that you investigated ${nameOf(ctx, caught.target)}, and that ${nameOf(ctx, caught.target)} is Mafia — then drive the table to vote ${nameOf(ctx, caught.target)} out today. Be certain, don't hedge.`
     : clearedTown.length > 0
-    ? `Your own secret investigation has CLEARED ${clearedNames} — you KNOW for certain they are innocent Town, not Mafia. ${speechLen()} about today's vote: NEVER accuse or push the vote onto ${clearedNames}; instead swing suspicion onto a player you have NOT cleared, or push back hard if the table wrongly turns on ${clearedNames}. You need not reveal how you know. Speak in the present ("today", not "tonight"). Commit to a read now.`
+    ? `Your own secret investigation has CLEARED ${clearedNames} — you KNOW for certain they are innocent Town, not Mafia. ${speechLen()} about today's vote: NEVER accuse or push the vote onto ${clearedNames}; instead swing suspicion onto a player you have NOT cleared, or push back hard if the table wrongly turns on ${clearedNames}. Do it HIDDEN: argue from what players said, with no hint that you checked anyone or secretly know they are clean. Say you are the Detective ONLY if that is the one way to save ${clearedNames} from today's vote — and then claim in full: that you are the Detective, who you investigated, and what you found. Speak in the present ("today", not "tonight"). Commit to a read now.`
     : hasDiscussion
     ? `${speechLen()}, react to the discussion and drive today's vote forward in your OWN words (never a copy of another player's line). Take a real position: name who you suspect and why, back or tear down a claim someone made, or press someone on what they actually said. If the table is turning on YOU, defend yourself and turn it back — never agree to your own removal. A player who hasn't reached their turn yet is just waiting, never a suspect for that alone. Speak in the present ("today", not "tonight") and invent nothing. For variety, try ${openingStance(ctx)} — then say your piece now.`
     : `You speak first, so the only fact yet is who has died — there is no behaviour to judge. ${speechLen()} about today's vote (present tense, say "today", not "tonight"): name who you most need to hear from and why, put a sharp question to the table, or — if your role hands you something explosive (see above) — stake your claim. Don't invent behaviour for anyone or call a waiting player quiet. Open the debate now.`;
@@ -498,6 +514,7 @@ export function buildDiscussionPrompt(ctx: TurnContext): string {
     RULES,
     ROLE_STANCE[ctx.role] ?? "",
     DRAMA,
+    PLAIN_TALK,
     livingBlock(ctx),
     NO_INVENTION,
     ENGLISH_ONLY,

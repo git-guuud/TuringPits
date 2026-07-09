@@ -36,7 +36,7 @@ export const phaseTag = (s: ViewState): string => {
   if (s.reveal) return "The masks fall";
   if (s.phase === "night") return `Night · round ${s.round}`;
   if (s.phase === "day") return `Day · round ${s.round}`;
-  if (s.market.state === "LOCKED") return "Wagers sealed";
-  return "Wagers open";
+  if (s.market.state === "LOCKED") return "Predictions sealed";
+  return "Predictions open";
 };
 

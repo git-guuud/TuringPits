@@ -47,7 +47,7 @@ export function TxToaster({ api }: { api: MatchApi }) {
   // A sticky "confirming" toast for the duration of an in-flight tx.
   useEffect(() => {
     if (tx.pending && pendingId.current == null) {
-      pendingId.current = push({ kind: "pending", text: "Confirming on-chain…" });
+      pendingId.current = push({ kind: "pending", text: "Confirming transaction…" });
     } else if (!tx.pending && pendingId.current != null) {
       remove(pendingId.current);
       pendingId.current = null;
@@ -58,7 +58,7 @@ export function TxToaster({ api }: { api: MatchApi }) {
   useEffect(() => {
     if (tx.lastHash && tx.lastHash !== seenHash.current && !tx.pending) {
       seenHash.current = tx.lastHash;
-      push({ kind: "success", text: "Confirmed on-chain", href: explorerTx(tx.lastHash), hash: tx.lastHash }, 7000);
+      push({ kind: "success", text: "Transaction confirmed.", href: explorerTx(tx.lastHash), hash: tx.lastHash }, 7000);
     }
   }, [tx.lastHash, tx.pending]);
 

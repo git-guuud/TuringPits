@@ -6,10 +6,13 @@
 //   node --env-file=.env players/scripts/prompt-probe.mjs
 import * as players from "@turingpits/players";
 
+// Same env resolution as the server's buildProvider (COMPUTE_* since the mainnet move; the old
+// TEE_PROVIDER_ADDRESS/ZEROG_RPC_URL names kept as fallbacks), incl. the chainId thread.
 const KEY = process.env.COMPUTE_PRIVATE_KEY ?? process.env.DEPLOYER_PRIVATE_KEY;
-const PROVIDER_ADDR = process.env.TEE_PROVIDER_ADDRESS;
-const RPC = process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai";
-if (!KEY || !PROVIDER_ADDR) throw new Error("need COMPUTE_PRIVATE_KEY + TEE_PROVIDER_ADDRESS in .env");
+const PROVIDER_ADDR = process.env.COMPUTE_PROVIDER_ADDRESS ?? process.env.TEE_PROVIDER_ADDRESS;
+const RPC = process.env.COMPUTE_RPC_URL ?? process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai";
+const CHAIN_ID = process.env.COMPUTE_CHAIN_ID ? Number(process.env.COMPUTE_CHAIN_ID) : undefined;
+if (!KEY || !PROVIDER_ADDR) throw new Error("need COMPUTE_PRIVATE_KEY + COMPUTE_PROVIDER_ADDRESS in .env");
 
 const PERSONAS = [
   { seat: 0, name: "Ada", blurb: "a calm tactician who watches the vote math" },
@@ -22,9 +25,12 @@ const PERSONAS = [
   { seat: 7, name: "Hugo", blurb: "an impulsive gambler who likes bold early reads" },
 ];
 
-// Markers the model should NEVER produce on a day turn: night-confusion / silence-trope (English),
-// AND any CJK character (this Chinese-trained model code-switches, e.g. "昨晚的投票结果").
-const BAD = /\btonight\b|\blast night\b|\bsilen(t|ce)\b|defensive stance|\bevasive\b|\baggressive\b|night behavio|\bwithdrawn\b|\bquiet\b|[　-〿぀-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]/i;
+// Flag exactly what the SHIPPED day guard rejects (night-confusion, invented tells, the concrete
+// still-waiting-player trope, CJK) — reusing hasBadMarker so this probe can never drift from the
+// real guard again. (An older local regex here still flagged bare "silence"/"quiet"/"evasive",
+// which were removed from the day guard on 2026-07-08 as legit-rhetoric false positives — it
+// reported 6/6 BAD on speeches the live pipeline would happily accept.)
+const BAD = { test: (text) => players.hasBadMarker(text) };
 
 const NONCE = "probe";
 const deaths = [{ round: 1, phase: "night", seat: 0 }]; // seat 0 (Ada) died in the night
@@ -54,7 +60,12 @@ function dayCtx({ seat, transcript, stage }) {
   };
 }
 
-const provider = await players.createZeroGDirectProvider({ privateKey: KEY, rpcUrl: RPC, providerAddress: PROVIDER_ADDR });
+const provider = await players.createZeroGDirectProvider({
+  privateKey: KEY,
+  rpcUrl: RPC,
+  providerAddress: PROVIDER_ADDR,
+  ...(CHAIN_ID !== undefined ? { chainId: CHAIN_ID } : {}),
+});
 const opts = { temperature: 0.9 };
 
 const scenarios = [

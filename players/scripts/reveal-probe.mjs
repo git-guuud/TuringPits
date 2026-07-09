@@ -1,8 +1,9 @@
 import * as players from "@turingpits/players";
-const RPC = process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai";
+const RPC = process.env.COMPUTE_RPC_URL ?? process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai";
 const KEY = process.env.COMPUTE_PRIVATE_KEY ?? process.env.DEPLOYER_PRIVATE_KEY;
-const PROVIDER_ADDR = process.env.TEE_PROVIDER_ADDRESS;
-const base = await players.createZeroGDirectProvider({ privateKey: KEY, rpcUrl: RPC, providerAddress: PROVIDER_ADDR });
+const PROVIDER_ADDR = process.env.COMPUTE_PROVIDER_ADDRESS ?? process.env.TEE_PROVIDER_ADDRESS;
+const CHAIN_ID = process.env.COMPUTE_CHAIN_ID ? Number(process.env.COMPUTE_CHAIN_ID) : undefined;
+const base = await players.createZeroGDirectProvider({ privateKey: KEY, rpcUrl: RPC, providerAddress: PROVIDER_ADDR, ...(CHAIN_ID !== undefined ? { chainId: CHAIN_ID } : {}) });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const provider = { teeSignerAddress: base.teeSignerAddress, async complete(p, o){ for(let a=0;;a++){ try { return await base.complete(p,o);} catch(e){ const m=[e?.message,e?.code].filter(Boolean).join(" ")||String(e); if(/429|fetch failed|ETIMEDOUT|timeout|auto-funding|50[234]/i.test(m)&&a<15){await sleep(/429/.test(m)?30000:10000);continue;} throw e; } } } };
 const roster = [

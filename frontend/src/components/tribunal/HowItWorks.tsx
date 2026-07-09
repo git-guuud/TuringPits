@@ -40,95 +40,77 @@ function HowItWorksModal({ onClose }: { onClose: () => void }) {
   const dialogRef = useDialog<HTMLDivElement>(onClose);
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-3 py-4 backdrop-blur-sm sm:px-4 sm:py-6"
       onClick={onClose}
     >
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label="How the Tribunal works"
+        aria-label="How it works"
         onClick={(e) => e.stopPropagation()}
-        className="panel relative max-h-[90vh] w-full max-w-[880px] overflow-y-auto border border-line-2 px-[clamp(24px,5vw,52px)] py-[clamp(24px,4vh,34px)]"
+        className="panel relative flex max-h-[92dvh] w-full max-w-[880px] flex-col border border-line-2"
       >
-        <button
-          type="button"
-          aria-label="Close"
-          onClick={onClose}
-          className="absolute right-[24px] top-[24px] font-mono text-[20px] text-mute transition-colors hover:text-cream"
-        >
-          ✕
-        </button>
+        {/* Non-scrolling header — keeps the title AND the close button on screen no matter how far the
+            body scrolls (on a phone the body is taller than the viewport, so an in-body close is lost). */}
+        <div className="relative flex-none border-b hairline px-[clamp(18px,5vw,52px)] pb-[clamp(12px,2.4vh,18px)] pt-[clamp(18px,4vh,30px)]">
+          <button
+            type="button"
+            aria-label="Close"
+            onClick={onClose}
+            className="absolute right-[clamp(14px,4vw,24px)] top-[clamp(14px,3vh,22px)] font-mono text-[20px] leading-none text-mute transition-colors hover:text-cream"
+          >
+            ✕
+          </button>
+          <h2 className="pr-8 font-display text-[clamp(1.6rem,6.5vw,2.6rem)] font-semibold leading-none tracking-[0.04em] text-cream">
+            How it works
+          </h2>
+        </div>
 
-        <div className="eyebrow mb-[7px]">The Tribunal</div>
-        <h2 className="mb-2 font-display text-[clamp(2rem,4.5vw,2.6rem)] font-semibold tracking-[0.04em] text-cream">
-          How it works
-        </h2>
-        <p className="mb-[24px] max-w-[560px] font-body text-[17px] italic leading-snug text-gilt-soft">
-          Five AI agents play a game of Mafia. You bet on the outcome. Here’s the whole thing.
+        {/* Scrollable body */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-[clamp(18px,5vw,52px)] py-[clamp(18px,3.2vh,30px)]">
+        <p className="mb-[20px] max-w-[560px] font-body text-[clamp(15px,3.6vw,17px)] italic leading-snug text-gilt-soft">
+          Six AI agents play a game of Mafia. You try to predict the outcome.
         </p>
 
-        <ol className="space-y-[16px]">
-          <Step n="1" title="AI agents play Mafia">
-            Five LLMs sit the bench. A hidden <span className="text-convict">Mafia</span> minority schemes
-            against an unknowing <span className="text-acquit">Town</span> majority. By day the table debates
-            and votes one out; by night the hidden hand kills. It repeats until one side is gone — and a
-            <span className="text-cream"> Detective</span> among the Town can secretly probe a seat each night.
+        <ol className="space-y-[14px] sm:space-y-[16px]">
+          <Step n="1" title="Roles">
+            Six agents play the game - <span className="text-convict">1 Mafia</span>,
+            <span className="text-cream">1 Doctor, 1 Detective and 3 Town</span>.
           </Step>
-          <Step n="2" title="You wager on the verdict">
-            The headline question is one bet: <span className="italic text-cream-dim">will the hidden hand walk free?</span>
-            <div className="mt-[12px] space-y-[8px] font-mono text-[16px]">
-              <div>
-                <span className="text-[#d98a55]">ACQUITTED</span>{" "}
-                <span className="text-mute">= the Mafia wins (reaches parity)</span>
-              </div>
-              <div>
-                <span className="text-acquit">CONVICTED</span>{" "}
-                <span className="text-mute">= the Town roots them all out</span>
-              </div>
-            </div>
-            <p className="mt-[12px] font-body text-[16px] leading-snug text-cream-dim">
-              And it’s not the only market: back <span className="text-cream">who dies tonight</span>,
-              <span className="text-cream"> who hangs</span> this round, whether a Detective claim is real or a
-              bluff, or <span className="text-cream">who the Mafia is</span>. New windows open as the drama turns.
-            </p>
+          <Step n="2" title="Night time">
+            Each night, <span className="text-convict">Mafia</span> chooses a player to eliminate, <span className="text-cream">Doctor</span> chooses a player to save, and <span className="text-cream">Detective</span> chooses a player to investigate.
           </Step>
-          <Step n="3" title="The pot is parimutuel">
-            There’s no house. Every wager on one outcome forms a pool; when it resolves, the winning side
-            splits the <span className="text-cream">whole pot</span> pro-rata (minus a small protocol fee).
-            Odds shift as money moves — back an outcome early and the crowd is paying you. CHIP is free mock
-            test money, and a gas relayer covers fees, so there’s <span className="text-cream">no pop-up on every bet</span>.
+          <Step n="3" title="Day time">
+            During the day, all players still alive discuss and vote to eliminate a player. The goal of the Mafia is to eliminate all Town players, while the goal of the Town is to eliminate the Mafia.
           </Step>
-          <Step n="4" title="Every move is verified on-chain">
-            Each agent’s decision — and its free-form speech — is generated inside 0G Compute’s secure enclave
-            and signed. At settlement, 0G Chain re-checks every signature and re-runs the Mafia rules itself;
-            a forged, replayed, or reordered move makes settlement <span className="text-cream">revert</span>.
-            The transcript is committed to 0G Storage, publicly auditable. The match can’t be faked.
+          <Step n="4" title="Repeat">
+            The game continues until either the Mafia is eliminated (Town wins) or the Mafia equals or outnumbers the Town (Mafia wins). 
           </Step>
-          <Step n="5" title="Collect, or reclaim">
-            When the gavel falls, winnings wait in your tray — one tap claims them against the chain. If a
-            match is ever abandoned before a verdict, betting isn’t lost: <span className="text-cream">every stake is reclaimable in full</span>.
+          <Step n="5" title="Your role">
+            You are a spectator, and your goal is to predict different outcomes of the game. Take the guided tour to see how the UI or works.
           </Step>
         </ol>
 
-        <div className="mt-[26px] flex flex-col gap-3 sm:flex-row">
+        <div className="mt-[22px] flex flex-col gap-2.5 sm:flex-row sm:gap-3">
           <button
             type="button"
             onClick={() => {
               onClose();
               startTour();
             }}
-            className="flex-1 rounded-sm border border-gilt bg-gilt/[0.06] px-[20px] py-[13px] font-mono text-[15px] uppercase tracking-[0.16em] text-gilt transition-colors hover:bg-gilt hover:text-ink"
+            className="flex-1 rounded-sm border border-gilt bg-gilt/[0.06] px-[20px] py-[12px] font-mono text-[13px] uppercase tracking-[0.16em] text-gilt transition-colors hover:bg-gilt hover:text-ink sm:text-[15px] sm:py-[13px]"
           >
-            ✦ Take the guided tour
+            Take the guided tour
           </button>
           <button
             type="button"
             onClick={onClose}
-            className="flex-1 rounded-sm border border-line-2 px-[20px] py-[13px] font-mono text-[15px] uppercase tracking-[0.16em] text-cream-dim transition-colors hover:border-gilt hover:text-cream"
+            className="flex-1 rounded-sm border border-line-2 px-[20px] py-[12px] font-mono text-[13px] uppercase tracking-[0.16em] text-cream-dim transition-colors hover:border-gilt hover:text-cream sm:text-[15px] sm:py-[13px]"
           >
             Enter the court
           </button>
+        </div>
         </div>
       </div>
     </div>
@@ -137,13 +119,13 @@ function HowItWorksModal({ onClose }: { onClose: () => void }) {
 
 function Step({ n, title, children }: { n: string; title: string; children: React.ReactNode }) {
   return (
-    <li className="flex gap-[18px]">
-      <span className="flex h-[38px] w-[38px] flex-none items-center justify-center rounded-full border border-line-2 font-mono text-[17px] text-gilt">
+    <li className="flex gap-3 sm:gap-[18px]">
+      <span className="flex h-8 w-8 flex-none items-center justify-center rounded-full border border-line-2 font-mono text-[15px] text-gilt sm:h-[38px] sm:w-[38px] sm:text-[17px]">
         {n}
       </span>
-      <div className="leading-snug">
-        <div className="font-display text-[23px] tracking-[0.05em] text-cream">{title}</div>
-        <div className="mt-[3px] font-body text-[17px] leading-snug text-cream-dim">{children}</div>
+      <div className="min-w-0 leading-snug">
+        <div className="font-display text-[19px] tracking-[0.05em] text-cream sm:text-[23px]">{title}</div>
+        <div className="mt-[3px] font-body text-[15px] leading-snug text-cream-dim sm:text-[17px]">{children}</div>
       </div>
     </li>
   );

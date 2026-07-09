@@ -43,15 +43,14 @@ const STEPS: Step[] = [
     chapter: "welcome",
     target: null,
     eyebrow: "The Usher",
-    title: "Welcome to the Tribunal",
+    title: "Welcome to Turing Pits",
     body: (
       <>
-        Five AI agents play a game of Mafia — scheming, accusing, voting one another out. Your part is
-        simple: <span className="text-cream">wager on how it ends</span>. Let me walk you through the
-        room. It takes about a minute.
+        Six AI agents play Mafia, a social deduction game where players try to find a secret killer. Your part is
+        simple: <span className="text-cream">make predictions</span>.
       </>
     ),
-    primary: "Show me around",
+    primary: "Next",
   },
   {
     chapter: "lobby",
@@ -60,9 +59,7 @@ const STEPS: Step[] = [
     title: "Sign in, just once",
     body: (
       <>
-        Wagers are placed in <span className="text-gilt">CHIP</span> — free, mock test money. Connect a
-        wallet, or play as a guest with none at all. Either way you sign in{" "}
-        <span className="text-cream">once</span> — no pop-up on every bet.
+        Connect a wallet, or play as a guest if you don't have one.
       </>
     ),
     primary: "Next",
@@ -74,8 +71,8 @@ const STEPS: Step[] = [
     title: "Stock up on CHIP",
     body: (
       <>
-        Tap <span className="text-gilt">Get test CHIP</span> and the faucet mints you a stack for free.
-        It’s play money — spend it as freely as you like.
+        Tap <span className="text-gilt">Get test CHIP</span>.
+        It’s play money - spend it freely.
       </>
     ),
     primary: "Next",
@@ -87,21 +84,20 @@ const STEPS: Step[] = [
     title: "Enter the court",
     body: (
       <>
-        This is where a live trial plays out. Open it and the next match begins streaming to you, turn
-        by turn.
+        This is where a live match plays out turn by turn.
       </>
     ),
-    primary: "Take me in",
+    primary: "Next",
   },
   {
     chapter: "court",
     target: "bench",
     eyebrow: "The Courtroom",
-    title: "The Bench — who’s on trial",
+    title: "The Bench",
     body: (
       <>
-        Every agent takes a seat. See who holds the floor, who’s drawing votes — and, at the verdict,
-        the masks fall and each true allegiance is read into the record.
+        Every agent takes a seat. See who is still alive, who’s drawing votes and, in the end,
+        the roles are revealed.
       </>
     ),
     primary: "Next",
@@ -110,11 +106,10 @@ const STEPS: Step[] = [
     chapter: "court",
     target: "court",
     eyebrow: "The Courtroom",
-    title: "The Court — the live testimony",
+    title: "The Court",
     body: (
       <>
-        Centre stage is the drama: sworn testimony, night kills, dawn reveals. Fell behind? Pause or
-        step back a beat to re-read a moment — the show waits for you.
+        Centre stage is the drama: dialogues, kills, votes. All appear here.
       </>
     ),
     primary: "Next",
@@ -123,12 +118,10 @@ const STEPS: Step[] = [
     chapter: "court",
     target: "wagers",
     eyebrow: "The Courtroom",
-    title: "The Wagers — the book",
+    title: "The Predictions",
     body: (
       <>
-        Every market lives here: the headline verdict —{" "}
-        <span className="italic text-cream-dim">will the hidden hand walk free?</span> — plus who dies
-        tonight, who hangs, and more. The odds shift live as the crowd bets.
+        Every market lives here. Make predictions, see the odds shift as the crowd predicts.
       </>
     ),
     primary: "Next",
@@ -137,24 +130,10 @@ const STEPS: Step[] = [
     chapter: "court",
     target: "bet",
     eyebrow: "The Courtroom",
-    title: "Place a wager",
+    title: "Place a prediction",
     body: (
       <>
-        Pick an outcome, set your stake, confirm. The pot is <span className="text-cream">parimutuel</span>{" "}
-        — everyone on the winning side splits it pro-rata, settled on-chain. That’s the whole move.
-      </>
-    ),
-    primary: "Next",
-  },
-  {
-    chapter: "court",
-    target: "tray",
-    eyebrow: "The Courtroom",
-    title: "Collect your winnings",
-    body: (
-      <>
-        When the gavel falls, your winnings wait in this tray — one tap claims them against the chain. If
-        a match is ever abandoned, your stake is always reclaimable in full.
+        Pick an outcome, set your amount, confirm. That’s the whole move.
       </>
     ),
     primary: "Next",
@@ -166,21 +145,7 @@ const STEPS: Step[] = [
     title: "Back to the lobby",
     body: (
       <>
-        Seen enough? The back arrow, top-left, steps you out of the court and returns you to the lobby —
-        the match keeps running without you.
-      </>
-    ),
-    primary: "Take me back",
-  },
-  {
-    chapter: "lobby",
-    target: null,
-    eyebrow: "The Lobby",
-    title: "Back at the lobby",
-    body: (
-      <>
-        And here you are — back at the lobby, the hub every screen hangs off. Watch a match, top up on
-        CHIP, or open your record.
+        The back arrow, takes you back to the lobby the match keeps running.
       </>
     ),
     primary: "Next",
@@ -192,22 +157,8 @@ const STEPS: Step[] = [
     title: "Your record",
     body: (
       <>
-        Every battle you’ve wagered on lives under <span className="text-cream">Battle History</span>.
-        Open it to revisit any past trial.
-      </>
-    ),
-    primary: "Open the record",
-  },
-  {
-    chapter: "history",
-    target: "record",
-    eyebrow: "The Record",
-    title: "Missed a match? Nothing’s lost",
-    body: (
-      <>
-        Claim winnings you never collected — and open each match’s{" "}
-        <span className="text-gilt">0G Storage</span> evidence: the full transcript and personas, publicly
-        auditable.
+        Every battle is recorded in <span className="text-cream">Battle History</span>.
+        Open it to see results of any past match.
       </>
     ),
     primary: "Next",
@@ -223,7 +174,7 @@ const STEPS: Step[] = [
         any time you want them. I’ll leave you at the lobby — enter the court whenever you’re ready.
       </>
     ),
-    primary: "To the lobby",
+    primary: "Done!",
   },
 ];
 
@@ -452,15 +403,6 @@ export function Onboarding() {
           />
         ))}
 
-      {/* Persistent escape hatch — the usher never traps you. */}
-      <button
-        type="button"
-        onClick={close}
-        className="absolute right-4 top-4 z-40 flex items-center gap-2 rounded-full border border-line-2 bg-ink-2/90 px-3.5 py-1.5 font-mono text-[11px] uppercase tracking-[0.16em] text-mute backdrop-blur transition-colors hover:border-gilt hover:text-gilt"
-      >
-        Skip tour <span aria-hidden className="text-[13px] leading-none">✕</span>
-      </button>
-
       {/* The coach card — the usher's aside. Slides between focuses; content crossfades per step. */}
       <motion.div
         ref={cardRef}
@@ -474,6 +416,14 @@ export function Onboarding() {
       >
         {/* a hairline gilt seam at the top edge, like a case-file rule */}
         <span aria-hidden className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-gilt/60 to-transparent" />
+        <button
+          type="button"
+          onClick={close}
+          aria-label="Skip tour"
+          className="absolute right-3 top-3 z-40 font-mono text-[18px] leading-none text-mute backdrop-blur transition-colors hover:border-gilt hover:text-gilt"
+        >
+          ✕
+        </button>
         <AnimatePresence mode="wait">
           <motion.div
             key={i}
@@ -483,13 +433,6 @@ export function Onboarding() {
             transition={{ duration: 0.22 }}
             className="px-[26px] py-[22px]"
           >
-            <div className="mb-3 flex items-center gap-2.5">
-              <LanternSeal />
-              <span className="eyebrow">{step.eyebrow}</span>
-              <span className="ml-auto font-mono text-[10px] tracking-[0.14em] text-mute-2">
-                {i + 1} <span className="text-line-2">/</span> {total}
-              </span>
-            </div>
             <h2 className="font-display text-[27px] font-semibold leading-[1.08] tracking-[0.02em] text-cream">{step.title}</h2>
             <p className="mt-2.5 font-body text-[16.5px] leading-snug text-cream-dim">{step.body}</p>
 
@@ -555,12 +498,12 @@ function MockLobby({ register, step }: { register: (id: Target) => (el: HTMLElem
   return (
     <main className="flex h-full w-full flex-col items-center justify-center px-6">
       <div className="w-full max-w-[720px] text-center">
-        <div className="eyebrow mb-2">The People v. The Hidden Hand</div>
+        <div className="eyebrow mb-2">The People v/s The Hidden Hand</div>
         <h1 className="font-display text-[clamp(2rem,7vw,3.25rem)] font-semibold uppercase leading-none tracking-[0.4em] text-cream">
           Turing Pits
         </h1>
         <div className="mt-3 font-body text-[16px] italic text-gilt-soft">
-          AI agents play Mafia. Every move is TEE-verified and settled on-chain. You wager on the verdict.
+          AI agents play Mafia. You predict the verdict.
         </div>
 
         <div className="mt-8 grid grid-cols-1 gap-px bg-line sm:grid-cols-2">
@@ -568,7 +511,7 @@ function MockLobby({ register, step }: { register: (id: Target) => (el: HTMLElem
             <div className="eyebrow mb-3">The arena</div>
             <div className="font-display text-[26px] tracking-[0.06em] text-cream">Enter the Court</div>
             <div className="mt-2 font-body text-[14px] leading-snug text-cream-dim">
-              Watch a live match unfold and wager on whether the hidden hand walks free.
+              Watch a live match unfold and make predictions.
             </div>
             <div className="mt-4 flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em] text-gilt">
               <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-convict animate-livepulse" />
@@ -580,7 +523,7 @@ function MockLobby({ register, step }: { register: (id: Target) => (el: HTMLElem
             <div className="eyebrow mb-3">The record</div>
             <div className="font-display text-[26px] tracking-[0.06em] text-cream">Battle History</div>
             <div className="mt-2 font-body text-[14px] leading-snug text-cream-dim">
-              Every past battle, its on-chain verdict, and any winnings left to collect.
+              Every past battle, its verdict, and winnings.
             </div>
             <div className="mt-5 font-mono text-[12px] uppercase tracking-[0.16em] text-gilt">Browse history ›</div>
           </div>
@@ -590,10 +533,10 @@ function MockLobby({ register, step }: { register: (id: Target) => (el: HTMLElem
         <div className="panel hairline mx-auto mt-8 w-full max-w-[440px] border px-6 py-5">
           {!connected ? (
             <div className="text-center">
-              <div className="font-display text-[22px] tracking-[0.04em] text-cream">Connect to wager</div>
+              <div className="font-display text-[22px] tracking-[0.04em] text-cream">Connect to predict</div>
               <p className="mx-auto mt-1.5 max-w-[360px] font-body text-[13.5px] leading-snug text-cream-dim">
-                CHIP is free mock test money. Connect once, then place wagers with{" "}
-                <span className="text-cream">no pop-up on every bet</span>.
+                CHIP is free mock test money. Connect once, then place predictions with{" "}
+                <span className="text-cream">no pop-up on every prediction</span>.
               </p>
               <div
                 ref={register("connect")}
@@ -621,12 +564,8 @@ function MockLobby({ register, step }: { register: (id: Target) => (el: HTMLElem
                 </span>
               </div>
               <div className="mt-4 border-t border-line pt-4">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-cream-dim">Gas-free betting</span>
-                  <span className="rounded-full border border-gilt/60 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-gilt">On</span>
-                </div>
                 <p className="mt-1.5 font-body text-[13px] leading-snug text-mute">
-                  You’re signed in, so the relayer covers gas — every wager is instant.
+                  You’re signed in
                 </p>
               </div>
             </div>
@@ -718,8 +657,8 @@ function MockCourt({
         />
       </div>
       <div className="relative z-10 flex flex-1 flex-col items-center justify-center px-6 py-8 text-center">
-        <div className="font-mono text-[12px] uppercase tracking-[0.3em] text-gilt">Sworn testimony</div>
-        <div className="mt-1 font-body text-[15px] italic text-mute">the table turns to them</div>
+        <div className="font-mono text-[12px] uppercase tracking-[0.3em] text-gilt">The vote</div>
+        <div className="mt-1 font-body text-[15px] italic text-mute">they commit and make their case</div>
         <h2
           className="mt-4 font-display text-[clamp(1.75rem,4vw,2.5rem)] font-bold leading-none tracking-[0.18em] text-cream"
           style={{ textShadow: "0 2px 30px rgba(240,197,82,.18)" }}
@@ -729,7 +668,7 @@ function MockCourt({
         <div className="mt-2 font-body text-[15px] italic text-gilt-soft">— the prosecutor —</div>
         <blockquote className="mt-5 max-w-[30rem] font-body text-[clamp(1.15rem,2.6vw,1.6rem)] leading-[1.5] text-cream">
           <span aria-hidden className="mr-1 align-[-0.25em] font-display text-[1.4em] leading-[0] text-gilt-soft">“</span>
-          Cato has dodged every question about last night. I say the hand at this table is his.
+          Cato has dodged every question about last night. I think he is Mafia — and my vote says so.
           <span aria-hidden className="ml-1 align-[-0.25em] font-display text-[1.4em] leading-[0] text-gilt-soft">”</span>
         </blockquote>
         <div className="mt-4 font-mono text-[12px] uppercase tracking-[0.22em] text-gilt">▸ votes to convict CATO</div>
@@ -747,7 +686,7 @@ function MockCourt({
   const wagers = (
     <aside ref={register("wagers")} className="panel flex min-h-0 flex-col overflow-hidden px-5 py-5">
       <div className="mb-4 flex items-center gap-2.5 border-b hairline pb-3 font-mono text-[15px] uppercase tracking-[0.24em] text-mute">
-        Wagers
+        Predictions
         <span className="inline-flex items-center gap-1.5 rounded-sm border border-gilt/40 px-2 py-0.5 font-mono text-[11.5px] uppercase tracking-[0.14em] text-gilt">
           <span className="h-1.5 w-1.5 rounded-full bg-current" />
           Open
@@ -755,7 +694,7 @@ function MockCourt({
       </div>
 
       <div className="mb-3 flex items-baseline justify-between border-l-2 border-gilt/50 bg-gilt/[0.05] px-3.5 py-2.5">
-        <span className="font-mono text-[14px] uppercase tracking-[0.16em] text-mute">Wagers close in</span>
+        <span className="font-mono text-[14px] uppercase tracking-[0.16em] text-mute">Predictions close in</span>
         <span className="font-mono text-[26px] tabular-nums tracking-[0.08em] text-gilt">01:48</span>
       </div>
 
@@ -788,7 +727,7 @@ function MockCourt({
                 picked ? "border-gilt bg-gilt/[0.06] text-gilt" : "border-line text-mute",
               ].join(" ")}
             >
-              {picked ? "Wager ◈25 → win ◈61" : "Pick an outcome to wager"}
+              {picked ? "Predict ◈25 → win ◈61" : "Pick an outcome to predict"}
             </div>
             <AnimatePresence>
               {picked && (
@@ -798,7 +737,7 @@ function MockCourt({
                   transition={{ delay: 0.5 }}
                   className="mt-2.5 text-center font-mono text-[13px] tracking-[0.08em] text-acquit"
                 >
-                  ✓ Confirmed on-chain · 0x9f…c2a ↗
+                  ✓ Confirmed · 0x9f…c2a ↗
                 </motion.div>
               )}
             </AnimatePresence>
@@ -934,9 +873,6 @@ function MockHistory({ register }: { register: (id: Target) => (el: HTMLElement 
         <h1 className="font-display text-[clamp(2rem,5vw,2.5rem)] font-semibold uppercase leading-none tracking-[0.18em] text-cream">
           Battle History
         </h1>
-        <div className="mt-2 font-body text-[15px] italic text-gilt-soft">
-          Every battle, read straight from the chain · newest first
-        </div>
       </header>
 
       <div className="mt-4 border border-gilt/40 bg-gilt/[0.05] px-4 py-3">
@@ -993,7 +929,7 @@ function MockHistory({ register }: { register: (id: Target) => (el: HTMLElement 
             <div className="font-display text-[20px] tracking-[0.08em] text-acquit">Convicted</div>
             <div className="mt-0.5 font-mono text-[11px] tracking-[0.06em] text-mute">5 seats · pot ◈ 180.00</div>
           </div>
-          <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">Wagered</span>
+          <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-mute">Staked</span>
         </li>
       </ul>
     </main>
