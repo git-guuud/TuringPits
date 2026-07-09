@@ -13,6 +13,7 @@ import { Contract, JsonRpcProvider, Wallet, ZeroHash, formatEther } from "ethers
 import { assignRoles, commitRoles, generateSalt } from "@turingpits/engine";
 import { toSettlementMove } from "@turingpits/players/dist/match.js";
 import { withRetry, isTransientError } from "@turingpits/players/dist/retry.js";
+import { recoverMinedRevertReason } from "./revert-reason.js";
 import { MAFIA_MARKET_ABI, ROLE_ENUM, marketStateOf, propStateOf } from "./abi.js";
 import { toPublicState, toPublicTurn } from "./redact.js";
 import { gateTurn, newNightGate } from "./night.js";
@@ -225,11 +226,13 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts, 
   const bps = cfg.blocksPerSecond;
   console.log(`[orch] assuming ${bps} blocks/sec (fixed — 0G block time is a stable ~0.5s)`);
 
-  // open margin must only outlast createMatch's own tx inclusion (~1-2 blocks on 0G): the head is
-  // sampled immediately before the create tx, so no other prework can eat into it. A 10-block
-  // (~5s) floor keeps a comfortable cushion — the "open in past" retry below covers a rare miss.
+  // open margin must outlast createMatch's whole send pipeline, not just inclusion: between the
+  // head sample and the tx landing sit several sequential RPC round-trips (estimateGas, fee data,
+  // nonce, broadcast) plus 1-2 blocks of inclusion — measured ~13 blocks (~6.5s) on a slow RPC
+  // moment, which beat the old 10-block (~5s) floor and reverted "open in past". A 24-block
+  // (~12s) floor still costs nothing against the betting window; the retry below covers a miss.
   // The betting window is sized so it lasts ~bettingWindowSeconds of wall-clock; deadline is huge.
-  const openMargin = Math.max(10, Math.ceil(bps * cfg.openLeadSeconds));
+  const openMargin = Math.max(24, Math.ceil(bps * cfg.openLeadSeconds));
   const windowBlocks = Math.max(MIN_BETTING_WINDOW + 1, Math.ceil(bps * cfg.bettingWindowSeconds));
 
   let bettingOpenBlock = 0, bettingCloseBlock = 0, matchStartBlock = 0, settlementDeadlineBlock = 0;
@@ -257,30 +260,48 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts, 
     settlementDeadlineBlock,
     feeBps: cfg.feeBps,
   });
-  // Sample the head at the LAST moment — nothing slow may run between here and the create tx. The
-  // margin is only ~10 blocks (~5s), sized for tx inclusion alone; prework used to run after this
-  // sample and stale it (a >15s storage upload pushed bettingOpenBlock into the past, tripping the
-  // "open in past" retry and doubling the wait for no reason).
-  computeSchedule(openMargin, await head());
-
   // Retry "open in past": if the chain out-ran our open block during tx inclusion, recompute
-  // against the live head with a doubled margin and try again.
+  // against the live head with a doubled margin and try again. The schedule is recomputed from a
+  // fresh head sample on EVERY send — including rpc()'s internal transient retries — because a
+  // retry even a few seconds later would re-send an already-stale bettingOpenBlock. Nothing slow
+  // may run between the head sample and the create tx (prework used to sit in between and stale
+  // it: a >15s storage upload once pushed bettingOpenBlock into the past for no reason).
   const tCreate = Date.now();
   let createRcpt: any = null;
   let margin = openMargin;
   for (let attempt = 1; attempt <= 4; attempt++) {
     try {
       createRcpt = await rpc("createMatch", async () => {
+        computeSchedule(margin, await head());
         const createTx = await market.getFunction("createMatch")(buildParams());
         return createTx.wait();
       });
       break;
     } catch (e) {
+      // The race can lose on either side of the send: estimateGas rejects with a proper reason
+      // string, but a tx that passes estimation and then mines as status-0 carries NO reason
+      // (ethers reason=null) — recover it by replaying the call at the parent block. An
+      // unrecoverable mined revert is retried as if open-in-past (the contract's only
+      // time-sensitive require); if the true cause persists, the next attempt's estimateGas
+      // rejects it with the real reason and fails fast before another tx is mined.
       const msg = (e as Error).message ?? "";
-      if (!msg.includes("open in past") || attempt === 4) throw e;
+      const mined = (e as { receipt?: { status?: null | number } }).receipt?.status === 0;
+      const reason = msg.includes("open in past")
+        ? "open in past"
+        : mined
+          ? await recoverMinedRevertReason(e, provider)
+          : undefined;
+      const retryable = reason === "open in past" || (mined && reason === undefined);
+      if (!retryable || attempt === 4) {
+        // Surface a recovered reason — the raw ethers error for a mined revert is opaque.
+        throw reason && !msg.includes(reason)
+          ? new Error(`createMatch reverted "${reason}"`, { cause: e })
+          : e;
+      }
       margin *= 2;
-      computeSchedule(margin, await head());
-      console.warn(`[orch] "open in past" — retrying with openMargin=${margin}, open=${bettingOpenBlock}`);
+      console.warn(
+        `[orch] createMatch "${reason ?? "open in past (assumed — mined revert, no reason)"}" — retrying with openMargin=${margin}`,
+      );
     }
   }
 

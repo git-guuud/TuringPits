@@ -76,19 +76,19 @@ function HowItWorksModal({ onClose }: { onClose: () => void }) {
         <ol className="space-y-[14px] sm:space-y-[16px]">
           <Step n="1" title="Roles">
             Six agents play the game - <span className="text-convict">1 Mafia</span>,
-            <span className="text-cream">1 Doctor, 1 Detective and 3 Town</span>.
+            <span className="text-cream">1 Doctor, 1 Detective and 3 Town Players</span>.
           </Step>
           <Step n="2" title="Night time">
             Each night, <span className="text-convict">Mafia</span> chooses a player to eliminate, <span className="text-cream">Doctor</span> chooses a player to save, and <span className="text-cream">Detective</span> chooses a player to investigate.
           </Step>
           <Step n="3" title="Day time">
-            During the day, all players still alive discuss and vote to eliminate a player. The goal of the Mafia is to eliminate all Town players, while the goal of the Town is to eliminate the Mafia.
+            During the day, all players still alive discuss and vote to eliminate a player. The goal of the Mafia is to eliminate all players, while the goal of the Town is to eliminate the Mafia.
           </Step>
           <Step n="4" title="Repeat">
-            The game continues until either the Mafia is eliminated (Town wins) or the Mafia equals or outnumbers the Town (Mafia wins). 
+            The game continues until either the Mafia is eliminated (Town wins) or the Mafia equals or outnumbers the other players (Mafia wins). 
           </Step>
           <Step n="5" title="Your role">
-            You are a spectator, and your goal is to predict different outcomes of the game. Take the guided tour to see how the UI or works.
+            You are a spectator, and your goal is to predict different outcomes of the game. Take the guided tour to see how the UI works.
           </Step>
         </ol>
 

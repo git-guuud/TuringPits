@@ -171,7 +171,7 @@ function OutcomeCard({
           </div>
         </>
       ) : (
-        <div className="mt-2 font-mono text-[10px] tracking-[0.08em] text-mute-2">no bets yet</div>
+        <div className="mt-2 font-mono text-[10px] tracking-[0.08em] text-mute-2">no wagers yet</div>
       )}
       {c.mine > 0 && (
         <div className="mt-2.5 border-l-2 border-gilt pl-1.5 font-mono text-[9.5px] tracking-[0.06em] text-gilt">
@@ -857,7 +857,7 @@ export function Verdict({ api }: { api: MatchApi }) {
         : decided && open
           ? closedText
           : preOpen
-            ? "Bets open soon"
+            ? "Market open soon"
             : "Market closed";
 
     const myProjWin = choices.reduce((acc, c) => acc + existingWin(c.mine, c.pool, c.total), 0);
@@ -914,14 +914,15 @@ export function Verdict({ api }: { api: MatchApi }) {
     if (i > 0) markets.unshift(markets.splice(i, 1)[0]!);
   }
   const defaultKey = (markets.find((mk) => mk.canClaim) ?? markets.find((mk) => mk.bettable) ?? markets[0])?.key ?? null;
+  // A betting window auto-expands its market ONCE when it opens (see the effect below) instead of pinning
+  // the panel to it — after that the spectator can collapse it or open another market freely while the
+  // window's clock still runs. The expansion is just a normal `openKey`, so the user's toggle always wins.
   const effectiveOpen =
-    windowKey && markets.some((mk) => mk.key === windowKey)
-      ? windowKey
-      : openKey === "__none__"
-        ? null
-        : openKey && markets.some((mk) => mk.key === openKey)
-          ? openKey
-          : defaultKey;
+    openKey === "__none__"
+      ? null
+      : openKey && markets.some((mk) => mk.key === openKey)
+        ? openKey
+        : defaultKey;
   const toggle = (key: string) => setOpenKey(key === effectiveOpen ? "__none__" : key);
   const openMarket = markets.find((mk) => mk.key === effectiveOpen) ?? null;
 
@@ -939,10 +940,15 @@ export function Verdict({ api }: { api: MatchApi }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveOpen]);
 
-  // When a betting window opens, snap the list back to the top so its freshly-hoisted, auto-expanded
-  // market is in view (it may have been scrolled past). Keyed on windowKey → fires once per window.
+  // When a betting window opens, expand its market and snap the list back to the top so the freshly-
+  // hoisted market is in view (it may have been scrolled past) — ONCE. After that the spectator can
+  // collapse it or open another market freely; the window no longer holds the panel on its market until
+  // the clock runs out. Keyed on windowKey → fires once per window.
   useEffect(() => {
-    if (windowKey) listRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    if (windowKey) {
+      setOpenKey(windowKey);
+      listRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    }
   }, [windowKey]);
 
   const balance = s.wallet.balance != null ? parseFloat(s.wallet.balance) : null;
@@ -970,7 +976,7 @@ export function Verdict({ api }: { api: MatchApi }) {
       : preMatchOpen && preMatchCountdown
         ? { key: "prematch", label: "First night in", time: preMatchCountdown.label, ms: preMatchCountdown.ms, urgent: false }
         : live && countdown
-          ? { key: "close", label: closingSoon ? "Closing" : "Bets close in", time: countdown.label, ms: countdown.ms, urgent: closingSoon }
+          ? { key: "close", label: closingSoon ? "Closing" : "Market close in", time: countdown.label, ms: countdown.ms, urgent: closingSoon }
           : null;
   const cdProgress = useCountdownProgress(activeCd?.key ?? null, activeCd?.ms ?? null);
 
@@ -997,12 +1003,12 @@ export function Verdict({ api }: { api: MatchApi }) {
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2.5">
             <span className={["h-1.5 w-1.5 shrink-0 rounded-full transition-colors duration-700", dotCls].join(" ")} />
-            <span className={["shrink-0 font-mono text-[12px] font-semibold uppercase tracking-[0.26em] transition-colors duration-[1400ms]", night ? "text-[#9fb2e0]" : "text-gilt"].join(" ")}>Bets</span>
+            <span className={["shrink-0 font-mono text-[12px] font-semibold uppercase tracking-[0.26em] transition-colors duration-[1400ms]", night ? "text-[#9fb2e0]" : "text-gilt"].join(" ")}>Markets</span>
             <span className="truncate font-mono text-[9.5px] uppercase tracking-[0.14em] text-mute">{headStatus.label}</span>
           </div>
           {showBook && (
             <div className="flex shrink-0 items-baseline gap-1.5 font-mono tabular-nums">
-              <span className="text-[9px] uppercase tracking-[0.16em] text-mute-2">your bets</span>
+              <span className="text-[9px] uppercase tracking-[0.16em] text-mute-2">your holding</span>
               <span className="text-[12px] text-cream-dim">◈{portfolioStaked.toFixed(2)}</span>
               <span className="text-mute-2">→</span>
               <span className="text-[12px] text-gilt">◈{portfolioWin.toFixed(2)}</span>

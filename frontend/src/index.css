@@ -33,6 +33,18 @@
   }
   .panel { background: #131009; }
   .hairline { border-color: #2c2417; }
+  /* Chamfered "cut-corner" panel silhouette used by the lobby cards and wallet bar. Layer an outer
+     `.oct` (gilt background, 1px padding) over an inner `.oct` (ink background) to get a gilt hairline
+     border that follows the octagon. Anything that must overhang the edge (a floating medallion) has to
+     be a sibling OUTSIDE the clipped box — clip-path clips overflow. */
+  .oct {
+    clip-path: polygon(
+      16px 0, calc(100% - 16px) 0,
+      100% 16px, 100% calc(100% - 16px),
+      calc(100% - 16px) 100%, 16px 100%,
+      0 calc(100% - 16px), 0 16px
+    );
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

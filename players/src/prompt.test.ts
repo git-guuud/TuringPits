@@ -527,6 +527,29 @@ describe("drama directive & speech budget", () => {
     }
   });
 
+  it("injects the GAME-not-real-life frame into every PUBLIC-speech prompt (kills the grief register)", () => {
+    for (const p of [
+      buildSpeechPrompt(base, 3, "x"),
+      buildVoteSpeechPrompt(base),
+      buildDiscussionPrompt({ ...base, stage: "discussion" }),
+    ]) {
+      expect(p).toContain("THIS IS A GAME, NOT REAL LIFE");
+      expect(p).toContain("no grief, no mourning");
+    }
+  });
+
+  it("no longer tells the MAFIA to MOURN its victims (grief-register regression guard)", () => {
+    const p = buildReasonPrompt(mafiaCtx).toLowerCase();
+    expect(p).toContain("lie");        // the deception licence survives
+    expect(p).not.toContain("mourn");  // but the mourn-your-victims grief cue is gone
+  });
+
+  it("frames the DRAMA stakes as getting voted out / surviving the night, not living vs dying", () => {
+    const p = buildSpeechPrompt(base, 3, "x");
+    expect(p).toContain("who gets voted out, who survives the night");
+    expect(p).not.toContain("who lives, who dies");
+  });
+
   it("keeps DRAMA out of the PRIVATE night reason (audit text, not performance)", () => {
     const night: TurnContext = {
       ...base, role: "MAFIA", teammates: [4],

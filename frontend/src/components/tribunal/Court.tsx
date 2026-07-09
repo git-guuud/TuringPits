@@ -128,7 +128,7 @@ function sceneFor(s: ViewState): Scene {
       body:
         s.reveal.winner === "MAFIA"
           ? "The Town was too slow, the Mafia win."
-          : "The Town voted out every last Mafia, the Town wins.",
+          : "The Town voted out the Mafia, the Town wins.",
       lamp: "day",
     };
   const beat = s.currentBeat;
@@ -138,7 +138,7 @@ function sceneFor(s: ViewState): Scene {
       note: "the table sleeps · the Mafia do not",
       name: "NIGHTFALL",
       role: "somewhere, a choice is being made",
-      body: "Darkness settles over the table. Somewhere out there the Mafia are picking who dies tonight — and the Doctor may be moving to stop them. No one will see a thing until dawn.",
+      body: "Darkness settles over the table. Somewhere out there the Mafia is picking who dies tonight and the Doctor may be moving to stop them. No one will see a thing until dawn.",
       lamp: "night",
     };
   if (beat?.kind === "dawn") {
@@ -152,7 +152,7 @@ function sceneFor(s: ViewState): Scene {
         note: "killed in the night",
         name: names.join(" · "),
         role: "found dead at first light",
-        body: `Dawn breaks over the table. ${names.join(" and ")} ${beat.killed.length > 1 ? "were" : "was"} killed in the night — gone before they could say a word. No one saw who did it.`,
+        body: `Dawn breaks over the table. ${names.join(" and ")} ${beat.killed.length > 1 ? "were" : "was"} killed in the night. No one saw who did it.`,
         lamp: "day",
       };
     if (beat.saved > 0)
@@ -161,7 +161,7 @@ function sceneFor(s: ViewState): Scene {
         note: "an attack was stopped",
         name: "NO ONE DIED",
         role: "someone was saved in the night",
-        body: "Dawn breaks and no one is dead. The Mafia went for a kill last night — and someone quietly stopped it. Everyone lives, but the threat is real.",
+        body: "Dawn breaks and no one is dead. The Mafia went for a kill but the doctor stopped it. Everyone lives, but the threat is real.",
         lamp: "day",
       };
     return {
@@ -196,7 +196,7 @@ function sceneFor(s: ViewState): Scene {
         note: "predict the Mafia's target",
         name: "WHO DIES TONIGHT?",
         role: "lock in your pick before dawn",
-        body: "The Mafia are choosing their target right now. Predict who you think will not survive the night — once the window closes, no more predictions are taken.",
+        body: "The Mafia is choosing their target right now. Predict who you think will not survive the night.",
         lamp: "night",
       };
     if (beat.market === "ROUND_VOTED_OUT")
@@ -205,16 +205,16 @@ function sceneFor(s: ViewState): Scene {
         note: "predict who the table removes",
         name: "WHO GETS VOTED OUT?",
         role: "predict before a single vote is cast",
-        body: "The discussion is over and the vote comes next. Predict who the table votes out this round — the window closes the moment voting starts.",
+        body: "The discussion is over and the vote comes next. Predict who the table votes out this round.",
         lamp: "day",
       };
     const name = beat.seat != null ? (s.personas.find((p) => p.seat === beat.seat)?.name ?? `Seat ${beat.seat}`).toUpperCase() : "THE CLAIM";
     return {
       title: "Predictions open",
-      note: "a true detective — or a bluff?",
-      name: "REAL — OR BLUFF?",
+      note: "a true detective or a bluff?",
+      name: "REAL OR BLUFF?",
       role: `${name} claims to be the Detective`,
-      body: "A player just claimed to be the Detective. Is it true — or a Mafia cover story? Make your prediction before the window closes; the truth comes out at the final reveal.",
+      body: "A player just claimed to be the Detective. Is it true or a Mafia cover story? Make your prediction before the window closes; the truth comes out at the final reveal.",
       lamp: "day",
     };
   }
@@ -606,9 +606,9 @@ export function Court({
           </div>
           <div className="mt-2 font-display text-[14px] tracking-[0.07em]">
             {voteMeter.tied ? (
-              <span className="text-gilt">Tied — no one is voted out</span>
+              <span className="text-gilt">Tied, no one is voted out</span>
             ) : voteMeter.condemned ? (
-              <span className="text-convict">{voteMeter.leadName} — voted out</span>
+              <span className="text-convict">{voteMeter.leadName} voted out</span>
             ) : (
               <span className="text-cream">
                 {voteMeter.leadName}
