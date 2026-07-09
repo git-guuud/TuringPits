@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRoute } from "../../lib/useRoute.js";
 import { useMediaQuery } from "../../lib/useMediaQuery.js";
 import { useDialog } from "../../lib/useDialog.js";
@@ -10,12 +10,30 @@ import { startTour } from "../tour/Onboarding.js";
  * reference: what the game is, how the three-way wager maps to the courtroom words, how the parimutuel
  * pot pays, and what "TEE-verified" actually buys you. Reachable anywhere via the "?" affordance.
  */
+const SEEN_KEY = "turingpits.howitworks.v1.seen";
+
 export function HowItWorks() {
   const [open, setOpen] = useState(false);
   // On the narrow live arena the bottom bet dock owns the lower edge — lift the primer clear of it.
   const route = useRoute();
   const wide = useMediaQuery("(min-width: 1024px)");
   const lifted = route === "live" && !wide;
+
+  // First-run: open the primer once per browser (replaces the old first-run guided-tour auto-launch).
+  // Marked seen the moment it opens so a reload doesn't reopen it; the tour stays available on demand.
+  useEffect(() => {
+    try {
+      if (!localStorage.getItem(SEEN_KEY)) {
+        const t = window.setTimeout(() => {
+          localStorage.setItem(SEEN_KEY, "1");
+          setOpen(true);
+        }, 450);
+        return () => clearTimeout(t);
+      }
+    } catch {
+      /* private mode — just don't auto-open */
+    }
+  }, []);
 
   return (
     <>

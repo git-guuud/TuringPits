@@ -222,22 +222,16 @@ export function Onboarding() {
     [],
   );
 
-  // First-run auto-open (once per browser), plus the on-demand event from the "?" / lobby.
+  // On-demand only: launched from the "?" primer's "Take the guided tour" or the lobby link. First-run
+  // now belongs to the How-it-works modal (HowItWorks.tsx), not this hands-on walk.
   useEffect(() => {
     const launch = () => {
       setI(0);
       setOpen(true);
     };
     window.addEventListener(TOUR_EVENT, launch);
-    let t: number | undefined;
-    try {
-      if (!localStorage.getItem(SEEN_KEY)) t = window.setTimeout(launch, 450);
-    } catch {
-      /* private mode — just don't auto-open */
-    }
     return () => {
       window.removeEventListener(TOUR_EVENT, launch);
-      if (t) clearTimeout(t);
     };
   }, []);
 
