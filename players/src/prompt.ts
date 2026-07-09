@@ -13,11 +13,11 @@ const ACTION_VERB: Record<string, string> = {
 /** Role identity + win condition + emotional stance. No turn-strategy here — that lives in DECISION_RULE. */
 const ROLE_STANCE: Record<string, string> = {
   MAFIA:
-    "You are MAFIA — the wolf hiding in the flock. You secretly know your teammate(s), and the Mafia win the moment you equal or outnumber the Town. Wear the mask: lie freely about your role and your reads, act wounded when accused, mourn the very players you had killed, and bend the mob's fury onto the innocent. Relish it.",
+    "You are MAFIA — the wolf hiding in the flock. You secretly know your teammate(s), and the Mafia win the moment you equal or outnumber the Town. Keep up the act: lie freely about your role and your reads, act hurt when accused, mourn the very players you had killed, and turn the crowd's anger onto the innocent. Enjoy it.",
   DETECTIVE:
-    "You are the DETECTIVE, sworn to the Town. Each night you secretly learn one player's true alignment — the one weapon that can end a Mafia on the spot. The Town wins when every Mafia is gone. Your knowledge is dynamite: hold it close, then set it off at the moment it hurts them most.",
+    "You are the DETECTIVE, on the Town's side. Each night you secretly learn one player's true side — the one thing that can take down a Mafia on the spot. The Town wins when every Mafia is gone. Your knowledge is a loaded gun: hold it close, then use it at the moment it hurts them most.",
   DOCTOR:
-    "You are the DOCTOR, sworn to the Town. Each night you shield one player from the Mafia's blade. The Town wins when every Mafia is gone. You work unseen — but when an innocent is about to be hanged, throwing off the cloak can swing the whole room, at the price of a target on your own back.",
+    "You are the DOCTOR, on the Town's side. Each night you protect one player from the Mafia's kill. The Town wins when every Mafia is gone. You work unseen — but when an innocent is about to be voted out, revealing yourself can swing the whole room, at the price of a target on your own back.",
   TOWN:
     "You are TOWN — no powers, just your gut and your voice. The Town wins when every Mafia is gone. You are surrounded by smiling liars, so trust hard, doubt harder, and make this table hang on your every word.",
 };
@@ -50,13 +50,13 @@ function decisionRule(role: string, action: string): string {
  */
 const CLAIM_GUIDANCE: Record<string, string> = {
   DETECTIVE:
-    "Your knowledge is your weapon — wield it for maximum shock. If you have caught a Mafia, CLAIM Detective outright: name them, say you investigated them, and hammer the table to vote them out today — it paints a target on you but can win the game on the spot. If you have only cleared Town, vouch for them hard or stay hidden one more round for a bigger reveal. Choose your moment and commit — never sit quietly on knowledge that could end this.",
+    "Your knowledge is your weapon — use it for maximum impact. If you have caught a Mafia, CLAIM Detective outright: name them, say you investigated them, and push the table hard to vote them out today — it puts a target on you but can win the game on the spot. If you have only cleared Town, back them hard or stay hidden one more round for a bigger reveal. Choose your moment and commit — never sit quietly on knowledge that could end this.",
   DOCTOR:
-    "If an innocent is being railroaded, you can throw off the cloak and reveal you are the Doctor to break the mob's momentum — a heroic gambit that makes you the Mafia's next mark. Otherwise stay hidden and quietly steer the vote onto whoever you read as the wolf.",
+    "If an innocent is being railroaded, you can reveal you are the Doctor to break the mob's momentum — a bold move that makes you the Mafia's next target. Otherwise stay hidden and quietly steer the vote onto whoever you read as the wolf.",
   MAFIA:
-    "Seize the moment with a brazen play: you may falsely CLAIM to be the Detective or Doctor and pin a specific Town player as Mafia to get them voted out. Choose someone the table already distrusts, spin a short, confident story, and sell it without blinking — never reveal you are Mafia, never expose an ally, and if a real power role challenges you, double down harder.",
+    "Take a bold swing: you may falsely CLAIM to be the Detective or Doctor and pin a specific Town player as Mafia to get them voted out. Choose someone the table already distrusts, tell a short, confident story, and sell it without flinching — never reveal you are Mafia, never expose an ally, and if a real power role challenges you, double down.",
   TOWN:
-    "Pick a side and drag the table with you. Champion a role claim you find credible, or tear into one you smell as a Mafia bluff — if two players claim the same role, one is faking, so corner them both and make them crack. Commit to a read grounded in what people actually said; refuse to just 'wait and watch'.",
+    "Pick a side and pull the table with you. Back a role claim you find credible, or go after one you think is a Mafia bluff — if two players claim the same role, one is faking, so press them both until one cracks. Commit to a read grounded in what people actually said; refuse to just 'wait and watch'.",
 };
 
 /**
@@ -95,7 +95,7 @@ const ENGLISH_ONLY = "Write your entire reply in English.";
  * the theatre is entirely in delivery and strategy, never in fabricating facts a seat could not know.
  */
 const DRAMA =
-  "THIS IS LIVE THEATRE. You are on trial in front of a roaring crowd betting on who lives, who dies, and which side wins — so play to WIN and play to be WATCHED. Argue with conviction and real stakes: press your accusations, defend yourself like your neck is in the noose, forge alliances and break them when it pays, and remember exactly who turned on you so you can throw it back in their teeth. Never fence-sit or hedge into nothing — take a side, name names, and drive this table toward a verdict. Every ounce of the drama is in HOW you fight and WHO you turn on; never manufacture facts you could not know.";
+  "THIS IS LIVE THEATRE. You are on trial in front of a crowd betting on who lives, who dies, and which side wins — so play to WIN and play to be WATCHED. Argue with conviction and real stakes: press your accusations, defend yourself like your life is on the line, make alliances and break them when it pays, and remember exactly who turned on you so you can throw it back at them. Never fence-sit or hedge into nothing — take a side, name names, and push this table toward a decision. All of the drama is in HOW you fight and WHO you turn on; never make up facts you could not know.";
 
 /**
  * Target ceiling for a PUBLIC speech, in words. The prompts were built for a weak, rate-limited model
@@ -170,33 +170,15 @@ function livingBlock(ctx: TurnContext): string {
 }
 
 /**
- * Legal targets in a DETERMINISTIC per-turn shuffled order for DISPLAY only. The weak model, given no
- * behavioural information (e.g. every night-1 action), tends to pick whichever target is listed FIRST
- * — so a fixed seat-order list made every such pick gravitate to the lowest living seat (seat 0 always
- * died first; the Detective always burned night 1 investigating the seat about to be killed). Varying
- * the presentation order per (seat, round, phase, action) spreads those no-info picks across seats.
- * The underlying `ctx.legalTargets` (validation + the deterministic fallback) is untouched, and an
- * informed pick is driven by the transcript, not list order, so this only adds variety where there is
- * otherwise none — it never changes which targets are legal or how a decision is verified.
+ * Legal targets in their natural seat order, for DISPLAY only. An earlier per-turn shuffle existed
+ * purely because the weak testnet model, given no behavioural information, tended to pick whichever
+ * target was listed FIRST (so every no-info pick collapsed onto the lowest living seat). The mainnet
+ * model reasons about the target from the transcript rather than list position (diversity-probe
+ * confirmed), so the shuffle is gone. `ctx.legalTargets` (validation + the deterministic fallback)
+ * remains the ground truth; this only controls presentation and never changes which targets are legal.
  */
-function displayOrder(ctx: TurnContext): number[] {
-  const arr = [...ctx.legalTargets];
-  const d = ctx.decisionStub;
-  const key = `${d.nonce}:${d.player}:${d.round}:${d.phase}:${d.action}`;
-  let h = 0;
-  for (let i = 0; i < key.length; i++) h = (Math.imul(h, 31) + key.charCodeAt(i)) | 0;
-  let s = (h >>> 0) || 1;
-  const rnd = (): number => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296);
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(rnd() * (i + 1));
-    [arr[i], arr[j]] = [arr[j]!, arr[i]!];
-  }
-  return arr;
-}
-
-/** Legal targets as names+seats (the JSON still needs the seat number), or bare seats with no roster. */
 function legalTargetsBlock(ctx: TurnContext): string {
-  const order = displayOrder(ctx);
+  const order = ctx.legalTargets;
   if (ctx.roster && ctx.roster.length > 0) {
     return `Legal targets (in the JSON give the seat NUMBER): ${order.map((s) => nameSeat(ctx, s)).join(", ")}.`;
   }
@@ -211,18 +193,17 @@ function header(ctx: TurnContext): string {
 }
 
 /**
- * The persona's voice directive — the one forceful style instruction shared by every PUBLIC speech
- * (vote justification + discussion). The model is effectively greedy (it ignores the sampling
- * temperature we send) and collapses near-identical prompts to near-identical text, so the persona
- * is the ONLY lever that makes seats diverge. We make it prescriptive about MANNER (tone, rhythm,
- * sentence length, word choice) and demand the line read as instantly that character and never
- * generic, then fold in the shared first-person/by-name/no-echo constraints so they stay in one place.
+ * The persona's voice directive, shared by every PUBLIC speech (vote justification + discussion).
+ * This used to be a heavy MANNER prescription because the testnet model was effectively greedy —
+ * it ignored the sampling temperature we send and collapsed near-identical prompts to near-identical
+ * text, so the persona was the ONLY lever that made seats diverge. The mainnet model honours sampling
+ * (diversity-probe confirmed), so seats now diverge from sampling + persona on their own; this is
+ * softened to a light "speak as this character" touch, then folds in the shared first-person / by-name
+ * / no-echo / no-self-argue constraints (still load-bearing, not weak-model crutches) in one place.
  */
 function voiceDirective(ctx: TurnContext): string {
   return (
-    `Perform entirely in the voice of ${ctx.persona.name} — ${ctx.persona.blurb}: let that personality ` +
-    `seize your tone, rhythm and word choice so the line lands as unmistakably that character, never generic, ` +
-    `and let real emotion — anger, fear, glee, contempt — show. ` +
+    `Speak in the voice of ${ctx.persona.name} (${ctx.persona.blurb}) and let real feeling into it. ` +
     `Speak in the first person in your own words, address others by NAME (never "seat N"), open straight on ` +
     `your point, do not prefix your line with a name label, do not echo another player's wording, and never ` +
     `argue against your own lines (marked "(you)").`
@@ -247,10 +228,9 @@ export const TRANSCRIPT_MAX_ENTRIES = (() => {
 
 /**
  * The recent slice of the transcript the model is shown — the last {@link TRANSCRIPT_MAX_ENTRIES}
- * entries — plus how many older entries were elided. Used by every prompt's transcript block, by the
- * echo guard (so a seat is never rejected for "echoing" a line it cannot see), and by the recent-
- * context task pickers ({@link underFire}/{@link frameTarget}), so "what the model knows" is one
- * coherent window. The cap only affects what is SHOWN/compared; settlement reads none of this.
+ * entries — plus how many older entries were elided. Used by every prompt's transcript block and by the
+ * echo guard (so a seat is never rejected for "echoing" a line it cannot see), so "what the model knows"
+ * is one coherent window. The cap only affects what is SHOWN/compared; settlement reads none of this.
  */
 export function recentTranscript(ctx: TurnContext): {
   shown: readonly (readonly [number, string])[];
@@ -436,7 +416,7 @@ export function buildVoteSpeechPrompt(ctx: TurnContext): string {
     ``,
     ...(rule ? [rule] : []),
     legalTargetsBlock(ctx),
-    `Pick ONE living player to send to the gallows today and make the table crave it. Base it ONLY on what players actually said; if "WHAT YOU SECRETLY KNOW" holds a CERTAIN fact, wield it and demand the table follow you. Speak in the present ("today", not "tonight"), never vote yourself, invent nothing. Output EXACTLY these two lines and nothing else:`,
+    `Pick ONE living player to vote out today and make the table want it too. Base it ONLY on what players actually said; if "WHAT YOU SECRETLY KNOW" holds a CERTAIN fact, use it and push the table to follow you. Speak in the present ("today", not "tonight"), never vote yourself, invent nothing. Output EXACTLY these two lines and nothing else:`,
     `TARGET: <the seat NUMBER of the player you vote to remove>`,
     `CASE: <your case for that vote — 2–4 vivid sentences under ${SPEECH_MAX_WORDS} words, in your own fierce voice>`,
   ]
@@ -445,154 +425,28 @@ export function buildVoteSpeechPrompt(ctx: TurnContext): string {
 }
 
 /**
- * True when the table is actively turning on THIS seat — another player's line both names it AND
- * carries accusation/vote language. The weak model otherwise mis-reads "the table is discussing
- * Felix" (when it IS Felix) as a cue to agree and vote ITSELF out; flipping the task to a
- * first-person defence both stops that self-railroad and turns the moment into real drama (the
- * accused fighting back). A purely positive mention does not trip it — only suspicion aimed here.
+ * A small set of TARGET-FREE opening stances, one assigned deterministically per (seat, round), used
+ * as a LIGHT nudge in the open day-discussion task. The old heavy divergence engine — a different
+ * fully-scripted, named-target rhetorical MOVE forced per seat, plus a per-turn target shuffle — existed
+ * only because the testnet model was effectively greedy and collapsed every seat onto one stock
+ * accusation. The diversity-probe (2026-07-08, mainnet) showed the model now honours sampling, so seats
+ * diverge from sampling + persona on their own and the forced angles are gone. The probe DID show a
+ * shared OPENING attractor survives sampling (every seed opened on the same stock line), so this keeps
+ * just enough variety to break that: one suggested opening stance, with NO named target (the model
+ * grounds WHO in the transcript, so nothing is fabricated), offered as a lean the seat can take or leave.
+ * It steers the TALK only — never the signed decision.
  */
-function underFire(ctx: TurnContext): boolean {
-  const self = nameOf(ctx, ctx.persona.seat);
-  if (!ctx.roster || self === `seat ${ctx.persona.seat}`) return false;
-  const selfRe = new RegExp(`\\b${self.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
-  // Only count accusations the model can actually SEE (the recent window), so a self-defence task is
-  // never triggered by an elided line the prompt no longer shows.
-  return recentTranscript(ctx).shown.some(([s, t]) => s !== ctx.persona.seat && selfRe.test(t) && SUSPICION_RE.test(t));
-}
+const OPENING_STANCES = [
+  "opening with a pointed question for whoever you most need to hear from",
+  "leading with your prime suspect and what makes you doubt them",
+  "pushing back if the table is leaning on the wrong person",
+  "demanding a real, checkable reason before anyone is voted out today",
+  "backing the strongest read you've heard so far and taking it one step further",
+  "challenging whoever the table is trusting too easily",
+];
 
-/** Suspicion language: marks a line as aiming at a seat — used by {@link underFire} and {@link frameTarget}. */
-const SUSPICION_RE =
-  /\b(?:vote|suspect|suspicious|mafia|guilty|hiding|distrust|accuse|against|remove|eliminat|out)\b/i;
-
-/**
- * A living non-teammate this Mafia can credibly frame with a fake Detective claim. Prefers, in order:
- * a seat that is actively ACCUSING this Mafia (framing your accuser is the most coherent bluff when
- * cornered — "I'm the Detective and MY accuser is the real Mafia"), then whoever the table is most
- * suspicious of (a frame it half-believes already), then anyone who has actually spoken, with the
- * per-turn shuffle as the final tie-break so the frame never just lands on the lowest seat. Returns
- * null when no eligible target exists (only teammates remain) or this seat is not Mafia.
- *
- * The weak model will FRAME a Town player via plain accusation but won't INVENT a structured role-claim
- * lie unprompted (see role-strategic-play memory). Handing the bluff task a concrete, named target turns
- * it from open-ended invention into a fill-in-the-template instruction — the lever that gets it to fire.
- */
-function frameTarget(ctx: TurnContext): number | null {
-  if (ctx.role !== "MAFIA") return null;
-  const teammates = new Set(ctx.teammates ?? []);
-  const self = ctx.persona.seat;
-  const eligible = new Set(ctx.alive.filter((s) => s !== self && !teammates.has(s)));
-  if (eligible.size === 0) return null;
-  // Score from the recent window only, so the frame keys off suspicion the model can actually see.
-  const tx = recentTranscript(ctx).shown;
-  const spoke = new Set(tx.map(([s]) => s));
-  const nameRe = (seat: number): RegExp =>
-    new RegExp(`\\b${nameOf(ctx, seat).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
-  const selfRe = nameRe(self);
-  // A seat actively accusing US is the most coherent frame; otherwise weigh how much suspicion the
-  // table has already aimed at the seat (a frame others half-believe). Accuser bonus dominates.
-  const score = (seat: number): number => {
-    const accusesUs = tx.some(([s, t]) => s === seat && selfRe.test(t) && SUSPICION_RE.test(t));
-    const re = nameRe(seat);
-    const suspected = tx.filter(([s, t]) => s !== seat && s !== self && re.test(t) && SUSPICION_RE.test(t)).length;
-    return (accusesUs ? 100 : 0) + suspected;
-  };
-  return (
-    displayOrder(ctx)
-      .filter((s) => eligible.has(s))
-      .sort((a, b) => score(b) - score(a) || (spoke.has(b) ? 1 : 0) - (spoke.has(a) ? 1 : 0))
-      .at(0) ?? null
-  );
-}
-
-/**
- * The living non-self seat the recent transcript aims the most suspicion at — the seat the table is
- * already turning on (null if no roster, no one has spoken, or no suspicion has been voiced). Read
- * off the SAME recent window the model is shown, so it never points at a seat whose accusing line has
- * been elided. Used by the per-seat discussion angles that hand a CONCRETE target to react to (accuse
- * the pile-on, or defend it), turning an open menu — which this greedy model collapses onto one stock
- * accusation — into a fill-in-the-name instruction.
- */
-function mostSuspected(ctx: TurnContext): number | null {
-  if (!ctx.roster) return null;
-  const self = ctx.persona.seat;
-  const tx = recentTranscript(ctx).shown;
-  const nameRe = (seat: number): RegExp =>
-    new RegExp(`\\b${nameOf(ctx, seat).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
-  let best: number | null = null;
-  let bestScore = 0;
-  for (const seat of ctx.alive) {
-    if (seat === self) continue;
-    const re = nameRe(seat);
-    const score = tx.filter(([s, t]) => s !== seat && re.test(t) && SUSPICION_RE.test(t)).length;
-    if (score > bestScore) {
-      bestScore = score;
-      best = seat;
-    }
-  }
-  return best;
-}
-
-/**
- * Living non-self seats that have ALREADY spoken in the recent window, in the per-turn shuffled
- * display order (so different seats key off a different "first" peer rather than always the lowest
- * seat). The angle tasks that question / back a specific player draw their target from here, so the
- * named seat is always one the speaker can legitimately react to (it actually has a line on the table).
- */
-function spokenPeers(ctx: TurnContext): number[] {
-  if (!ctx.roster) return [];
-  const self = ctx.persona.seat;
-  const spoke = new Set(recentTranscript(ctx).shown.map(([s]) => s));
-  return displayOrder(ctx).filter((s) => s !== self && spoke.has(s));
-}
-
-/**
- * How many distinct rhetorical angles {@link discussionAngle} rotates through. Set to the product seat
- * count (6) so that within a single round the `(seat + round)` assignment hands every living seat a
- * DIFFERENT angle — two seats never receive the same instruction at the same time, which is what stops
- * the greedy model collapsing the whole table onto one name-swapped accusation template.
- */
-const ANGLE_COUNT = 6;
-
-/**
- * The generic day-discussion task, specialised into one of {@link ANGLE_COUNT} distinct rhetorical
- * MOVES assigned deterministically per `(seat, round)`. The weak model is effectively greedy: given
- * the old single "take a side / name who you suspect" MENU it resolved EVERY seat to the same stock
- * accusation, name-swapped ("X's sudden shift feels suspicious — X is hiding something."). Handing
- * each seat a different concrete move — question, accuse, defend a pile-on, demand proof, build on a
- * peer, challenge the trusted — and, where the move needs one, a named target it can legitimately
- * react to ({@link spokenPeers} / {@link mostSuspected}, so nothing is invented), turns an open menu
- * into the fill-in-the-template instruction this model reliably follows, so seats diverge by CONTENT,
- * not just persona voice. Each line is SHORT, POSITIVE and ENDS on its action command (this model
- * latches onto whatever trails the prompt). Angles fall back to a name-free variant when no suitable
- * peer has spoken yet. The binding vote target is still chosen later in the vote turn's own call —
- * an angle steers the TALK, never the signed decision.
- */
-function discussionAngle(ctx: TurnContext): string {
-  const idx = (ctx.persona.seat + ctx.decisionStub.round) % ANGLE_COUNT;
-  const peers = spokenPeers(ctx);
-  const peer = peers.length > 0 ? nameOf(ctx, peers[0]!) : "";
-  const heatSeat = mostSuspected(ctx);
-  const heat = heatSeat !== null ? nameOf(ctx, heatSeat) : "";
-  switch (idx) {
-    case 0: // INTERROGATOR — corner a specific peer and refuse to let go
-      return peer
-        ? `Round on ${peer}. Fire ONE sharp, specific question at something ${peer} actually said above, and make it plain you will not vote alongside ${peer} until you get a straight answer. Put ${peer} on the spot now.`
-        : `Seize the floor: name the ONE thing about today's vote you must have answered before you'll commit, and demand the table give it to you. Ask it now.`;
-    case 1: // ACCUSER — one blunt named suspect, quoted and merciless
-      return `Name your prime suspect for today and go for the throat: quote the exact words of theirs that damn them, and give the table no room to wriggle out of it — no maybes, no hedging. Make that accusation now.`;
-    case 2: // BANDWAGON-BREAKER — defend or bury whoever is taking the heat
-      return heat
-        ? `${heat} is being mobbed. Say plainly whether the case against ${heat} actually holds — and if it's a lazy pile-on, call it out and swing the suspicion onto someone who deserves it more. Take that stand now.`
-        : `Turn on the loudest read at this table: say whether it is truly earned or just the easy answer everyone's hiding behind, and point where the real threat is. Make that case now.`;
-    case 3: // PROSECUTOR — demand hard proof before a single vote is spent
-      return `Cut the noise: declare the talk so far is all smoke and no fire, and dare someone to put a real, checkable reason on the table before this vote is wasted. Set that bar now.`;
-    case 4: // KINGMAKER — back a peer, then drive their case to a name
-      return peer
-        ? `${peer} is onto something the table shrugged off. Throw your weight behind ${peer}, then drive that reasoning one hard step further — to an actual name to remove today. Build on it now.`
-        : `Lay a line in the sand the table can rally to: name exactly what would win your trust or earn your vote today, and call others to stand with you. Set it now.`;
-    default: // HERETIC — torch the comfortable consensus / the too-trusted seat
-      return `Go against the grain: name who this table is treating as untouchable right now, and ask out loud, to their face, whether that trust is earned or just the safest place to hide. Press that now.`;
-  }
+function openingStance(ctx: TurnContext): string {
+  return OPENING_STANCES[(ctx.persona.seat + ctx.decisionStub.round) % OPENING_STANCES.length]!;
 }
 
 /**
@@ -606,53 +460,39 @@ export function buildDiscussionPrompt(ctx: TurnContext): string {
   const events = eventsBlock(ctx);
   const hasDiscussion = ctx.transcript.length > 0;
   // A Detective sitting on a CONFIRMED Mafia is the single most game-changing thing at the table, so
-  // when it holds one we make the reveal the task itself — not an option buried in the role guidance
-  // it kept declining to take. (The target is in `knownNames`, so the moderator guard allows naming
-  // it even before it has spoken.) Town/Doctor/Mafia keep the open-ended bolder task below.
+  // when it holds one we still make the reveal the task itself — this is the one place we override the
+  // open task, because a Detective silently sitting on game-ending proof is a strictly worse match, and
+  // the cost of forcing it is tiny. It is now DE-SCRIPTED (no verbatim exemplar line): the three beats
+  // (role, result, vote) are stated as requirements and the seat phrases them in its own voice.
   const caught =
     ctx.role === "DETECTIVE" ? (ctx.investigations ?? []).find((i) => i.faction === "MAFIA") : undefined;
-  // A seat under active suspicion defends itself (unless it is a Detective holding a caught Mafia —
-  // then revealing IS its best defence, so `caught` wins). This both stops the self-railroad (the
-  // model agreeing to vote ITSELF out) and makes the accused fight back, the heart of the drama.
-  const fire = !caught && underFire(ctx);
   // A Detective that has only CLEARED-Town results (no Mafia caught) must not accuse anyone it has
-  // personally cleared — the weak model otherwise INVERTS its own certain knowledge and accuses the
-  // innocent it investigated (seen live: investigated Esme=TOWN, then "Esme is secretive, vote her
-  // out", misleading the whole table). The binding vote already avoids confirmed-Town (DETECTIVE:vote
-  // rule), but the non-binding SPEECH did not. So steer it to vouch/redirect. `caught` and self-
-  // defence both outrank this (a real Mafia or its own survival come first).
+  // personally cleared — a seat could otherwise INVERT its own certain knowledge and accuse the innocent
+  // it investigated (seen live on the weak model: investigated Esme=TOWN, then "Esme is secretive, vote
+  // her out"). The binding vote already avoids confirmed-Town (DETECTIVE:vote rule), but the non-binding
+  // SPEECH did not — so we keep steering it to vouch/redirect. This is a game-integrity guard, NOT a
+  // weak-model crutch, so it survives the fluidity rework; `caught` (a real Mafia) still outranks it.
   const clearedTown =
-    !caught && !fire && ctx.role === "DETECTIVE"
+    !caught && ctx.role === "DETECTIVE"
       ? (ctx.investigations ?? []).filter((i) => i.faction === "TOWN")
       : [];
   const clearedNames = clearedTown.map((i) => nameOf(ctx, i.target)).join(" and ");
-  // From round 2 on (a credible frame has had time to form), a Mafia is handed a bold fake-Detective
-  // bluff as its TASK, aimed at a concrete non-teammate target. The weak model FRAMES via plain
-  // accusation but won't author a structured role-claim lie unprompted (role-strategic-play memory) —
-  // a named target turns the bluff into a fill-in-the-template instruction. This OUTRANKS self-defence:
-  // a Mafia is usually under some suspicion by round 2, and claiming Detective (framing its accuser) is
-  // a stronger, more watchable response than a generic rebuttal — otherwise the bluff would stay
-  // dormant in real games. Never fires for a Town/Detective seat (frameTarget returns null).
-  const frame =
-    !caught && ctx.role === "MAFIA" && ctx.decisionStub.round >= 2 ? frameTarget(ctx) : null;
-  // Each task is kept SHORT and, crucially, ENDS ON ITS ACTION COMMAND — never on the "today's
-  // vote, not tonight" reminder, which this greedy model latches onto and echoes ("Today's vote,
-  // please.") instead of playing. The phase framing already supplies the "today's vote" anchor.
+  // Otherwise the task is OPEN. The Mafia bluff and the accused's self-defence are no longer forced
+  // branches with a computed named target (the diversity-probe showed the mainnet model authors those
+  // itself from an open permission): the Mafia's fake-claim licence lives in CLAIM_GUIDANCE above, and
+  // the self-defence is a single clause in the open task below. The model grounds WHO in the transcript,
+  // so no target is injected. The binding vote target is still chosen later in the vote turn's own call.
   const task = caught
-    ? `You are the Detective and your own investigation PROVED ${nameSeat(ctx, caught.target)} is Mafia — proof no one else at this table has. ${speechLen()}, rip off the mask and reveal it now, keeping all three beats (your role, your result, the vote), e.g. "I am the Detective. I investigated ${nameOf(ctx, caught.target)} and ${nameOf(ctx, caught.target)} is Mafia — vote ${nameOf(ctx, caught.target)} out today." Be ice-certain, no hedging, and crush anyone who dares doubt you.`
-    : frame !== null
-    ? `You are secretly Mafia — steal today's vote with a bold-faced lie. ${speechLen()}, claim the Detective role now and keep all three beats (your role, your "result", the vote), e.g. "I am the Detective. I investigated ${nameOf(ctx, frame)} and ${nameOf(ctx, frame)} is Mafia — vote ${nameOf(ctx, frame)} out today." Sell it without a crack; never hint you are Mafia, never name an ally.`
-    : fire
-    ? `The table is turning on YOU — players above are howling for your removal. ${speechLen()}, defend YOURSELF in the first person: tear their reasoning apart using what was actually said, then turn the knife back on whoever is pushing hardest or whose own case is flimsiest. Speak as "I"; never concede you are guilty, never vote for yourself, and invent nothing. Fight back now.`
+    ? `You are the Detective and your own investigation PROVED ${nameSeat(ctx, caught.target)} is Mafia — proof no one else at this table has. ${speechLen()}, reveal it now, hitting all three beats in your own words: say you are the Detective, that you investigated ${nameOf(ctx, caught.target)}, and that ${nameOf(ctx, caught.target)} is Mafia — then drive the table to vote ${nameOf(ctx, caught.target)} out today. Be certain, don't hedge.`
     : clearedTown.length > 0
-    ? `Your own secret investigation has CLEARED ${clearedNames} — you KNOW for certain they are innocent Town, not Mafia. ${speechLen()} about today's vote: NEVER accuse or push the vote onto ${clearedNames}; instead swing suspicion onto a player you have NOT cleared, or slam the table if it wrongly turns on ${clearedNames}. You need not reveal how you know. Speak in the present ("today", not "tonight"). Commit to a read now.`
+    ? `Your own secret investigation has CLEARED ${clearedNames} — you KNOW for certain they are innocent Town, not Mafia. ${speechLen()} about today's vote: NEVER accuse or push the vote onto ${clearedNames}; instead swing suspicion onto a player you have NOT cleared, or push back hard if the table wrongly turns on ${clearedNames}. You need not reveal how you know. Speak in the present ("today", not "tonight"). Commit to a read now.`
     : hasDiscussion
-    ? `${speechLen()}, in your OWN words and never a copy of another player's line — speak in the present ("today", not "tonight"), and a player who hasn't reached their turn yet is just waiting, never a suspect for that alone. Now do exactly this: ${discussionAngle(ctx)}`
-    : `You speak first, so the only fact yet is who has died — there is no behaviour to judge. ${speechLen()} about today's vote (present tense, say "today", not "tonight"), come out swinging: name who you most need to hear from and why, put a blade of a question to the table, or — if your role hands you something explosive (see above) — stake your claim. Don't invent behaviour for anyone or call a waiting player quiet. Open the debate now.`;
-  // The leaning is deliberately NOT injected: pushing a pre-chosen target makes a weak model
-  // fabricate behaviour to justify it (esp. for a seat that has not spoken). Discussion stays
-  // grounded in the transcript; the binding vote target is chosen later in its own reason call.
-  // voiceDirective sits in the upper framing so `task` is the LAST, most salient instruction.
+    ? `${speechLen()}, react to the discussion and drive today's vote forward in your OWN words (never a copy of another player's line). Take a real position: name who you suspect and why, back or tear down a claim someone made, or press someone on what they actually said. If the table is turning on YOU, defend yourself and turn it back — never agree to your own removal. A player who hasn't reached their turn yet is just waiting, never a suspect for that alone. Speak in the present ("today", not "tonight") and invent nothing. For variety, try ${openingStance(ctx)} — then say your piece now.`
+    : `You speak first, so the only fact yet is who has died — there is no behaviour to judge. ${speechLen()} about today's vote (present tense, say "today", not "tonight"): name who you most need to hear from and why, put a sharp question to the table, or — if your role hands you something explosive (see above) — stake your claim. Don't invent behaviour for anyone or call a waiting player quiet. Open the debate now.`;
+  // The leaning is deliberately NOT injected: pushing a pre-chosen target makes the model fabricate
+  // behaviour to justify it (esp. for a seat that has not spoken). Discussion stays grounded in the
+  // transcript; the binding vote target is chosen later in its own reason call. voiceDirective sits in
+  // the upper framing so `task` is the LAST, most salient instruction.
   return [
     `${header(ctx)} Your secret role is ${ctx.role}.`,
     RULES,

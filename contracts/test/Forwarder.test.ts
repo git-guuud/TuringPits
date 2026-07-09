@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { mineUpTo } from "@nomicfoundation/hardhat-network-helpers";
 import { MaxUint256, type Wallet, type Contract } from "ethers";
-import { defaultSchedule, createParams, deployMarket, buildSettlement, openFaction, FACTION_OUT } from "./helpers/market";
+import { defaultSchedule, createParams, deployMarket, buildSettlement, factionIdx, mafiaSeatIdx, FACTION_OUT } from "./helpers/market";
 
 const SEED = "0x" + "ab".repeat(32); // buildSettlement(SEED, 5) → Mafia wins
 const CID = "0x" + "cd".repeat(32);
@@ -99,7 +99,7 @@ describe("Forwarder — EIP-2771 gas relayer", () => {
     const teeSigner = ethers.Wallet.createRandom();
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: "0x" + "aa".repeat(32), teeSigner: teeSigner.address, nonce: "relay-1", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
 
     // User does EVERYTHING via the relayer — three signed requests, zero user gas.
@@ -124,7 +124,7 @@ describe("Forwarder — EIP-2771 gas relayer", () => {
     expect(fx.mafiaWins).to.equal(true); // sanity: MAFIA is the winning faction for this seed
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "relay-claim", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
 
     // User bets the winning faction via relay; bob seeds the losing pool directly (so there's a pot).
@@ -156,9 +156,8 @@ describe("Forwarder — EIP-2771 gas relayer", () => {
     const fx = await buildSettlement(SEED, 5, "relay-batch", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "relay-batch", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
-    const mafiaMkt = Number(await market.propCount(0));
-    await market.connect(owner).openMafiaSeatMarket(0); // "who is the Mafia?" — resolves to the real Mafia seat
+    const faction = await factionIdx(market);
+    const mafiaMkt = await mafiaSeatIdx(market); // "who is the Mafia?" — resolves to the real Mafia seat
     await mineUpTo(sched.bettingOpenBlock);
 
     const winOut = fx.mafiaWins ? MAFIA : TOWN;

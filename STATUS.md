@@ -24,8 +24,9 @@ _Updated: 2026-07-06_
 
 ## What's live right now
 
-- **The demo loop runs end-to-end on Galileo.** A real `qwen2.5-omni` match is driven by the
-  deterministic moderator, each decision is a live 0G-Compute TEE inference, spectators wager in CHIP
+- **The demo loop runs end-to-end.** A real `qwen3.6-plus` match — **inference on 0G mainnet**
+  (chainId 16661), **market + settlement + CHIP + storage on Galileo testnet** (16602) — is driven by
+  the deterministic moderator, each decision is a live 0G-Compute TEE inference, spectators wager in CHIP
   across the markets, and `settle()` verifies every move's TEE signature + the commit-revealed roles +
   the Solidity rule re-execution before paying the winning outcome. A cross-layer Hardhat test settles a
   full `playMatch` transcript on-chain to the engine-declared winner.
@@ -35,6 +36,14 @@ _Updated: 2026-07-06_
 - **Code-complete but OFF here (key-gated):** spoken-dialogue **TTS** (ElevenLabs) — no
   `ELEVENLABS_API_KEY` / `ELEVENLABS_API_KEYS` set, so the feature is fully off and never ships keys to
   the browser. Turning it on is purely an env-key step (see `myTasks.md`).
+- **Fast match starts (2026-07-09):** client-connect → wagers-open dropped from ~2 min to ~10-15s. The
+  0G provider bundle is cached across rounds (one paid probe at boot, a per-round signer re-check), the
+  persona evidence upload is prepared at boot / during the intermission instead of on the start path,
+  the block schedule is sampled immediately before `createMatch` (10-block open margin, was 30+), tx
+  receipt polling matches 0G's 0.5s blocks, and `createMatch` now seeds the Faction + MafiaSeat markets
+  (4 props at creation — no post-create open txs; **needs the pending redeploy**, `myTasks.md`; the
+  server auto-detects and still opens them on the old deployment). Per-step timing logs confirm the
+  split each round.
 
 ## The markets (all categorical props, one verified `settle()`)
 
@@ -87,7 +96,7 @@ restoring a seat loop in `createMatch`.
 - **`players/`** — the player abstraction over 0G Compute TEE inference. Each seat holds its own
   `InferenceProvider` (BYOM-ready). A turn is two-layer: free-form `speech` + a constrained decision
   inference whose entire output IS the canonical decision string. The live path is `ZeroGDirectProvider`
-  (Direct SDK, `qwen2.5-omni`); `MockLocalProvider` (real ECDSA, local key) covers offline/CI.
+  (Direct SDK, `qwen3.6-plus` on 0G mainnet); `MockLocalProvider` (real ECDSA, local key) covers offline/CI.
   `playMatch` drives the moderator with real calls, structures the day as a **trial** (nominate →
   prosecute → rebuttal → vote) and pauses on **in-loop betting windows** (night-kill / voted-out /
   detective-claim), and captures the attested transcript. **226 tests** (+1 live-skipped).
@@ -112,25 +121,31 @@ restoring a seat loop in `createMatch`.
 Durable findings from real testnet calls (`players/scripts/live-turn.mjs`, `live-direct.mjs`).
 Credentials live in `.env`; remaining human setup in `myTasks.md`.
 
-- **Network — 0G Galileo Testnet:** chainId **16602**, EVM RPC `https://evmrpc-testnet.0g.ai`, explorer
-  `https://chainscan-galileo.0g.ai`, faucet `https://faucet.0g.ai`. All free testnet 0G, no real funds.
-- **TEE attestation is `ecrecover`-viable** (EIP-191/ECDSA). The signature recovers to the provider's
-  **`teeSignerAddress` `0x83df…08cF`** (registered on-chain), distinct from the provider **account
-  `0xa48f…7836`** used to address the service.
+- **Network — hybrid.** The **market, CHIP, settlement, and storage run on 0G Galileo Testnet:** chainId
+  **16602**, EVM RPC `https://evmrpc-testnet.0g.ai`, explorer `https://chainscan-galileo.0g.ai`, faucet
+  `https://faucet.0g.ai` — all free testnet 0G. **Inference runs on 0G mainnet** (Aristotle, chainId
+  **16661**, RPC `https://evmrpc.0g.ai`) to reach far stronger models — that path spends **real
+  mainnet 0G** (funded `COMPUTE_PRIVATE_KEY`, settled in batches; per-inference cost is tiny).
+- **TEE attestation is `ecrecover`-viable** (EIP-191/ECDSA). The signature recovers to the mainnet
+  provider's **`teeSignerAddress` `0xd45b…17d4`** (registered on-chain per match from the provider's own
+  probe), distinct from the provider **account `0x992e…6db5`** used to address the service.
 - **Signed bytes are an envelope, not our decision text:**
   `sha256(req):sha256(res):provider_type:provider_identity:tls_fingerprint`, colon-joined, EIP-191
   signed. So `settle()` takes the full response body + envelope fields + signature as calldata,
   recomputes `sha256(body)`, rebuilds the envelope, `ecrecover`s vs the registered signer, then parses
   the decision out of the body.
 - **Compute — Direct SDK is the production path** (`@0gfoundation/0g-compute-ts-sdk`, funded wallet,
-  returns the raw `{text, signature}` the verifier needs). Model **`qwen2.5-omni`** is the only TEE chat
-  model on testnet; live-confirmed `tee_verified:true`. The rate limit is a token bucket (cap ~32768,
-  refill ~2000/min) + a ~10 req/min request bucket — keep a match under ~32k total tokens to stay fast.
-- **⚠️ Trust caveat (stated honestly in the demo):** the testnet provider's signed metadata is
-  `provider_type: centralized, identity: aliyun` + an RA-TLS fingerprint, **not** visibly hardware
-  Intel-TDX. The attestation *mechanism* (provider-signed, on-chain-`ecrecover`able) is fully real; the
-  execution guarantee is weaker than a hardware TEE. The full defense design and exactly what is
-  enforced on-chain today vs. designed-for-roadmap lives in `IDEA.md` (§ "Implementation Status").
+  returns the raw `{text, signature}` the verifier needs). Model **`qwen3.6-plus`** (0G mainnet TeeML);
+  live-confirmed `tee_verified:true` (probe: 5-part envelope, `sha256(res)==part[1]`, signer match).
+  A reasoning model run with `enable_thinking=false` (~0.7s TTFT, byte-exact signed decisions); pacing
+  is bounded by the provider's ~10 req/min request throttle (no token cap surfaced on mainnet).
+- **⚠️ Trust caveat (stated honestly in the demo):** the mainnet provider's signed metadata is still
+  `provider_type: centralized, identity: aliyun` + an RA-TLS fingerprint. Per 0G's mainnet TeeML, a
+  dstack/**Intel-TDX** serving enclave captures the exact req/res bytes and signs the envelope — so the
+  operator **cannot forge, replay, or re-roll a move** (what matters for betting) — but the **model runs
+  on a centralized upstream (aliyun), not end-to-end in-enclave**, and we verify the signature on-chain,
+  not the TDX attestation itself. The full defense design and exactly what is enforced on-chain today
+  vs. designed-for-roadmap lives in `IDEA.md` (§ "Implementation Status").
 
 ## Mocks / stubs in place
 

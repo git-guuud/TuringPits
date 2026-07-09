@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { mineUpTo } from "@nomicfoundation/hardhat-network-helpers";
-import { defaultSchedule, createParams, buildSettlement, deployMarket, fundBettors, openFaction, FACTION_OUT } from "./helpers/market";
+import { defaultSchedule, createParams, buildSettlement, deployMarket, fundBettors, factionIdx, FACTION_OUT } from "./helpers/market";
 
 const MAFIA = FACTION_OUT.MAFIA;
 const TOWN = FACTION_OUT.TOWN;
@@ -33,7 +33,7 @@ describe("MafiaMarket — conservation property (fuzz)", () => {
       const fx = await buildSettlement(SEED, 5, nonce, teeSigner);
       const sched = await defaultSchedule(ethers.provider);
       await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce, playerCount: 5, schedule: sched }));
-      const faction = await openFaction(market, owner);
+      const faction = await factionIdx(market);
       await mineUpTo(sched.bettingOpenBlock);
 
       // Random bets on the faction market; force at least one bet on the winning side so the outcome

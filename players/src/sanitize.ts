@@ -1,14 +1,23 @@
 import type { InferenceProvider, SamplingOptions } from "./types.js";
 
 /**
- * Markers that must never appear in DAY public speech. They are the recurring hallucinations of
- * the weak model: night-phase confusion ("tonight"/"last night"), the "silence = guilt" trope
- * (treating a seat that has not reached its turn as suspicious), and invented behavioural traits.
- * The public speech is explicitly NON-load-bearing — only the structured decision is signed and
- * settled — so the moderator may scrub it. The signed decision is never touched.
+ * Markers that must never appear in DAY public speech: night-phase confusion ("tonight"/"last night"),
+ * observation of the unseen night, invented PHYSICAL tells (eye contact, fidgeting, gaze…) and invented
+ * demeanour/behavioural-baseline reads — none of which exist in a text game — plus the concrete
+ * "silence = guilt" trope where a seat that has NOT reached its turn is called out for not speaking
+ * (the `lack of participation` / `hasn't spoken` patterns). The public speech is explicitly
+ * NON-load-bearing — only the structured decision is signed and settled — so the moderator may scrub it.
+ *
+ * NOTE (2026-07-08): the bare words "silent"/"silence"/"evasive"/"withdrawn"/"defensive stance" were
+ * REMOVED from this DAY guard. The mainnet model uses them as legitimate debate rhetoric ("silence helps
+ * the Mafia", "you're being evasive about your vote") rather than as fabricated per-player tells
+ * (diversity-probe: every such hit was a false positive), so flagging them here wrongly nuked good speech
+ * to a bland fallback. The actual trope (accusing a still-waiting NAMED player) is still caught by the
+ * `hasn't/haven't … spoken` + `lack of participation` patterns and by {@link forbiddenNames}. These words
+ * ARE still caught in round-1 NIGHT reasoning via {@link NIGHT_INVENTED}, where no observation is possible.
  */
 export const BAD_SPEECH =
-  /\btonight\b|\blast night\b|\bsilen(?:t|ce)\b|\bwithdrawn\b|defensive stance|\bevasive\b|night behavio|night began|(?:since|during|throughout) the night|eye[-\s]?contact|body language|facial expression|\bfidget|\bsquirm|\bshifty\b|\bflinch|\btrembl|\bsweating\b|nervous (?:glance|tic|twitch|gesture)|avoiding (?:eye|eyes|my gaze|our gaze)|\bgaze\b|\bdemean(?:our|or)\b|usual\s+(?:self|behavio(?:u)?r|demean(?:our|or)|manner|temperament|tone)|out of character|(?:hasn'?t|haven'?t|isn'?t|aren'?t|wasn'?t|weren'?t)\s+been\s+(?:him|her|them|it)self|acting\s+(?:\w+ly\s+)?(?:secretive\w*|strange\w*|odd\w*|weird\w*|cagey|defensiv\w*|shady|sketchy|paranoid|guilty|fishy|suspicious\w*|nervous\w*|differe\w*)|\bnervousness\b|nervous around|(?:is|are|was|were|seems?|seemed|look(?:s|ed)?|appears?|appeared|been|gets?|getting|grew|so|very|really|quite|visibly|clearly)\s+(?:nervous|anxious|uneasy|jittery|flustered|rattled|on edge)|lack of (?:involvement|participation|engagement|interaction|communication|activity|contribution)|\b(?:hasn'?t|haven'?t|hadn'?t|isn'?t|aren'?t|not|never|barely|hardly)\s+(?:\w+\s+){0,2}?(?:spoken|speaking|said anything|interact|contribut|participat|engag)/i;
+  /\btonight\b|\blast night\b|night behavio|night began|(?:since|during|throughout) the night|eye[-\s]?contact|body language|facial expression|\bfidget|\bsquirm|\bshifty\b|\bflinch|\btrembl|\bsweating\b|nervous (?:glance|tic|twitch|gesture)|avoiding (?:eye|eyes|my gaze|our gaze)|\bgaze\b|\bdemean(?:our|or)\b|usual\s+(?:self|behavio(?:u)?r|demean(?:our|or)|manner|temperament|tone)|out of character|(?:hasn'?t|haven'?t|isn'?t|aren'?t|wasn'?t|weren'?t)\s+been\s+(?:him|her|them|it)self|acting\s+(?:\w+ly\s+)?(?:secretive\w*|strange\w*|odd\w*|weird\w*|cagey|defensiv\w*|shady|sketchy|paranoid|guilty|fishy|suspicious\w*|nervous\w*|differe\w*)|\bnervousness\b|nervous around|(?:is|are|was|were|seems?|seemed|look(?:s|ed)?|appears?|appeared|been|gets?|getting|grew|so|very|really|quite|visibly|clearly)\s+(?:nervous|anxious|uneasy|jittery|flustered|rattled|on edge)|lack of (?:involvement|participation|engagement|interaction|communication|activity|contribution)|\b(?:hasn'?t|haven'?t|hadn'?t|isn'?t|aren'?t|not|never|barely|hardly)\s+(?:\w+\s+){0,2}?(?:spoken|speaking|said anything|interact|contribut|participat|engag)/i;
 
 /**
  * CJK / Japanese / Korean script. The Chinese-trained weak model code-switches mid-sentence
@@ -128,11 +137,13 @@ export function stripSpeakerLabels(text: string, names: readonly string[]): stri
 
 /**
  * Extra markers for NIGHT private reasoning: on round 1 (and any night before real discussion) a
- * player cannot have observed anyone, yet the weak model invents reads like "most confident",
- * "made bold claims", or "accuses loudly". These join {@link BAD_SPEECH} for the night guard.
+ * player cannot have observed anyone, yet a model invents reads like "most confident", "made bold
+ * claims", or "accuses loudly". "silent"/"silence"/"withdrawn" live here too (they were dropped from
+ * the DAY {@link BAD_SPEECH} guard as legit day rhetoric, but a round-1 night still cannot observe
+ * silence). These join {@link BAD_SPEECH} for the night guard.
  */
 const NIGHT_INVENTED =
-  /most confident|bold claims?|made bold|tendency to accuse|accus\w*\s+(?:others|people|everyone)|speaks?\s+loudly|\bloudly\b|\bassertive\b|\bvocal\b/i;
+  /most confident|bold claims?|made bold|tendency to accuse|accus\w*\s+(?:others|people|everyone)|speaks?\s+loudly|\bloudly\b|\bassertive\b|\bvocal\b|\bsilen(?:t|ce)\b|\bwithdrawn\b/i;
 
 /**
  * Clean one NIGHT action's private reasoning. Night reasoning is private spectacle/audit text (the
@@ -398,7 +409,7 @@ const MARKER_NOTE =
   "made-up physical behaviour as if it were evidence. This is a TEXT game — there is no eye contact, " +
   "body language, tone, or appearance to read, and no one can observe the night. It is daytime and " +
   "players speak in turn, so a player who has not spoken yet is just waiting, never suspicious. " +
-  'Rewrite WITHOUT the words "tonight", "silent", or "silence", without inventing anyone\'s ' +
+  'Rewrite WITHOUT the word "tonight", without inventing anyone\'s ' +
   "manner or how they carry themselves, and ground it ONLY in words a player actually typed above.";
 
 /** Correction appended when a speech contained non-English (CJK) text. */

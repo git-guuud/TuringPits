@@ -19,13 +19,15 @@ import { gateTurn, newNightGate } from "./night.js";
 import { nightKillResolved, votedOutResolved } from "./round-markets.js";
 import { runBetWindow as runBetWindowFn, type BetWindowMarket } from "./bet-windows.js";
 import { classifyDetectiveClaim } from "./detective-claim.js";
-import { buildPersonas, buildProvider, runMatch } from "./match-runner.js";
+import { buildPersonas, buildProvider, runMatch, type ProviderBundle } from "./match-runner.js";
 import type { Hub } from "./broadcast.js";
 import type { PoolSignal } from "./pool-signal.js";
-import type { PropSnapshot, WsMessage } from "./wire.js";
+import type { Persona, PropSnapshot, WsMessage } from "./wire.js";
 import { estimateSpeechMs, type Tts, type ToneInput } from "./tts.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/** Seconds elapsed since `t0`, one decimal — for the startup timing logs. */
+const secs = (t0: number): string => ((Date.now() - t0) / 1000).toFixed(1);
 
 /** Reject a promise that runs past `ms` so a slow synth can never stall the match loop. */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -72,6 +74,10 @@ export interface OrchestratorConfig {
   // re-read + broadcast immediately instead of on the 10s backstop poll below. See pool-signal.ts. When
   // unset, the market still updates — just on the poll cadence.
   poolSignal?: PoolSignal;
+  // Provider supplier. index.ts passes the cross-round cache (createProviderCache().get) so the
+  // expensive live build — broker setup + a PAID probe inference, ~10-20s — runs once at boot and
+  // each round only re-checks the TEE signer. Unset → buildProvider() per round (standalone use).
+  getProvider?: () => Promise<ProviderBundle>;
   // Settlement deadline budget (wall-clock seconds after match start). Must comfortably exceed
   // how long the match takes to play out — live 0G inference is rate-limited (~10/min), so a
   // full match runs many minutes. Default is generous; settle() reverts "deadline passed" past it.
@@ -119,6 +125,31 @@ function randomSeed(): string {
   return "0x" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 }
 
+/** Everything a round needs BEFORE createMatch that is slow to make: the seed, its persona cast,
+ *  and the personas' 0G Storage evidence upload (~20-60s on testnet — once the single biggest
+ *  chunk of the client-connect → wagers-open delay). index.ts builds this at boot and during each
+ *  intermission so runOneMatch starts with it already in hand. */
+export interface PreparedRound {
+  seed: string;
+  personas: Persona[];
+  personaPoolRoot: string;
+}
+
+export async function prepareRound(cfg: OrchestratorConfig): Promise<PreparedRound> {
+  const seed = cfg.seed ?? randomSeed();
+  // Cast personas from the match seed so the table draws a different, reproducible-per-seed set of
+  // voices each round (roles are seeded the same way), instead of always the first N in fixed order.
+  const personas = buildPersonas(cfg.playerCount, seed);
+  const t0 = Date.now();
+  const personaPoolRoot = await uploadEvidence(cfg, "personas", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ser: any = await import("@turingpits/storage/dist/serialize.js");
+    return ser.serializePersonas(personas);
+  });
+  if (cfg.enableStorage) console.log(`[orch] round prepared (persona evidence) in ${secs(t0)}s`);
+  return { seed, personas, personaPoolRoot };
+}
+
 /**
  * Trailing debounce: coalesce a burst of bet-driven pool bumps into ONE push carrying the final book.
  * When the bots pile into a freshly-opened market (or a human fires a few quick bets), the relayer signals
@@ -143,8 +174,11 @@ function debounced(fn: () => void, ms: number): { (): void; cancel: () => void }
   return call;
 }
 
-export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts): Promise<void> {
-  const provider = new JsonRpcProvider(cfg.rpcUrl, cfg.chainId);
+export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts, prepared?: PreparedRound): Promise<void> {
+  const matchT0 = Date.now();
+  // 500ms receipt polling: 0G mines every ~0.5s but ethers' default poll is 4s, which made every
+  // tx.wait() (createMatch, market opens, freezes, settle) idle ~4-8s for an already-mined tx.
+  const provider = new JsonRpcProvider(cfg.rpcUrl, cfg.chainId, { pollingInterval: 500 });
   const host = new Wallet(cfg.hostPrivateKey, provider);
   const market = new Contract(cfg.marketAddress, MAFIA_MARKET_ABI, host);
 
@@ -159,19 +193,25 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   const head = () => rpc("getBlockNumber", () => provider.getBlockNumber());
 
   const n = cfg.playerCount;
-  const seed = cfg.seed ?? randomSeed();
+  // Seed, personas and their 0G Storage evidence come pre-built (prepareRound — at boot / during
+  // the intermission), so the slow persona upload never sits between a client connecting and
+  // wagers opening. Absent `prepared` (standalone use) builds them here, upload included.
+  const { seed, personas, personaPoolRoot } = prepared ?? (await prepareRound(cfg));
   const nonce = `live-${Date.now()}`;
-  // Cast personas from the match seed so the table draws a different, reproducible-per-seed set of
-  // voices each round (roles are seeded the same way), instead of always the first N in fixed order.
-  const personas = buildPersonas(n, seed);
 
   // 1. Roles + commit (engine). Roles stay secret until settle's reveal.
   const roleNames = assignRoles(seed, n) as string[];
   const salt = generateSalt();
   const roleCommit = commitRoles(roleNames as never, salt);
 
-  // 2. Provider (real TEE or labeled-local signer) and its registered signer.
-  const { provider: inference, isMock, teeSigner, providerMeta } = await rpc("provider setup", () => buildProvider());
+  // 2. Provider (real TEE or labeled-local signer) and its registered signer — served from the
+  //    caller's cross-round cache when given (a fresh live build is a broker setup + a PAID probe
+  //    inference, ~10-20s; the cached path is one signer re-check).
+  const tProvider = Date.now();
+  const { provider: inference, isMock, teeSigner, providerMeta } = await rpc("provider setup", () =>
+    (cfg.getProvider ?? buildProvider)(),
+  );
+  console.log(`[orch] provider ready in ${secs(tProvider)}s (mock=${isMock})`);
 
   // 3. Size the schedule from the block rate. 0G mines very fast, so a fixed "+N blocks" guess either
   //    reverts "open in past" (too small to outrun tx inclusion) or creates a long "betting not started"
@@ -185,9 +225,11 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   const bps = cfg.blocksPerSecond;
   console.log(`[orch] assuming ${bps} blocks/sec (fixed — 0G block time is a stable ~0.5s)`);
 
-  // open margin must exceed the blocks produced while createMatch is being mined (openLeadSeconds);
-  // the betting window is sized so it lasts ~bettingWindowSeconds of wall-clock; deadline is huge.
-  const openMargin = Math.max(30, Math.ceil(bps * cfg.openLeadSeconds));
+  // open margin must only outlast createMatch's own tx inclusion (~1-2 blocks on 0G): the head is
+  // sampled immediately before the create tx, so no other prework can eat into it. A 10-block
+  // (~5s) floor keeps a comfortable cushion — the "open in past" retry below covers a rare miss.
+  // The betting window is sized so it lasts ~bettingWindowSeconds of wall-clock; deadline is huge.
+  const openMargin = Math.max(10, Math.ceil(bps * cfg.openLeadSeconds));
   const windowBlocks = Math.max(MIN_BETTING_WINDOW + 1, Math.ceil(bps * cfg.bettingWindowSeconds));
 
   let bettingOpenBlock = 0, bettingCloseBlock = 0, matchStartBlock = 0, settlementDeadlineBlock = 0;
@@ -198,15 +240,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     settlementDeadlineBlock =
       matchStartBlock + Math.max(MIN_MATCH_DURATION + 1, Math.ceil(bps * cfg.settlementDeadlineSeconds));
   };
-  computeSchedule(openMargin, await head());
-
   hub.reset();
-  // 0G Storage evidence (optional): persona pool uploaded before the match.
-  const personaPoolRoot = await uploadEvidence(cfg, "personas", async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ser: any = await import("@turingpits/storage/dist/serialize.js");
-    return ser.serializePersonas(personas);
-  });
   console.log(`[orch] createMatch nonce=${nonce} seed=${seed.slice(0, 10)}… seats=${n} mock=${isMock}`);
   const buildParams = () => ({
     roleCommit,
@@ -223,8 +257,15 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     settlementDeadlineBlock,
     feeBps: cfg.feeBps,
   });
+  // Sample the head at the LAST moment — nothing slow may run between here and the create tx. The
+  // margin is only ~10 blocks (~5s), sized for tx inclusion alone; prework used to run after this
+  // sample and stale it (a >15s storage upload pushed bettingOpenBlock into the past, tripping the
+  // "open in past" retry and doubling the wait for no reason).
+  computeSchedule(openMargin, await head());
+
   // Retry "open in past": if the chain out-ran our open block during tx inclusion, recompute
   // against the live head with a doubled margin and try again.
+  const tCreate = Date.now();
   let createRcpt: any = null;
   let margin = openMargin;
   for (let attempt = 1; attempt <= 4; attempt++) {
@@ -257,33 +298,10 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     }
   }
   if (matchId < 0) matchId = Number(await rpc("nextMatchId", () => market.getFunction("nextMatchId")())) - 1;
-  console.log(`[orch] matchId=${matchId} betting blocks ${bettingOpenBlock}..${bettingCloseBlock}`);
+  console.log(`[orch] matchId=${matchId} betting blocks ${bettingOpenBlock}..${bettingCloseBlock} (createMatch ${secs(tCreate)}s)`);
   // Register the match NOW (before any later step can throw) so the caller can guarantee a refund
   // path even if this round is abandoned after bets are placed.
   cfg.onMatchCreated?.(matchId, settlementDeadlineBlock);
-
-  // Float the headline "which faction wins?" market once, at match start, before the first props
-  // snapshot below — it's the match's CORE market (0=TOWN, 1=MAFIA; resolves from the verified run,
-  // mistrial → Void), so unlike the side markets a failure to open it aborts the round (the retry layer
-  // covers transient RPC hiccups). It isn't seeded by createMatch — every market is an on-demand prop.
-  await rpc("openFactionMarket", async () => {
-    const tx = await market.getFunction("openFactionMarket")(matchId);
-    return tx.wait();
-  });
-  console.log(`[orch] 'which faction wins?' market opened on-chain matchId=${matchId}`);
-
-  // Float the single "Who is the Mafia?" market once, at match start, so it's bettable for the whole
-  // match (one outcome per seat; resolves to the Mafia seat from the revealed roles at settle()). Unlike
-  // the faction market this is a side market — non-fatal: a miss just leaves this one market absent.
-  try {
-    await rpc("openMafiaSeatMarket", async () => {
-      const tx = await market.getFunction("openMafiaSeatMarket")(matchId);
-      return tx.wait();
-    });
-    console.log(`[orch] 'who is the mafia?' market opened on-chain matchId=${matchId}`);
-  } catch (e) {
-    console.warn(`[orch] openMafiaSeatMarket failed:`, (e as Error).message);
-  }
 
   // 4. match_init + open market.
   hub.broadcast({
@@ -306,10 +324,10 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   });
 
   // Read the categorical side markets so the UI can show their live per-outcome pools + settled winner
-  // alongside the faction-win market. createMatch makes 2 props — the round-1 RoundVotedOut market + the
-  // round-1 NightKill market — and openVotedOutRound / openNightKillRound append a fresh market per later
-  // round (so the two recurring kinds interleave), so the count GROWS during the match: read propCount each
-  // pass and address markets by their (kind, param), never a fixed index. The on-chain `kind` byte is the
+  // alongside the faction-win market. createMatch makes 4 props — round-1 RoundVotedOut, round-1
+  // NightKill, plus the Faction + MafiaSeat singles — and openVotedOutRound / openNightKillRound append a
+  // fresh market per later round (so the two recurring kinds interleave), so the count GROWS during the
+  // match: read propCount each pass and address markets by their (kind, param), never a fixed index. The on-chain `kind` byte is the
   // label authority (0 PlayerFate / 1 RoundVotedOut / 2 NightKill / 3 DetectiveClaim / 4 MafiaSeat / 5
   // Faction). The per-seat PlayerFate/survival market is NOT floated for now (createMatch no longer mints
   // it), so no PLAYER_FATE prop appears in this read; the on-demand singles (Faction, MafiaSeat,
@@ -346,6 +364,36 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
     return { state: marketStateOf(Number(m.state)), props };
   };
 
+  // The headline "which faction wins?" + "Who is the Mafia?" singles are seeded inside createMatch on
+  // current contract builds — zero extra startup txs. COMPAT: an older deployed market doesn't seed
+  // them, so float whichever is missing (addressed by kind, never index). Faction is the CORE market
+  // (0=TOWN, 1=MAFIA; mistrial → Void) — a miss aborts the round (rpc retries cover transients);
+  // MafiaSeat stays a non-fatal side market.
+  {
+    const tMarkets = Date.now();
+    const seededProps = await readProps();
+    const hasKind = (k: PropSnapshot["kind"]) => seededProps.some((p) => p.kind === k);
+    if (!hasKind("FACTION")) {
+      await rpc("openFactionMarket", async () => {
+        const tx = await market.getFunction("openFactionMarket")(matchId);
+        return tx.wait();
+      });
+      console.log(`[orch] 'which faction wins?' market opened on-chain matchId=${matchId} (pre-seeding contract)`);
+    }
+    if (!hasKind("MAFIA_SEAT")) {
+      try {
+        await rpc("openMafiaSeatMarket", async () => {
+          const tx = await market.getFunction("openMafiaSeatMarket")(matchId);
+          return tx.wait();
+        });
+        console.log(`[orch] 'who is the mafia?' market opened on-chain matchId=${matchId} (pre-seeding contract)`);
+      } catch (e) {
+        console.warn(`[orch] openMafiaSeatMarket failed:`, (e as Error).message);
+      }
+    }
+    console.log(`[orch] headline markets ready in ${secs(tMarkets)}s`);
+  }
+
   // Set only during the pre-match betting hold (below): the epoch ms the opening pause ends and the
   // first night falls. Woven into every OPEN push (the tick + pushPools) so the client's "first night
   // in Xs" countdown doesn't flicker between pushes. Undefined once the match is actually running.
@@ -356,6 +404,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
 
   // 5a. Pre-open: the chain has NOT yet reached bettingOpenBlock, so bets would revert
   //     "betting not started". Hold the UI in a non-clickable pre-open state until it does.
+  const tSeal = Date.now();
   console.log(`[orch] sealing — waiting for chain to reach open block ${bettingOpenBlock}`);
   while ((await head()) < bettingOpenBlock) {
     const p = await readPools();
@@ -366,7 +415,7 @@ export async function runOneMatch(hub: Hub, cfg: OrchestratorConfig, tts?: Tts):
   // 5b. Betting is now LIVE and STAYS OPEN until settle() — there is no block-based close and no
   //     lock step. The market accepts wagers right through the match; only settlement closes it.
   //     We emit no `closesAt`, so the UI shows an open market with no countdown.
-  console.log(`[orch] betting LIVE — open until settled`);
+  console.log(`[orch] betting LIVE — open until settled (pre-open wait ${secs(tSeal)}s; ${secs(matchT0)}s total from match start)`);
   {
     const p = await readPools();
     hub.broadcast({ type: "market", market: { state: "OPEN", bettingLive: true, props: p.props } });
@@ -784,7 +833,7 @@ export async function sweepAbandonedMatches(
   pending: Map<number, number>, // matchId -> settlementDeadlineBlock
 ): Promise<void> {
   if (pending.size === 0) return;
-  const provider = new JsonRpcProvider(cfg.rpcUrl, cfg.chainId);
+  const provider = new JsonRpcProvider(cfg.rpcUrl, cfg.chainId, { pollingInterval: 500 });
   const host = new Wallet(cfg.hostPrivateKey, provider);
   const market = new Contract(cfg.marketAddress, MAFIA_MARKET_ABI, host);
 

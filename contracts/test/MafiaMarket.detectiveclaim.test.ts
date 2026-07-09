@@ -30,18 +30,19 @@ async function opened(nonce: string, n = 6) {
   const sched = await defaultSchedule(ethers.provider);
   await ctx.market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce, playerCount: n, schedule: sched }));
   await mineUpTo(sched.bettingOpenBlock);
-  // createMatch mints props[0] RoundVotedOut r1, props[1] NightKill r1 (no per-seat PlayerFate market).
-  // The DetectiveClaim market is NOT created up front — it is floated on demand and appends at the
-  // tail, so with nothing else opened it lands at propIdx 2.
+  // createMatch mints props[0] RoundVotedOut r1, props[1] NightKill r1, props[2] Faction, props[3]
+  // MafiaSeat (no per-seat PlayerFate market). The DetectiveClaim market is NOT created up front — a
+  // claim is an unpredictable speech event, so it is floated on demand and appends at the tail: with
+  // nothing else opened it lands at propIdx 4.
   const detSeat = fx.roles.findIndex((r) => r === ROLE.DETECTIVE);
   const mafiaSeat = fx.roles.findIndex((r) => r === ROLE.MAFIA);
   return { ...ctx, fx, sched, teeSigner, matchId: 0, n, detSeat, mafiaSeat };
 }
 
 describe("MafiaMarket — 'Detective claim: real or bluff?' side market (props): creation on demand", () => {
-  it("is NOT created up front — createMatch still mints exactly 2 props, flag unset", async () => {
+  it("is NOT created up front — createMatch mints only the 4 seeded markets, flag unset", async () => {
     const { market, n } = await opened("dc-create");
-    expect(await market.propCount(0)).to.equal(2); // VO r1 + NK r1, no DetectiveClaim yet
+    expect(await market.propCount(0)).to.equal(4); // VO r1 + NK r1 + Faction + MafiaSeat, no DetectiveClaim yet
     expect(await market.detectiveClaimOpened(0)).to.equal(false);
     // no prop is a DetectiveClaim before it is floated
     const count = Number(await market.propCount(0));
@@ -50,11 +51,11 @@ describe("MafiaMarket — 'Detective claim: real or bluff?' side market (props):
 
   it("openDetectiveClaim appends ONE binary market tagged with the claiming seat and flips the guard", async () => {
     const { market, owner, n, detSeat } = await opened("dc-open");
-    const idx = Number(await market.propCount(0)); // tail == 2
+    const idx = Number(await market.propCount(0)); // tail == 4
     await expect(market.connect(owner).openDetectiveClaim(0, detSeat))
       .to.emit(market, "DetectiveClaimOpened").withArgs(0, idx, detSeat);
     expect(await market.detectiveClaimOpened(0)).to.equal(true);
-    expect(await market.propCount(0)).to.equal(3);
+    expect(await market.propCount(0)).to.equal(5);
     const pr = await market.getProp(0, idx);
     expect(pr.kind).to.equal(KIND.DetectiveClaim);
     expect(pr.param).to.equal(detSeat);       // param carries the claiming seat

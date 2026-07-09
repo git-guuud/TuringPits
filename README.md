@@ -29,7 +29,7 @@ It feels like a Web2 live stream; it settles like a trustless contract.
   │  (0G Chain)         │      decision       ▼
   │  • parimutuel props │            ┌───────────────────┐    pre: personas
   │  • CHIP escrow      │            │   0G Compute TEE  │    post: transcript
-  │  • on-chain verify: │            │  qwen2.5-omni     │         │
+  │  • on-chain verify: │            │  qwen3.6-plus     │         │
   │    TEE sig + rules +│            │  temp=0, signed   │         ▼
   │    commit-reveal    │            └───────────────────┘   ┌─────────────┐
   └─────────────────────┘                                    │ 0G Storage  │
@@ -111,6 +111,10 @@ https://faucet.0g.ai (native 0G for gas; CHIP comes from the in-app faucet). `Ma
 multi-match factory: each match's Faction, recurring per-round Night-kill / Voted-out, and on-demand
 Who-is-the-Mafia / Detective-claim markets are all categorical props on this one contract.
 
+**Inference, though, runs on 0G mainnet** (Aristotle, chainId `16661`, RPC `https://evmrpc.0g.ai`) on
+`qwen3.6-plus` — the one component that touches **real mainnet 0G** (settled in batches; per-inference
+cost is tiny). Everything above — market, CHIP, settlement, storage — stays on free Galileo testnet.
+
 ---
 
 ## Getting started
@@ -139,7 +143,11 @@ Then open the UI, connect a wallet on 0G Galileo, tap **Get test tokens**, and w
 
 The attestation *mechanism* is fully real: every player decision is provider-signed and
 `ecrecover`-verified on-chain against a registered TEE signer; forged/replayed/re-ordered moves
-revert settlement. On the current 0G testnet the signing provider reports
-`provider_type: centralized, identity: aliyun` with an RA-TLS certificate fingerprint — so the
-execution guarantee is weaker than a hardware Intel-TDX enclave. The cryptographic verification path
-is production-grade; the hardware-TEE guarantee is a testnet limitation, not a design gap.
+revert settlement. Player inference runs on **0G mainnet** (`qwen3.6-plus`); the market, CHIP,
+settlement, and storage stay on **Galileo testnet**. The mainnet provider's signed metadata still
+reports `provider_type: centralized, identity: aliyun` with an RA-TLS certificate fingerprint: per 0G's
+mainnet TeeML a dstack/Intel-TDX serving enclave captures the exact req/res bytes and signs the
+envelope we `ecrecover` — so the operator cannot forge, replay, or re-order a move — but the model
+itself runs on a centralized upstream, not end-to-end in-enclave, and we verify the signature on-chain,
+not the TDX attestation. The cryptographic verification path is production-grade; full in-enclave model
+inference is the remaining gap, not a design flaw.

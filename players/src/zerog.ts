@@ -4,7 +4,7 @@ import { createZGComputeNetworkBroker } from "@0gfoundation/0g-compute-ts-sdk";
 import { locateContent, resHashHex, type ProviderMeta } from "./envelope.js";
 import { createMinIntervalThrottle, createTokenBudgetThrottle, type Throttle, type TokenThrottle } from "./throttle.js";
 import { withRetry, isTransientError } from "./retry.js";
-import type { Attestation, InferenceProvider } from "./types.js";
+import type { Attestation, InferenceProvider, SamplingOptions } from "./types.js";
 
 /** 0G Galileo testnet (`STATUS.md` → confirmed facts). */
 const GALILEO_CHAIN_ID = 16602;
@@ -62,6 +62,36 @@ export function rateLimitBackoffMs(err: unknown): number | undefined {
  */
 export function toProviderSeed(seed: number): number {
   return Math.trunc(seed) & 0x7fffffff;
+}
+
+/**
+ * Keep the model's hidden chain-of-thought ON? Default OFF. The mainnet model (qwen3.6-plus) is a
+ * REASONING model that otherwise spends ~10-22s and 1000+ tokens "thinking" before the first visible
+ * token — on EVERY call, signed or not — for zero benefit to our tasks. A 2026-07-08 mainnet probe
+ * measured `enable_thinking:false` → ~0.7s TTFT, 0 reasoning tokens, vivid speech, AND the SIGNED
+ * decision still byte-exact 3/3 (it's a copy-this-line task — reasoning only risks drift). Leaving it
+ * on would make a mainnet match 5-7 min of pure latency and blow the token budget. Escape hatch:
+ * `COMPUTE_ENABLE_THINKING=1` restores reasoning.
+ */
+export const ENABLE_THINKING = process.env.COMPUTE_ENABLE_THINKING === "1";
+
+/**
+ * Build the `/chat/completions` request body. Pure + exported so the sampling and reasoning-disable
+ * wiring is unit-testable without a live provider. Sampling params NEVER affect settlement (the TEE
+ * signs the RESPONSE; `reqHashHex` is the provider's own request hash). `enable_thinking:false` is a
+ * vLLM `chat_template_kwarg` that reasoning models honor and non-reasoning models ignore gracefully
+ * (confirmed against testnet qwen2.5-omni), so it is safe to send unconditionally.
+ */
+export function buildInferenceRequestBody(
+  model: string,
+  prompt: string,
+  opts?: SamplingOptions,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { model, messages: [{ role: "user", content: prompt }] };
+  if (opts?.temperature !== undefined) body.temperature = opts.temperature;
+  if (opts?.seed !== undefined) body.seed = toProviderSeed(opts.seed);
+  if (!ENABLE_THINKING) body.chat_template_kwargs = { enable_thinking: false };
+  return body;
 }
 
 export interface ZeroGDirectConfig {
@@ -127,6 +157,19 @@ export class ZeroGDirectProvider implements InferenceProvider {
    */
   meta?: ProviderMeta;
 
+  /**
+   * Cheap per-round revalidation for a CACHED provider: one chain read confirming the provider's
+   * registered TEE signer still equals the one probed at setup. The server builds this provider
+   * once and reuses it across matches (broker/endpoint/meta are constant, and setup costs a paid
+   * probe inference + its full signature round-trip) — but if the provider's TEE restarts, the
+   * signer rotates and every settle() would revert "bad TEE signature". This check lets the cache
+   * detect the rotation and rebuild instead of registering a stale signer.
+   */
+  async signerUnchanged(): Promise<boolean> {
+    const status = await this.broker.inference.checkProviderSignerStatus(this.providerAddress);
+    return String(status?.teeSignerAddress ?? "").toLowerCase() === this.teeSignerAddress.toLowerCase();
+  }
+
   /** Running tallies so the server can report what fraction of inference calls had to be retried
    *  (almost always a rate-limit 429) and how much wall-clock the backoffs cost. Diagnostics only. */
   private callsTotal = 0;
@@ -182,11 +225,9 @@ export class ZeroGDirectProvider implements InferenceProvider {
     if (this.tokenThrottle) await this.tokenThrottle(estimateCallTokens(prompt));
     await this.throttle();
     const headers = await this.broker.inference.getRequestHeaders(this.providerAddress, prompt);
-    const reqBody: Record<string, unknown> = { model: this.model, messages: [{ role: "user", content: prompt }] };
-    // Sampling params on the request do NOT affect settlement: the TEE envelope signs the
-    // RESPONSE, and reqHashHex (envelope part[0]) is the provider's own request hash.
-    if (opts?.temperature !== undefined) reqBody.temperature = opts.temperature;
-    if (opts?.seed !== undefined) reqBody.seed = toProviderSeed(opts.seed);
+    // Sampling params + the reasoning-disable flag do NOT affect settlement: the TEE envelope signs the
+    // RESPONSE, and reqHashHex (envelope part[0]) is the provider's own request hash. See buildInferenceRequestBody.
+    const reqBody = buildInferenceRequestBody(this.model, prompt, opts);
     const res = await fetch(`${this.endpoint}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers },

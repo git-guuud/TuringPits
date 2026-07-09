@@ -7,7 +7,7 @@ const SEED = "0x" + "ab".repeat(32);
 const CID = "0x" + "cd".repeat(32);
 
 // PropKind enum (MafiaMarket.sol): PlayerFate=0, RoundVotedOut=1, NightKill=2.
-const KIND = { PlayerFate: 0, RoundVotedOut: 1, NightKill: 2 } as const;
+const KIND = { PlayerFate: 0, RoundVotedOut: 1, NightKill: 2, DetectiveClaim: 3, MafiaSeat: 4, Faction: 5 } as const;
 // PropState enum (MafiaMarket.sol): Unset=0, Resolved=1, Void=2.
 const PS = { Unset: 0, Resolved: 1, Void: 2 } as const;
 
@@ -38,9 +38,9 @@ async function opened(nonce: string, n = 5) {
 }
 
 describe("MafiaMarket — categorical prop mechanics (generic): creation", () => {
-  it("mints exactly the two round-1 markets (RoundVotedOut at 0, NightKill at 1), empty/Unset", async () => {
+  it("mints the four seeded markets (RoundVotedOut at 0, NightKill at 1, Faction at 2, MafiaSeat at 3), empty/Unset", async () => {
     const { market, numOutcomes } = await opened("gp-create");
-    expect(await market.propCount(0)).to.equal(2); // no per-seat PlayerFate market is floated
+    expect(await market.propCount(0)).to.equal(4); // no per-seat PlayerFate market is floated
     const vo = await market.getProp(0, 0);
     expect(vo.kind).to.equal(KIND.RoundVotedOut);
     expect(vo.param).to.equal(1);
@@ -50,6 +50,8 @@ describe("MafiaMarket — categorical prop mechanics (generic): creation", () =>
     expect(vo.closed).to.equal(false);
     expect(vo.state).to.equal(PS.Unset);
     expect((await market.getProp(0, 1)).kind).to.equal(KIND.NightKill);
+    expect((await market.getProp(0, 2)).kind).to.equal(KIND.Faction);
+    expect((await market.getProp(0, 3)).kind).to.equal(KIND.MafiaSeat);
   });
 });
 

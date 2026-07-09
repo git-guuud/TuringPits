@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { mineUpTo } from "@nomicfoundation/hardhat-network-helpers";
-import { defaultSchedule, createParams, deployMarket, fundBettors, openFaction, FACTION_OUT } from "./helpers/market";
+import { defaultSchedule, createParams, deployMarket, fundBettors, factionIdx, mafiaSeatIdx, FACTION_OUT } from "./helpers/market";
 import { buildSettlement } from "./helpers/market";
 import { buildEnvelope } from "./helpers/envelope";
 
@@ -91,7 +91,7 @@ describe("MafiaMarket factory — faction market betting + lock", () => {
     const sched = await defaultSchedule(ethers.provider);
     const p = createParams({ roleCommit: DUMMY_COMMIT, teeSigner: teeSigner.address, nonce: "m-1", playerCount: 5, schedule: sched });
     await market.createMatch(p);
-    const faction = await openFaction(market, owner); // the headline market, floated at match start
+    const faction = await factionIdx(market); // the headline market, seeded by createMatch
     return { market, token, owner, alice, bob, sched, matchId: 0, faction };
   }
 
@@ -162,7 +162,7 @@ describe("MafiaMarket factory — settlement", () => {
     const fx = await buildSettlement(SEED, 5, nonce, teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce, playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     // alice bets MAFIA, bob TOWN, so neither faction pool is empty (whoever wins has backers).
     await market.connect(alice).betProp(0, faction, MAFIA, ethers.parseEther("1"));
@@ -192,7 +192,7 @@ describe("MafiaMarket factory — settlement", () => {
     const fx = await buildSettlement(SEED, 5, "m-early-settle", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "m-early-settle", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     await market.connect(alice).betProp(0, faction, MAFIA, ethers.parseEther("1"));
     // Settle immediately — well before bettingCloseBlock — proving betting closes on settle, not on a block.
@@ -241,7 +241,7 @@ describe("MafiaMarket factory — settlement", () => {
     const fx = await buildSettlement(SEED, 5, "m-void", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "m-void", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     // Bet ONLY the losing faction, leaving the winning side's pool empty.
     await market.connect(alice).betProp(0, faction, fx.mafiaWins ? TOWN : MAFIA, ethers.parseEther("2"));
@@ -259,7 +259,7 @@ describe("MafiaMarket factory — faction claims", () => {
     const fx = await buildSettlement(SEED, 5, nonce, teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce, playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     const winOut = fx.mafiaWins ? MAFIA : TOWN;
     const loseOut = fx.mafiaWins ? TOWN : MAFIA;
@@ -300,7 +300,7 @@ describe("MafiaMarket factory — faction claims", () => {
     const fx = await buildSettlement(SEED, 5, "m-drawclaim", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "m-drawclaim", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     await market.connect(alice).betProp(0, faction, MAFIA, ethers.parseEther("1"));
     await mineUpTo(sched.bettingCloseBlock);
@@ -317,7 +317,7 @@ describe("MafiaMarket factory — faction claims", () => {
     const fx = await buildSettlement(SEED, 5, "m-voidclaim", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "m-voidclaim", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     await market.connect(alice).betProp(0, faction, fx.mafiaWins ? TOWN : MAFIA, ethers.parseEther("2"));
     await mineUpTo(sched.bettingCloseBlock);
@@ -334,7 +334,7 @@ describe("MafiaMarket factory — faction claims", () => {
     const fx = await buildSettlement(SEED, 5, "m-early", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "m-early", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await expect(market.connect(alice).claimProp(0, faction)).to.be.revertedWith("not settled");
   });
 
@@ -344,11 +344,11 @@ describe("MafiaMarket factory — faction claims", () => {
     const fx0 = await buildSettlement(SEED, 5, "iso-0", teeSigner);
     const s0 = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx0.commit, teeSigner: teeSigner.address, nonce: "iso-0", playerCount: 5, schedule: s0 }));
-    const f0 = await openFaction(market, owner, 0);
+    const f0 = await factionIdx(market, 0);
     const fx1 = await buildSettlement(SEED, 5, "iso-1", teeSigner);
     const s1 = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx1.commit, teeSigner: teeSigner.address, nonce: "iso-1", playerCount: 5, schedule: s1 }));
-    const f1 = await openFaction(market, owner, 1);
+    const f1 = await factionIdx(market, 1);
     await mineUpTo(Math.max(s0.bettingOpenBlock, s1.bettingOpenBlock));
     await market.connect(alice).betProp(0, f0, fx0.mafiaWins ? MAFIA : TOWN, ethers.parseEther("1"));
     await market.connect(bob).betProp(1, f1, fx1.mafiaWins ? MAFIA : TOWN, ethers.parseEther("1"));
@@ -375,15 +375,14 @@ describe("MafiaMarket factory — batch claim", () => {
   // market backed on a seat the vote didn't take — bob seeds the true outcome so that market Resolves
   // rather than Voids, making alice's bet a real loss).
   async function settledMulti(nonce = "m-batch") {
-    const { market, token, owner, alice, bob } = await deploy();
+    const { market, token, alice, bob } = await deploy();
     const teeSigner = ethers.Wallet.createRandom();
     const fx = await buildSettlement(SEED, 5, nonce, teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce, playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);   // headline market, floated at the tail (propIdx 2)
-    const winSide = Number(await market.propCount(0));  // "who is the Mafia?" market, next tail
-    await market.connect(owner).openMafiaSeatMarket(0);
-    const loseSide = 0;                                 // the round-1 "voted out" market (minted first)
+    const faction = await factionIdx(market);   // headline market, seeded by createMatch
+    const winSide = await mafiaSeatIdx(market); // "who is the Mafia?" market, seeded by createMatch
+    const loseSide = 0;                         // the round-1 "voted out" market (minted first)
     await mineUpTo(sched.bettingOpenBlock);
 
     const winOut = fx.mafiaWins ? MAFIA : TOWN;
@@ -467,7 +466,7 @@ describe("MafiaMarket factory — batch claim", () => {
     const fx = await buildSettlement(SEED, 5, "m-batch-early", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "m-batch-early", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await expect(market.connect(alice).batchClaim(0, [faction])).to.be.revertedWith("not settled");
   });
 });
@@ -479,7 +478,7 @@ describe("MafiaMarket factory — refund mode", () => {
     const fx = await buildSettlement(SEED, 5, "m-refund", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "m-refund", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     await market.connect(alice).betProp(0, faction, MAFIA, ethers.parseEther("1"));
     await market.connect(bob).betProp(0, faction, TOWN, ethers.parseEther("2"));
@@ -529,7 +528,7 @@ describe("MafiaMarket factory — refund mode", () => {
     const fx = await buildSettlement(SEED, 5, "m-batch-refund", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "m-batch-refund", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     await market.connect(alice).betProp(0, faction, MAFIA, ethers.parseEther("1"));
     await market.connect(alice).betProp(0, 0, 2, ethers.parseEther("1")); // round-1 voted-out market (propIdx 0), any outcome
@@ -541,8 +540,8 @@ describe("MafiaMarket factory — refund mode", () => {
   it("batchRefund returns every listed stake in one tx; skips unbet props; re-run reverts", async () => {
     const { market, token, alice, matchId, faction } = await abandonedMulti();
     const a0 = await token.balanceOf(alice.address);
-    // faction (1) + propIdx 0 (1) = 2; propIdx 3 is out of range → skipped, doesn't revert the batch.
-    await expect(market.connect(alice).batchRefund(matchId, [faction, 0, 3]))
+    // faction (1) + propIdx 0 (1) = 2; propIdx 99 is out of range → skipped, doesn't revert the batch.
+    await expect(market.connect(alice).batchRefund(matchId, [faction, 0, 99]))
       .to.emit(market, "BatchClaimed").withArgs(matchId, alice.address, 2, ethers.parseEther("2"));
     expect((await token.balanceOf(alice.address)) - a0).to.equal(ethers.parseEther("2"));
     expect(await market.propClaimed(matchId, faction, alice.address)).to.equal(true);
@@ -566,7 +565,7 @@ describe("MafiaMarket factory — protocol fees", () => {
     const fx = await buildSettlement(SEED, 5, "m-fee", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "m-fee", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     await market.connect(alice).betProp(0, faction, fx.mafiaWins ? MAFIA : TOWN, ethers.parseEther("1"));
     await market.connect(bob).betProp(0, faction, fx.mafiaWins ? TOWN : MAFIA, ethers.parseEther("3"));

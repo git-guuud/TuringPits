@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toProviderSeed, estimateCallTokens, rateLimitBackoffMs } from "./zerog.js";
+import { toProviderSeed, estimateCallTokens, rateLimitBackoffMs, buildInferenceRequestBody } from "./zerog.js";
 
 const MAX_INT32 = 0x7fffffff; // 2_147_483_647
 
@@ -37,6 +37,37 @@ describe("estimateCallTokens", () => {
 
   it("grows monotonically with prompt size", () => {
     expect(estimateCallTokens("x".repeat(8000))).toBeGreaterThan(estimateCallTokens("x".repeat(4000)));
+  });
+});
+
+describe("buildInferenceRequestBody", () => {
+  // Default env (COMPUTE_ENABLE_THINKING unset) → reasoning is disabled on every call.
+  it("always carries the model + single user message", () => {
+    const b = buildInferenceRequestBody("qwen3.6-plus", "hello");
+    expect(b.model).toBe("qwen3.6-plus");
+    expect(b.messages).toEqual([{ role: "user", content: "hello" }]);
+  });
+
+  it("disables the reasoning model's hidden chain-of-thought by default (fast, cheap)", () => {
+    expect(buildInferenceRequestBody("m", "p").chat_template_kwargs).toEqual({ enable_thinking: false });
+  });
+
+  it("disables reasoning even for the SIGNED decision call (no opts) — the copy-this-line task needs none", () => {
+    const signed = buildInferenceRequestBody("m", "p"); // the decision call passes no SamplingOptions
+    expect(signed.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(signed.temperature).toBeUndefined();
+    expect(signed.seed).toBeUndefined();
+  });
+
+  it("passes temperature through and masks the seed into provider range for non-signed calls", () => {
+    const b = buildInferenceRequestBody("m", "p", { temperature: 0.8, seed: 0xffffffff });
+    expect(b.temperature).toBe(0.8);
+    expect(b.seed).toBe(MAX_INT32); // toProviderSeed masks uint32 → signed-32-bit
+  });
+
+  it("omits sampling params that were not supplied", () => {
+    expect(buildInferenceRequestBody("m", "p", { temperature: 0.5 }).seed).toBeUndefined();
+    expect(buildInferenceRequestBody("m", "p", { seed: 7 }).temperature).toBeUndefined();
   });
 });
 

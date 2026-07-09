@@ -3,6 +3,7 @@ import { getBytes } from "ethers";
 import { encodeDecision, initState, applyDecision, winner as winnerOf } from "@turingpits/engine";
 import type { Action, Faction, GameState, Role } from "@turingpits/engine";
 import { claimsDetective } from "./sanitize.js";
+import { nextSpeaker, DISCUSSION_MAX_SPEECHES } from "./discussion.js";
 import type { Player } from "./player.js";
 import type { DeathEvent, Persona, PlayerTurn, TurnContext } from "./types.js";
 
@@ -294,14 +295,26 @@ export async function playMatch(config: MatchConfig): Promise<AttestedMatch> {
         if (await applyTurn(actors[i]!.seat, await pending[i]!())) break;
       }
     } else {
-      // DAY — discussion pass (unsigned, streamed), then vote pass (signed).
+      // DAY — reactive discussion FLOOR (unsigned, streamed), then vote pass (signed).
       const living = livingSeats(state);
-      for (const seat of living) {
+      // Instead of a fixed seat-order parade where every living seat speaks once, `nextSpeaker` picks who
+      // talks next from PUBLIC salience — whoever the last line named gets right-of-reply, then unspoken
+      // seats fill in — so the floor reads like a real argument. Selection reads only the public transcript
+      // (never roles), so the ORDER leaks nothing; each seat's OWN private knowledge still drives its speech
+      // via ctxFor. A line budget (default: one per living seat, so length is unchanged) caps the floor —
+      // raise DISCUSSION_MAX_SPEECHES for rebuttals, lower it for a shorter subset. Discussion is unsigned
+      // and never settles, so this reshapes the spectacle, not the mechanics.
+      const spoken = new Map<number, number>();
+      const budget = DISCUSSION_MAX_SPEECHES ?? living.length;
+      for (let said = 0; said < budget; said++) {
+        const seat = nextSpeaker({ alive: living, personas, transcript, spoken, seed, round: state.round });
+        if (seat === null) break; // floor exhausted (everyone spoke, nobody left to answer) — open the vote
         const targets = living.filter((id) => id !== seat);
         // Discussion carries the upcoming vote's action so the reason call anticipates the
         // vote target; there is no discussion-only action (no DECISION_RULE for one).
         const { speech } = await players[seat]!.discuss(ctxFor(seat, "vote", targets, "discussion"));
         transcript.push([seat, speech]);
+        spoken.set(seat, (spoken.get(seat) ?? 0) + 1);
         // Tag a Detective reveal / Mafia fake-claim so the Sequencer can promote it to a claim beat and
         // float the reveal market. Detected off the CLEANED speech (post-guard), carries no role info.
         const claim = claimsDetective(speech);

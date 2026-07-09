@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { mineUpTo } from "@nomicfoundation/hardhat-network-helpers";
-import { buildSettlement, defaultSchedule, createParams, deployMarket, fundBettors, openFaction, FACTION_OUT } from "./helpers/market";
+import { buildSettlement, defaultSchedule, createParams, deployMarket, fundBettors, factionIdx, FACTION_OUT } from "./helpers/market";
 
 // Cross-layer proof: a match driven by the real players/ layer (scripted transcript via
 // buildSettlement — same envelope shape MockLocalProvider / ZeroGDirectProvider produce) settles
@@ -50,7 +50,7 @@ describe("players ↔ MafiaMarket integration", () => {
     }));
     const matchId = 0;
     // The headline "which faction wins?" market is a normal Prop, floated at match start.
-    const faction = await openFaction(market, owner, matchId);
+    const faction = await factionIdx(market, matchId);
 
     // 4. Open betting and place a bet on the engine-winning faction (Faction outcome 1 = MAFIA, 0 = TOWN).
     await mineUpTo(sched.bettingOpenBlock);

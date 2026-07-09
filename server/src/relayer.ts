@@ -17,11 +17,11 @@
  *
  * Abuse-gating (it spends the host's real testnet 0G): allowlisted target contracts + function
  * selectors, value must be 0, a gas cap, an on-chain `verify()` pre-check (so we never submit a
- * doomed tx), a per-`from` token-bucket rate limit, and serialized submission (one tx at a time) so
- * the relayer wallet's nonces never race.
+ * doomed tx), a per-`from` token-bucket rate limit, and serialized broadcast (one send at a time, via a
+ * local NonceManager) so the relayer wallet's nonces never race while relays still mine in parallel.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { Contract, JsonRpcProvider, Wallet, Interface, formatEther, getAddress } from "ethers";
+import { Contract, JsonRpcProvider, Wallet, NonceManager, Interface, formatEther, getAddress } from "ethers";
 
 const FORWARDER_ABI = [
   "function getNonce(address from) view returns (uint256)",
@@ -159,7 +159,12 @@ export function createRelayer(cfg: RelayerConfig): Relayer | null {
 
   const provider = new JsonRpcProvider(cfg.rpcUrl, cfg.chainId);
   const wallet = new Wallet(cfg.relayerPrivateKey, provider);
-  const forwarder = new Contract(cfg.forwarderAddress, FORWARDER_ABI, wallet);
+  // A NonceManager assigns nonces from a LOCAL counter instead of re-reading the pending count from the
+  // RPC before each send. That's what lets the single relayer wallet PIPELINE — broadcast tx N+1 while
+  // tx N is still mining — without the RPC's just-submitted-tx lag handing two serialized sends the same
+  // nonce. `wallet` is kept for reads (address/balance); writes go through `signer`.
+  const signer = new NonceManager(wallet);
+  const forwarder = new Contract(cfg.forwarderAddress, FORWARDER_ABI, signer);
   const forwarderAddr = getAddress(cfg.forwarderAddress);
   const marketAddr = getAddress(cfg.marketAddress);
 
@@ -186,7 +191,10 @@ export function createRelayer(cfg: RelayerConfig): Relayer | null {
     return tokenAddrPromise;
   };
 
-  // Serialize every submission so the relayer wallet's nonces never race under concurrent requests.
+  // Serialize only the SEND (nonce assignment + broadcast) so the relayer wallet's nonces never race
+  // under concurrent requests. The receipt is awaited OUTSIDE this queue (see relay()), so the queue
+  // advances the instant a tx is broadcast — letting concurrent relays mine in parallel rather than
+  // clearing one-mined-tx-at-a-time.
   let queue: Promise<unknown> = Promise.resolve();
   const enqueue = <T>(fn: () => Promise<T>): Promise<T> => {
     const run = queue.then(fn, fn);
@@ -259,14 +267,28 @@ export function createRelayer(cfg: RelayerConfig): Relayer | null {
     const ok = (await forwarder.getFunction("verify")(req, signature)) as boolean;
     if (!ok) throw { status: 400, message: "invalid or expired signature" };
 
-    // 7. Submit (serialized) and wait for the receipt.
+    // 7. Submit, then wait for the receipt. Only the SEND is serialized (via enqueue) so the single
+    //    relayer wallet's nonces never race; the mine is awaited OUTSIDE the queue so concurrent relays
+    //    pipeline into consecutive blocks instead of the whole fleet clearing one-mined-tx-at-a-time.
     inflight.add(req.from);
     try {
-      const receipt = await enqueue(async () => {
-        const tx = await forwarder.getFunction("execute")(req, signature, { gasLimit: req.gas + 120_000n });
-        console.log(`[relayer] ${label} for ${req.from} → ${tx.hash}`);
-        return tx.wait();
+      const tx = await enqueue(async () => {
+        try {
+          const sent = await forwarder.getFunction("execute")(req, signature, { gasLimit: req.gas + 120_000n });
+          console.log(`[relayer] ${label} for ${req.from} → ${sent.hash}`);
+          return sent;
+        } catch (e) {
+          // A failed broadcast may have consumed a local nonce without ever landing a mempool tx — drop
+          // the cached delta so the NEXT send re-syncs its nonce from chain rather than leaving a
+          // permanent gap that wedges every subsequent relay. reset() runs inside the serialized send,
+          // so it's ordered before the next queued broadcast reads a nonce.
+          signer.reset();
+          throw e;
+        }
       });
+      // Await the receipt OUTSIDE the serialized send so many relays mine concurrently. We still respond
+      // only after it's mined, so the client's "tx is mined on response" contract is unchanged.
+      const receipt = await tx.wait();
       // A bet just moved the book — tell the server so it re-reads + broadcasts the live pools NOW,
       // rather than making spectators wait for the orchestrator's backstop poll. Only betProp changes
       // OPEN-market odds (claims/refunds are post-settle), so that's the only call we signal on.

@@ -26,19 +26,32 @@ function scripted(texts: string[]): { provider: InferenceProvider; prompts: stri
 }
 
 describe("hasBadMarker", () => {
-  it("flags night-confusion, the silence trope, and not-spoken-yet accusations", () => {
+  it("flags night-confusion and the not-spoken-yet / lack-of-participation trope", () => {
     for (const s of [
       "I think seat 3 is the mafia tonight.",
-      "Their silence is suspicious.",
-      "Seat 4 has been silent the whole game.",
       "Seat 4 hasn't spoken much, which worries me.",
       "Seat 2 has not spoken, so they're hiding something.",
       "Esme has been secretive since the night began.",
       "He was acting strange during the night.",
       "Their lack of involvement raises concerns.",
-      "Seat 1's defensive stance is telling.",
     ]) {
       expect(hasBadMarker(s)).toBe(true);
+    }
+  });
+
+  it("does NOT flag bare 'silence'/'silent'/'evasive'/'defensive stance' as DAY markers (legit rhetoric)", () => {
+    // 2026-07-08 loosening: the mainnet model uses these as normal debate rhetoric, not fabricated tells
+    // (diversity-probe: every such hit was a false positive). The real trope — accusing a still-WAITING
+    // NAMED player — is still caught by the 'hasn't spoken' / 'lack of participation' patterns above and
+    // by forbiddenNames. (These words ARE still caught in round-1 night reasoning; see cleanNightReason.)
+    for (const s of [
+      "Silence just helps the Mafia, so let's actually debate this.",
+      "Their silence is suspicious.",
+      "Seat 4 has been silent the whole game.",
+      "Boris, you're being evasive about which way you'll vote.",
+      "Seat 1's defensive stance is telling.",
+    ]) {
+      expect(hasBadMarker(s)).toBe(false);
     }
   });
 
@@ -130,8 +143,8 @@ describe("cleanDaySpeech", () => {
   });
 
   it("falls back to the safe line when the regenerated speech is still dirty", async () => {
-    const { provider } = scripted(["Still about their silence."]);
-    const out = await cleanDaySpeech(provider, "PROMPT", "Their silence tonight is telling.", "SAFE-FALLBACK");
+    const { provider } = scripted(["Still suspicious of them tonight."]); // retry still trips the night guard
+    const out = await cleanDaySpeech(provider, "PROMPT", "It happened last night, I'm sure of it.", "SAFE-FALLBACK");
     expect(out).toBe("SAFE-FALLBACK");
   });
 

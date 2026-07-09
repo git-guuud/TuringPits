@@ -33,8 +33,7 @@ describe("buildReasonPrompt", () => {
   it("includes the public transcript and the legal targets", () => {
     const p = buildReasonPrompt(base);
     expect(p).toContain("seat 3 is suspicious");
-    // Legal targets are present but listed in a per-turn shuffled DISPLAY order (breaks seat-0 bias),
-    // so assert the SET, not a fixed sequence.
+    // Legal targets are present (natural seat order now the display shuffle is gone); assert the SET.
     const seats = p.match(/Legal target seats: ([^\n.]+)/)![1]!.match(/\d+/g)!.map(Number).sort((a, b) => a - b);
     expect(seats).toEqual([0, 1, 3, 4]);
   });
@@ -194,26 +193,17 @@ describe("buildDiscussionPrompt", () => {
     expect(p).toContain("don't invent behaviour for anyone");
   });
 
-  it("flips to a first-person self-defense when the table is turning on this seat", () => {
+  it("folds self-defense into the open reactor as a static clause (no forced underFire branch)", () => {
+    // The separate underFire branch is gone; the open task always carries the anti-self-railroad clause,
+    // so an accused seat fights back without the model being told, per seat, that it is under fire.
     const ctx: TurnContext = {
       ...base, roster,
       persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
       transcript: [[0, "I suspect Cleo is hiding something — let's vote her out today."]],
     };
     const p = buildDiscussionPrompt(ctx);
-    expect(p).toContain("The table is turning on YOU");
-    expect(p).toContain("Fight back now");
-    expect(p).not.toContain("move today's vote forward"); // not the generic reactor task
-  });
-
-  it("does NOT flip to self-defense on a purely positive mention of this seat", () => {
-    const ctx: TurnContext = {
-      ...base, roster,
-      persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
-      transcript: [[0, "I really trust Cleo — she's been thoughtful and fair today."]],
-    };
-    const p = buildDiscussionPrompt(ctx);
-    expect(p).not.toContain("The table is turning on YOU");
+    expect(p).toContain("If the table is turning on YOU, defend yourself");
+    expect(p).toContain("never agree to your own removal");
   });
 
   it("a Detective with only cleared-Town results vouches instead of accusing them", () => {
@@ -227,7 +217,7 @@ describe("buildDiscussionPrompt", () => {
     expect(p).not.toContain("move today's vote forward"); // not the generic accuse-someone reactor task
   });
 
-  it("a Detective that has CAUGHT a Mafia still reveals (caught outranks vouch)", () => {
+  it("a Detective that has CAUGHT a Mafia still reveals (caught outranks vouch), now de-scripted", () => {
     const ctx: TurnContext = {
       ...base, roster, role: "DETECTIVE",
       investigations: [
@@ -236,31 +226,28 @@ describe("buildDiscussionPrompt", () => {
       ],
     };
     const p = buildDiscussionPrompt(ctx);
-    expect(p).toContain("reveal it now");          // the reveal task (with a fill-in template)
-    expect(p).toContain("I am the Detective");      // the template exemplar
+    expect(p).toContain("reveal it now");             // the reveal is still the task…
+    expect(p).toContain("say you are the Detective");  // …the three beats stated as requirements…
+    expect(p).toContain("investigated Dmitri");        // …phrased in the seat's own words
+    expect(p).not.toContain('"I am the Detective. I investigated'); // the verbatim exemplar is gone
     expect(p).toContain("Dmitri"); // the caught Mafia is named as the reveal target
   });
 
-  it("hands a round-2 MAFIA a fake-Detective bluff aimed at the most-suspected non-teammate", () => {
+  it("no longer FORCES a Mafia bluff — it carries the open fake-claim PERMISSION instead", () => {
+    // The forced fake-Detective branch (with a computed named frame) is gone; a Mafia now gets the open
+    // reactor plus CLAIM_GUIDANCE's licence to bluff, and authors the frame itself (diversity-probe).
     const ctx: TurnContext = {
-      ...base, roster, role: "MAFIA", teammates: [4], // Esme (seat 4) is the secret ally
+      ...base, roster, role: "MAFIA", teammates: [4],
       persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
-      transcript: [
-        [0, "Dmitri keeps dodging every question — I suspect him."],
-        [1, "I'd vote Dmitri today, he's hiding something."],
-      ],
+      transcript: [[0, "Dmitri keeps dodging every question — I suspect him."]],
       decisionStub: { nonce: "deadbeef", phase: "day", round: 2, player: 2, action: "vote" },
     };
     const p = buildDiscussionPrompt(ctx);
-    expect(p).toContain("claim the Detective role");             // the bluff is the TASK
-    expect(p).toContain("Dmitri is Mafia");                      // aimed at the suspected non-teammate
-    expect(p).toContain("vote Dmitri out today");
-    expect(p).not.toContain("vote Esme out");                    // never frames the teammate
-    expect(p).not.toContain("Esme is Mafia");
-    expect(p).not.toContain("tonight");                          // safe for the day guard
+    expect(p.toLowerCase()).toContain("falsely claim");    // CLAIM_GUIDANCE permission present
+    expect(p).not.toContain("claim the Detective role");   // but no forced bluff TASK
   });
 
-  it("never frames a teammate even when the table most suspects the ally", () => {
+  it("never scripts a frame onto a teammate (there is no computed frame target now)", () => {
     const ctx: TurnContext = {
       ...base, roster, role: "MAFIA", teammates: [4],
       persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
@@ -271,53 +258,12 @@ describe("buildDiscussionPrompt", () => {
       decisionStub: { nonce: "deadbeef", phase: "day", round: 2, player: 2, action: "vote" },
     };
     const p = buildDiscussionPrompt(ctx);
-    expect(p).toContain("claim the Detective role"); // still bluffs (a non-teammate exists)
-    expect(p).not.toContain("vote Esme out today");  // but the frame is never the ally
-    expect(p).not.toContain("Esme is Mafia");
-  });
-
-  it("does NOT bluff a round-1 MAFIA (no credible frame has formed yet)", () => {
-    const ctx: TurnContext = {
-      ...base, roster, role: "MAFIA", teammates: [4],
-      persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
-      transcript: [[0, "Dmitri keeps dodging — I suspect him."]],
-      decisionStub: { nonce: "deadbeef", phase: "day", round: 1, player: 2, action: "vote" },
-    };
-    const p = buildDiscussionPrompt(ctx);
-    expect(p).not.toContain("claim the Detective role");
-    expect(p).toContain("do exactly this:"); // the generic per-seat angle reactor instead
-  });
-
-  it("a round-2 MAFIA under fire turns the bluff on its accuser (bluff outranks generic self-defense)", () => {
-    // A Mafia is usually suspected by round 2; claiming Detective and framing the accuser is a stronger,
-    // more watchable reply than a bland rebuttal — so the bluff outranks the self-defense branch here.
-    const ctx: TurnContext = {
-      ...base, roster, role: "MAFIA", teammates: [4],
-      persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
-      transcript: [[0, "Cleo is hiding something — let's vote Cleo out today."]], // Ada accuses Cleo
-      decisionStub: { nonce: "deadbeef", phase: "day", round: 2, player: 2, action: "vote" },
-    };
-    const p = buildDiscussionPrompt(ctx);
-    expect(p).toContain("claim the Detective role");
-    expect(p).toContain("Ada is Mafia");                        // frames the accuser, not a random seat
-    expect(p).not.toContain("The table is turning on YOU");     // not the generic self-defense
-  });
-
-  it("a round-1 MAFIA under fire still falls back to self-defense (no bluff before round 2)", () => {
-    const ctx: TurnContext = {
-      ...base, roster, role: "MAFIA", teammates: [4],
-      persona: { seat: 2, name: "Cleo", blurb: "a peacemaker" },
-      transcript: [[0, "Cleo is hiding something — let's vote Cleo out today."]],
-      decisionStub: { nonce: "deadbeef", phase: "day", round: 1, player: 2, action: "vote" },
-    };
-    const p = buildDiscussionPrompt(ctx);
-    expect(p).not.toContain("claim the Detective role");
-    expect(p).toContain("The table is turning on YOU");
+    expect(p).not.toContain("Esme is Mafia");              // the ally is never framed in the task
+    expect(p).toContain("never knowingly accuse them");    // publicFactsBlock still protects the ally
   });
 });
 
-describe("buildDiscussionPrompt — per-seat rhetorical angles (mode-collapse fix)", () => {
-  // A 6-seat table so the (seat + round) angle assignment can cover all six angles in one round.
+describe("buildDiscussionPrompt — light opening-stance nudge (post-fluidity rework)", () => {
   const sixRoster = [
     { seat: 0, name: "Ada", blurb: "a tactician" },
     { seat: 1, name: "Boris", blurb: "an accuser" },
@@ -326,7 +272,6 @@ describe("buildDiscussionPrompt — per-seat rhetorical angles (mode-collapse fi
     { seat: 4, name: "Esme", blurb: "a strategist" },
     { seat: 5, name: "Felix", blurb: "a prosecutor" },
   ];
-  // Several seats have spoken (and the table is leaning on Dmitri) so the name-bearing angles fire.
   const sixBase = (seat: number, round = 2): TurnContext => ({
     persona: { seat, ...sixRoster[seat]! },
     role: "TOWN",
@@ -342,76 +287,36 @@ describe("buildDiscussionPrompt — per-seat rhetorical angles (mode-collapse fi
     stage: "discussion",
   });
 
-  // The last line of the prompt IS the assigned angle task (it ends on its action command).
-  const taskOf = (ctx: TurnContext): string => {
-    const lines = buildDiscussionPrompt(ctx).split("\n");
-    return lines[lines.length - 1]!;
-  };
+  // The suggested opening stance embedded in the open task ("For variety, try <stance> — then say…").
+  const stanceOf = (ctx: TurnContext): string | undefined =>
+    buildDiscussionPrompt(ctx).match(/For variety, try (.+?) — then say your piece now\./)?.[1];
 
-  it("gives every living seat a DISTINCT angle in the same round (no shared template)", () => {
-    const tasks = [0, 1, 2, 3, 4, 5].map((seat) => taskOf(sixBase(seat)));
-    expect(new Set(tasks).size).toBe(tasks.length); // all six are different
+  it("gives every seat the SAME open reactor task (no forced per-seat rhetorical move)", () => {
+    const p = buildDiscussionPrompt(sixBase(2));
+    expect(p).toContain("react to the discussion and drive today's vote forward");
+    expect(p).toContain("Take a real position");
   });
 
-  it("rotates a given seat's angle across rounds (so it isn't the same move every day)", () => {
-    const r2 = taskOf(sixBase(2, 2));
-    const r3 = taskOf(sixBase(2, 3));
-    expect(r2).not.toBe(r3);
+  it("varies only a LIGHT opening-stance nudge across seats (breaks the shared opening attractor)", () => {
+    // Different (seat + round) → a different suggested stance, so seats don't all open the same way.
+    const s0 = stanceOf(sixBase(0, 2));
+    const s1 = stanceOf(sixBase(1, 2)); // (1+2) vs (0+2) → a different stance
+    expect(s0).toBeDefined();
+    expect(s1).toBeDefined();
+    expect(s0).not.toBe(s1);
   });
 
-  it("each angle ends on its own action command, not on a 'today not tonight' reminder", () => {
+  it("rotates a given seat's stance across rounds (not the same lean every day)", () => {
+    expect(stanceOf(sixBase(2, 2))).not.toBe(stanceOf(sixBase(2, 3)));
+  });
+
+  it("the nudge is TARGET-FREE — it names no player (the model grounds who in the transcript)", () => {
     for (const seat of [0, 1, 2, 3, 4, 5]) {
-      const t = taskOf(sixBase(seat));
-      expect(t.trimEnd()).toMatch(/now\.$|now\.”?$/i); // … now.
-      expect(t.trimEnd()).not.toMatch(/tonight"?\)?\.?$/i);
-    }
-  });
-
-  it("angles only name players grounded in the transcript, never a silent uninvolved seat", () => {
-    // Grounded = a seat that has spoken (0=Ada, 1=Boris, 5=Felix) or the seat the table is already
-    // suspecting (3=Dmitri, the heat target). Cleo (2) and Esme (4) are neither, so no angle may
-    // put words on them — that would be the exact invented-behaviour fabrication the guard rejects.
-    const grounded = new Set(["Ada", "Boris", "Felix", "Dmitri"]);
-    for (const seat of [0, 1, 2, 3, 4, 5]) {
-      const t = taskOf(sixBase(seat));
-      for (const name of ["Cleo", "Esme"]) {
-        if (name === sixRoster[seat]!.name) continue; // ignore self-name (the angles never use it)
-        expect(t).not.toContain(name);
+      const stance = stanceOf(sixBase(seat)) ?? "";
+      for (const name of ["Ada", "Boris", "Cleo", "Dmitri", "Esme", "Felix"]) {
+        expect(stance).not.toContain(name);
       }
-      const named = ["Ada", "Boris", "Dmitri", "Esme", "Felix"].filter(
-        (n) => n !== sixRoster[seat]!.name && t.includes(n),
-      );
-      for (const n of named) expect(grounded.has(n)).toBe(true);
     }
-  });
-
-  it("the defender angle targets whoever the table is piling on (the most-suspected seat)", () => {
-    // Find the seat whose (seat+round)%6 === 2 (the defender angle): seat 0 at round 2.
-    const t = taskOf(sixBase(0, 2));
-    expect(t).toContain("Dmitri is being mobbed"); // the pile-on target, chosen concretely
-  });
-
-  it("falls back to a name-free angle variant when no peer has spoken yet", () => {
-    // Round 1, second speaker, only the opener (seat 0) has spoken: a questioner/builder seat still
-    // gets a coherent angle, just without a peer name.
-    const ctx: TurnContext = {
-      persona: { seat: 4, ...sixRoster[4]! }, // (4 + 2) % 6 = 0 → questioner
-      role: "TOWN",
-      roster: sixRoster,
-      alive: [0, 1, 2, 3, 4, 5],
-      transcript: [[0, "I have no read yet — let's hear from everyone."]],
-      decisionStub: { nonce: "deadbeef", phase: "day", round: 2, player: 4, action: "vote" },
-      legalTargets: [0, 1, 2, 3, 5],
-      stage: "discussion",
-    };
-    const t = taskOf(ctx);
-    // peer = Ada (seat 0 spoke); questioner angle names Ada. Now use a transcript where the only
-    // speaker is the seat itself so spokenPeers is empty → name-free variant.
-    expect(t).toContain("Ada"); // sanity: peer-bearing when a peer exists
-    const noPeer: TurnContext = { ...ctx, transcript: [[4, "I'll open: who do we trust?"]] };
-    const tNoPeer = taskOf(noPeer);
-    expect(tNoPeer.toLowerCase()).toContain("ask it now"); // questioner fallback, no peer name
-    for (const name of ["Ada", "Boris", "Cleo", "Dmitri", "Felix"]) expect(tNoPeer).not.toContain(name);
   });
 });
 
@@ -606,7 +511,7 @@ describe("drama directive & speech budget", () => {
 
   it("marries the drama to grounding — never manufacture facts you could not know", () => {
     const p = buildDiscussionPrompt({ ...base, stage: "discussion" }).toLowerCase();
-    expect(p).toContain("never manufacture facts you could not know");
+    expect(p).toContain("never make up facts you could not know");
     expect(p).toContain("never read body language, tone, or nerves"); // NO_INVENTION still enforced
   });
 

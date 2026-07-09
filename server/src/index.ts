@@ -25,7 +25,8 @@ import { createPoolSignal } from "./pool-signal.js";
 import { createNameRegistry } from "./names.js";
 import { createTts, parseKeys } from "./tts.js";
 import { DEFAULT_FALLBACK_VOICE, loadVoiceMap } from "./voices.js";
-import { runOneMatch, sweepAbandonedMatches, type OrchestratorConfig } from "./orchestrator.js";
+import { createProviderCache } from "./match-runner.js";
+import { prepareRound, runOneMatch, sweepAbandonedMatches, type OrchestratorConfig } from "./orchestrator.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const INTERMISSION_SECONDS = Number(process.env.INTERMISSION_SECONDS ?? 60);
@@ -50,6 +51,11 @@ async function main() {
   // match registers its pool pusher on it — so the odds move as fast as the bet mines, not on a poll.
   const poolSignal = createPoolSignal();
 
+  // ONE provider bundle for all rounds: the live build (broker setup + a PAID probe inference,
+  // ~10-20s) runs once; each round's getProvider just re-checks the TEE signer and rebuilds only on
+  // rotation. Invalidated after a failed match so a stale signer/meta can't wedge every later round.
+  const providerCache = createProviderCache();
+
   const cfg: OrchestratorConfig = {
     rpcUrl: process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai",
     chainId: Number(process.env.CHAIN_ID ?? 16602),
@@ -65,7 +71,9 @@ async function main() {
     storageRpcUrl: process.env.ZEROG_STORAGE_RPC_URL ?? process.env.ZEROG_RPC_URL ?? "https://evmrpc-testnet.0g.ai",
     storagePrivateKey: process.env.STORAGE_PRIVATE_KEY ?? process.env.HOST_PRIVATE_KEY ?? "",
     bettingWindowSeconds: Number(process.env.BETTING_WINDOW_SECONDS ?? 90),
-    openLeadSeconds: Number(process.env.OPEN_LEAD_SECONDS ?? 12),
+    // Covers only createMatch's own tx inclusion (~1-2 blocks): the orchestrator samples the chain
+    // head immediately before the create tx, so nothing else eats into this lead anymore.
+    openLeadSeconds: Number(process.env.OPEN_LEAD_SECONDS ?? 5),
     // Deliberate pause on the freshly-convened court before the first night — so a new round doesn't cut
     // straight to nightfall and there's real time to back the headline markets. 0 = instant start.
     preMatchBettingSeconds: Number(process.env.PRE_MATCH_BETTING_SECONDS ?? 20),
@@ -85,6 +93,7 @@ async function main() {
     blocksPerSecond: Number(process.env.BLOCKS_PER_SECOND ?? 2.0),
     onMatchCreated: (matchId, deadline) => pending.set(matchId, deadline),
     poolSignal,
+    getProvider: () => providerCache.get(),
   };
 
   // Optional EIP-2771 gas relayer — only active if RELAYER_PRIVATE_KEY + FORWARDER_ADDRESS are set.
@@ -148,6 +157,11 @@ async function main() {
   );
   console.log(`[server] market=${cfg.marketAddress} chain=${cfg.chainId} seats=${cfg.playerCount}`);
 
+  // Round 1's evidence (seed + personas + the slow 0G Storage persona upload, ~20-60s when enabled)
+  // is prepared at boot, before any client connects; every later round's is prepared during the
+  // intermission below. Either way the upload never sits between a client connecting and wagers opening.
+  let prepared = await prepareRound(cfg);
+
   // Run rounds back-to-back forever, with a short intermission between each.
   for (let round = 1; ; round++) {
     // Backstop: drive any abandoned, past-deadline match into RefundMode so its bettors can recover
@@ -166,17 +180,24 @@ async function main() {
     console.log(`[server] round ${round}: client connected — starting match.`);
 
     try {
-      // Each round is independent: orchestrator resets the hub buffer and (unless MATCH_SEED is
-      // pinned) draws a fresh random seed, so every round is a brand-new match. `tts` lets the
-      // orchestrator pace the stage to the actual spoken duration (and pre-warm each clip's cache).
-      await runOneMatch(hub, cfg, tts);
+      // Each round is independent: orchestrator resets the hub buffer and runs the pre-built
+      // `prepared` seed/personas (fresh-random per round unless MATCH_SEED is pinned), so every
+      // round is a brand-new match. `tts` lets the orchestrator pace the stage to the actual
+      // spoken duration (and pre-warm each clip's cache).
+      await runOneMatch(hub, cfg, tts, prepared);
       console.log(`[server] round ${round}: match complete.`);
     } catch (err) {
       console.error(`[server] round ${round}: match failed:`, err);
+      // A failed round can mean the cached provider went stale mid-match (e.g. settle() hit
+      // "bad TEE signature" after a TEE restart) — drop it so the next round rebuilds cleanly.
+      providerCache.invalidate();
     }
 
     console.log(`[server] intermission — next round in ~${INTERMISSION_SECONDS}s.`);
-    await sleep(INTERMISSION_SECONDS * 1000);
+    // Prepare the NEXT round's evidence while the intermission clock runs. Overlapping the sleep
+    // alone is nonce-safe: the match is over, and the next round's sweep (host-wallet txs) starts
+    // only after this settles — so the storage upload (same wallet) never races another tx.
+    [prepared] = await Promise.all([prepareRound(cfg), sleep(INTERMISSION_SECONDS * 1000)]);
   }
 }
 

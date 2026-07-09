@@ -1213,7 +1213,7 @@ export interface MatchSummary extends MarketRead {
   factionState?: PropSnapshot["state"];
   /** The winning FACTION outcome when RESOLVED: 1 = MAFIA (Acquitted), 0 = TOWN (Convicted). */
   factionWinner?: number;
-  /** Total staked on the FACTION market (CHIP decimal string) — the battle's headline pot. */
+  /** Total staked across EVERY market on the battle (CHIP decimal string) — the card's whole pot. */
   pot: string;
   /** 0G Storage content root of the persona pool (evidence). ZeroHash when storage is off. */
   personaPoolRoot?: string;
@@ -1222,20 +1222,26 @@ export interface MatchSummary extends MarketRead {
 }
 
 /**
- * Read the headline FACTION prop for a match. It's opened first at match start, so it sits at the
- * deterministic index 2 (right after createMatch's 2 base props). Guarded: if that prop isn't the
- * faction market (a malformed/legacy match), the verdict is left unresolved with a zero pot.
+ * Read every market of a match in one getProps call → the headline FACTION verdict AND the WHOLE pot.
+ * The pot is the total CHIP staked across EVERY market (faction verdict + all side markets), not just
+ * the faction wager — the History card's "pot" figure. The headline verdict is read from the FACTION
+ * prop, opened first at match start so it sits at the deterministic index 2; if it's missing/malformed
+ * (a legacy/malformed match) the verdict is left unresolved. A read failure yields a zero pot.
  */
-async function readFactionProp(
-  c: Contract,
+async function readFactionAndPot(
+  address: string,
   matchId: number,
 ): Promise<{ state?: PropSnapshot["state"]; winner?: number; pot: string }> {
   try {
-    const pr = await c.getFunction("getProp")(matchId, FACTION_PROP_INDEX);
-    if (Number(pr.kind) !== 5) return { pot: "0" }; // not the FACTION prop → treat as unresolved
-    const pot = formatEther((pr.pools as bigint[]).reduce((a, p) => a + p, 0n));
-    const state = PROP_STATE[Number(pr.state)];
-    return { state, winner: state === "RESOLVED" ? Number(pr.winningOutcome) : undefined, pot };
+    const props = await readProps(address, matchId);
+    // Whole pot: sum every outcome pool across every market on this match (pools are CHIP decimal strings).
+    const total = props.reduce((a, p) => a + p.pools.reduce((s, v) => s + parseFloat(v), 0), 0);
+    const faction = props.find((p) => p.index === FACTION_PROP_INDEX && p.kind === "FACTION");
+    return {
+      state: faction?.state,
+      winner: faction?.state === "RESOLVED" ? faction.winningOutcome : undefined,
+      pot: total.toString(),
+    };
   } catch {
     return { pot: "0" };
   }
@@ -1246,7 +1252,7 @@ export async function readMatchSummary(matchId: number, address = MARKET_ADDRESS
   const c = new Contract(address, MAFIA_MARKET_ABI, readProvider());
   const m = await c.getFunction("matches")(matchId);
   const playerCount = Number(m.playerCount);
-  const faction = await readFactionProp(c, matchId);
+  const faction = await readFactionAndPot(address, matchId);
   return {
     matchId,
     state: MARKET_STATE[Number(m.state)] ?? "OPEN",

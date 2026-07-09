@@ -24,7 +24,7 @@ async function opened(nonce: string, n = 6) {
   const sched = await defaultSchedule(ethers.provider);
   await ctx.market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce, playerCount: n, schedule: sched }));
   await mineUpTo(sched.bettingOpenBlock);
-  const voIdx = (round: number) => (round === 1 ? 0 : round); // this suite only opens VotedOut rounds
+  const voIdx = (round: number) => (round === 1 ? 0 : round + 2); // only VotedOut rounds opened; +2 skips the seeded Faction/MafiaSeat
   const noOne = n; // last outcome of a RoundVotedOut market = "no one"
   return { ...ctx, fx, sched, teeSigner, matchId: 0, n, voIdx, noOne };
 }
@@ -32,7 +32,7 @@ async function opened(nonce: string, n = 6) {
 describe("MafiaMarket — batch read views: getProps", () => {
   it("returns the whole prop array, field-for-field identical to per-index getProp", async () => {
     const { market, owner } = await opened("bv-getprops");
-    await market.connect(owner).openVotedOutRound(0); // give the match a 3rd prop so length > the two defaults
+    await market.connect(owner).openVotedOutRound(0); // give the match a 5th prop so length > the four defaults
     const count = Number(await market.propCount(0));
     const all = await market.getProps(0);
     expect(all.length).to.equal(count);

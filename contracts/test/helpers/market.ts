@@ -125,12 +125,26 @@ export function createParams(opts: {
 /** Faction market outcomes (MafiaMarket PropKind.Faction): 0 = TOWN wins, 1 = MAFIA wins. */
 export const FACTION_OUT = { TOWN: 0, MAFIA: 1 } as const;
 
+/** PropKind enum (MafiaMarket.sol) — the label authority for addressing markets. */
+export const PROP_KIND = { PlayerFate: 0, RoundVotedOut: 1, NightKill: 2, DetectiveClaim: 3, MafiaSeat: 4, Faction: 5 } as const;
+
 /**
- * Open the headline faction market on `matchId` and return its propIdx (the array tail at open time).
- * The orchestrator does this once at match start; tests that exercise faction betting call it directly.
+ * Find the propIdx of the first market of `kind` — tests address markets by kind, never by a fixed
+ * index (the recurring kinds interleave as rounds open). Throws if absent so a missing seeded market
+ * fails loudly instead of betting the wrong prop.
  */
-export async function openFaction(market: any, owner: any, matchId: number | bigint = 0): Promise<number> {
-  const idx = Number(await market.propCount(matchId));
-  await market.connect(owner).openFactionMarket(matchId);
-  return idx;
+export async function propIdxOf(market: any, kind: number, matchId: number | bigint = 0): Promise<number> {
+  const count = Number(await market.propCount(matchId));
+  for (let i = 0; i < count; i++) {
+    if (Number((await market.getProp(matchId, i)).kind) === kind) return i;
+  }
+  throw new Error(`no prop of kind ${kind} on match ${matchId}`);
 }
+
+/** The headline "which faction wins?" market's propIdx — seeded by createMatch, located by kind. */
+export const factionIdx = (market: any, matchId: number | bigint = 0): Promise<number> =>
+  propIdxOf(market, PROP_KIND.Faction, matchId);
+
+/** The "Who is the Mafia?" market's propIdx — seeded by createMatch, located by kind. */
+export const mafiaSeatIdx = (market: any, matchId: number | bigint = 0): Promise<number> =>
+  propIdxOf(market, PROP_KIND.MafiaSeat, matchId);

@@ -181,26 +181,22 @@ contract MafiaMarket is ERC2771Context {
     ///         claim is an unpredictable speech event — and there is at most ONE per match, so this is a
     ///         plain open-once guard rather than a counter.
     mapping(uint256 => bool) public detectiveClaimOpened;
-    /// @notice Whether this match's single "Who is the Mafia?" market has been floated yet
-    ///         (openMafiaSeatMarket). Like DetectiveClaim it is NOT seeded at createMatch and there is at
-    ///         most ONE per match, so this is a plain open-once guard. The host opens it at match start so
-    ///         it is bettable for the whole match.
-    mapping(uint256 => bool) public mafiaSeatOpened;
-    /// @notice Whether this match's headline "which faction wins?" market has been floated yet
-    ///         (openFactionMarket). Like the other singles it is NOT seeded at createMatch; the host opens
-    ///         it at match start (mandatory — the match's core market) so it is bettable for the whole match.
-    mapping(uint256 => bool) public factionMarketOpened;
 
     event MatchCreated(
         uint256 indexed matchId, bytes32 roleCommit, bytes32 entropySeed, bytes32 personaPoolRoot,
         address teeSigner, uint8 playerCount,
         uint64 bettingOpenBlock, uint64 bettingCloseBlock, uint64 matchStartBlock, uint64 settlementDeadlineBlock
     );
-    /// @notice Side markets auto-created with the match: the round-1 RoundVotedOut and round-1 NightKill
-    ///         markets, so `count` == 2 at creation. (The per-seat PlayerFate/survival market is not
-    ///         floated for now.) Later RoundVotedOut / NightKill rounds are appended on demand (see
-    ///         openVotedOutRound / openNightKillRound and their *RoundOpened events).
+    /// @notice Markets auto-created with the match: round-1 RoundVotedOut, round-1 NightKill, the
+    ///         headline Faction market and the MafiaSeat market — so `count` == 4 at creation. (The
+    ///         per-seat PlayerFate/survival market is not floated for now.) Later RoundVotedOut /
+    ///         NightKill rounds are appended on demand (openVotedOutRound / openNightKillRound); only
+    ///         DetectiveClaim stays fully on-demand (a claim is an unpredictable speech event).
     event PropsCreated(uint256 indexed matchId, uint256 count);
+    /// @notice The "Who is the Mafia?" market, seeded by createMatch (startIdx == 3).
+    event MafiaSeatMarketOpened(uint256 indexed matchId, uint256 startIdx);
+    /// @notice The headline "which faction wins?" market, seeded by createMatch (startIdx == 2).
+    event FactionMarketOpened(uint256 indexed matchId, uint256 startIdx);
 
     modifier onlyOwner() { require(msg.sender == owner, "not owner"); _; }
     modifier onlyTreasury() { require(msg.sender == protocolTreasury, "not treasury"); _; }
@@ -258,22 +254,30 @@ contract MafiaMarket is ERC2771Context {
             p.bettingOpenBlock, p.bettingCloseBlock, p.matchStartBlock, p.settlementDeadlineBlock
         );
 
-        // Auto-create the two RECURRING per-round side markets' round 1, resolved from the same verified
-        // run at settle():
+        // Auto-create every market the match needs from block one, resolved from the same verified
+        // run / revealed roles at settle():
         //   props[0]  RoundVotedOut, round 1 (param == 1; playerCount + 1 outcomes)
         //   props[1]  NightKill,     round 1 (param == 1; playerCount + 1 outcomes)
-        // so propCount(matchId) == 2 at creation. The per-seat "player fate" (survival) market is REMOVED
-        // for now — createMatch no longer mints it. The PropKind.PlayerFate branch + FATE_BUCKETS are kept
-        // intact so re-adding it is just restoring a `for (seat..) props.push(PlayerFate)` loop here. Both
-        // recurring markets append their later rounds on demand (openVotedOutRound / openNightKillRound),
-        // and the on-demand singles (Faction, MafiaSeat, DetectiveClaim) float at the tail, so the kinds
-        // interleave — DON'T assume a fixed index formula: the server/UI maps propIdx ⇄ (kind, param) by
-        // reading each Prop's fields (kind is the label authority).
+        //   props[2]  Faction  — the headline "which faction wins?" (2 outcomes: 0 = TOWN, 1 = MAFIA)
+        //   props[3]  MafiaSeat — "Who is the Mafia?" (one outcome per seat)
+        // so propCount(matchId) == 4 at creation, and the host spends ZERO post-create txs opening the
+        // two singles (they used to be two extra owner txs sitting on the match-start critical path).
+        // The per-seat "player fate" (survival) market is REMOVED for now — createMatch doesn't mint
+        // it. The PropKind.PlayerFate branch + FATE_BUCKETS are kept intact so re-adding it is just
+        // restoring a `for (seat..) props.push(PlayerFate)` loop here. The recurring markets append
+        // their later rounds on demand (openVotedOutRound / openNightKillRound) and DetectiveClaim
+        // floats at the tail if a claim happens, so the kinds interleave — DON'T assume a fixed index
+        // formula: the server/UI maps propIdx ⇄ (kind, param) by reading each Prop's fields (kind is
+        // the label authority).
         Prop[] storage props = _props[matchId];
         props.push(_newProp(PropKind.RoundVotedOut, 1, p.playerCount + 1));
         props.push(_newProp(PropKind.NightKill, 1, p.playerCount + 1));
         votedOutRoundsOpened[matchId] = 1;  // round-1 "voted out" market created up front
         nightKillRoundsOpened[matchId] = 1; // round-1 "night kill" market created up front
+        props.push(_newProp(PropKind.Faction, 0, 2));
+        emit FactionMarketOpened(matchId, props.length - 1);
+        props.push(_newProp(PropKind.MafiaSeat, 0, p.playerCount));
+        emit MafiaSeatMarketOpened(matchId, props.length - 1);
         emit PropsCreated(matchId, props.length);
     }
 
@@ -436,49 +440,11 @@ contract MafiaMarket is ERC2771Context {
         emit DetectiveClaimOpened(matchId, startIdx, seat);
     }
 
-    event MafiaSeatMarketOpened(uint256 indexed matchId, uint256 startIdx);
-
-    /// @notice Open the single "Who is the Mafia?" market — one categorical prop with one outcome per
-    ///         seat (numOutcomes == playerCount, param unused). NOT seeded at createMatch; the host floats
-    ///         it once at match start (open-once via mafiaSeatOpened) so it is bettable for the whole match.
-    ///         onlyOwner and only while betting is open (state == Created).
-    /// @dev    Adds NO settlement trust: it resolves from the SAME commit-reveal-verified roles at settle()
-    ///         (the Mafia seat), so it only creates the wagering surface. Stays open until settle — roles
-    ///         are hidden until the reveal, so the answer can't become public mid-match to justify a freeze.
-    /// @return startIdx the propIdx of the new market.
-    function openMafiaSeatMarket(uint256 matchId) external onlyOwner returns (uint256 startIdx) {
-        Match storage m = matches[matchId];
-        require(m.state == MatchState.Created, "not open");
-        require(m.playerCount > 0, "no match");
-        require(!mafiaSeatOpened[matchId], "already opened");
-        Prop[] storage props = _props[matchId];
-        startIdx = props.length;
-        props.push(_newProp(PropKind.MafiaSeat, 0, m.playerCount));
-        mafiaSeatOpened[matchId] = true;
-        emit MafiaSeatMarketOpened(matchId, startIdx);
-    }
-
-    event FactionMarketOpened(uint256 indexed matchId, uint256 startIdx);
-
-    /// @notice Open the headline "which faction wins?" market — one binary prop (2 outcomes: 0 = TOWN
-    ///         wins, 1 = MAFIA wins), param unused. NOT seeded at createMatch; the host floats it once at
-    ///         match start (open-once via factionMarketOpened) so it is bettable the whole match. This is
-    ///         the match's core market, so the host treats the open as MANDATORY. onlyOwner and only while
-    ///         betting is open (state == Created).
-    /// @dev    Resolves from the SAME verified run at settle(): MAFIA(1) if g.mafiaWins else TOWN(0); a
-    ///         mistrial (g.over == false) Voids the market (full refund) — there is no draw fee.
-    /// @return startIdx the propIdx of the new market.
-    function openFactionMarket(uint256 matchId) external onlyOwner returns (uint256 startIdx) {
-        Match storage m = matches[matchId];
-        require(m.state == MatchState.Created, "not open");
-        require(m.playerCount > 0, "no match");
-        require(!factionMarketOpened[matchId], "already opened");
-        Prop[] storage props = _props[matchId];
-        startIdx = props.length;
-        props.push(_newProp(PropKind.Faction, 0, 2));
-        factionMarketOpened[matchId] = true;
-        emit FactionMarketOpened(matchId, startIdx);
-    }
+    // (The Faction + MafiaSeat singles are seeded by createMatch — see PropsCreated — so there are
+    // no open functions for them: every match has both from block one, one outcome set apiece.
+    // Faction resolves MAFIA(1)/TOWN(0) from the verified run — a mistrial Voids it, fee-free;
+    // MafiaSeat resolves to the seat whose commit-reveal-verified role is MAFIA. Both stay open
+    // until settle: their answers are hidden until the reveal, so no mid-match freeze is needed.)
 
     // Optional, owner-only manual close. Betting otherwise stays open until settle(); the host can
     // call this to freeze the pools early (e.g. once the match ends, before submitting settlement).

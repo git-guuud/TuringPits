@@ -29,22 +29,22 @@ import type { Persona } from "./wire.js";
  * the max seat count (8) so a match never has to repeat a persona.
  */
 const ROSTER: Omit<Persona, "seat">[] = [
-  { name: "Atlas", blurb: "thunderous and absolute; hurls one-line verdicts like a gavel and dares you to argue" },
-  { name: "Vesper", blurb: "dry and lethal; needles with silky understatement and questions that draw blood" },
-  { name: "Nova", blurb: "burning-earnest; pleads, hopes aloud, and takes every betrayal to heart" },
-  { name: "Kestrel", blurb: "restless and razor-quick; fires clipped, staccato jabs and never sits still" },
-  { name: "Mira", blurb: "coolly judicial; weighs both sides aloud, then brings the hammer down hard" },
-  { name: "Juno", blurb: "unshakable and plainspoken; slow to anger, impossible to rattle, deadly once set" },
-  { name: "Oracle", blurb: "cryptic and grave; drops short, riddling lines that land like prophecy" },
-  { name: "Cassius", blurb: "icy and lawyerly; builds one airtight, merciless argument and closes the case" },
-  { name: "Pip", blurb: "breezy and mischievous; jokes, charms, and slips the knife in while you're laughing" },
-  { name: "Rook", blurb: "grim and sparing; a few heavy words that shut the room up" },
-  { name: "Lark", blurb: "bright and rallying; rousing, upbeat, forever calling the table to a banner" },
-  { name: "Sable", blurb: "cynical and cutting; sneers at the easy answer and trusts nobody's word" },
-  { name: "Bram", blurb: "gruff and bulldozing; no patience for waffle, demands you get to the point" },
-  { name: "Odette", blurb: "poised and glacial; exact, deliberate, and withering when crossed" },
-  { name: "Flint", blurb: "hot-tempered and relentless; slams the table and drives everyone toward a verdict" },
-  { name: "Wren", blurb: "soft-voiced but steel-spined; gentle phrasing wrapped around an unyielding read" },
+  { name: "Atlas", blurb: "loud and certain; drops short, final verdicts and dares you to argue back" },
+  { name: "Vesper", blurb: "dry and cutting; needles people with quiet, loaded questions that catch them out" },
+  { name: "Nova", blurb: "openly earnest; pleads, hopes out loud, and takes every betrayal to heart" },
+  { name: "Kestrel", blurb: "restless and quick; fires short, clipped jabs and never sits still" },
+  { name: "Mira", blurb: "calm and even-handed; weighs both sides out loud, then comes down hard" },
+  { name: "Juno", blurb: "steady and plain-spoken; slow to anger, hard to rattle, immovable once decided" },
+  { name: "Oracle", blurb: "quiet and ominous; drops short, strange lines that stick in your head" },
+  { name: "Cassius", blurb: "cold and lawyerly; builds one tight, careful argument and closes the case" },
+  { name: "Pip", blurb: "light and mischievous; jokes, charms, then turns on you while you're still laughing" },
+  { name: "Rook", blurb: "grim and sparing; a few heavy words that quiet the whole room" },
+  { name: "Lark", blurb: "bright and rallying; upbeat, always trying to pull the table together behind one plan" },
+  { name: "Sable", blurb: "cynical and blunt; scoffs at the easy answer and trusts no one's word" },
+  { name: "Bram", blurb: "gruff and pushy; no patience for rambling, wants you to get to the point" },
+  { name: "Odette", blurb: "poised and cold; precise, deliberate, and sharp-tongued when crossed" },
+  { name: "Flint", blurb: "hot-tempered and relentless; slams the table and pushes everyone toward a decision" },
+  { name: "Wren", blurb: "soft-spoken but firm; gentle words wrapped around a read she won't let go of" },
 ];
 
 /** Deterministic PRNG (mulberry32) seeded from a string — same match seed → same cast, so persona
@@ -81,6 +81,12 @@ export interface ProviderBundle {
   teeSigner: string;
   /** Envelope metadata to register at createMatch — MUST equal what the provider signs with. */
   providerMeta: ProviderMeta;
+  /**
+   * Cheap "is this bundle still registrable?" check for a CACHED bundle (one chain read on the live
+   * path: the provider's TEE signer still equals the probed one). Absent on the mock path — a local
+   * key can never rotate, so a cached mock bundle is always valid.
+   */
+  revalidate?: () => Promise<boolean>;
 }
 
 export async function buildProvider(): Promise<ProviderBundle> {
@@ -110,11 +116,56 @@ export async function buildProvider(): Promise<ProviderBundle> {
     const teeSigner = provider.teeSignerAddress;
     // Use the provider's REAL probed envelope meta (real tlsFingerprint), not the mock placeholder.
     if (!provider.meta) throw new Error("live provider meta was not captured at setup");
-    return { provider, isMock: false, teeSigner, providerMeta: provider.meta };
+    return {
+      provider,
+      isMock: false,
+      teeSigner,
+      providerMeta: provider.meta,
+      revalidate: () => provider.signerUnchanged(),
+    };
   }
   // Offline-capable, credentials-free: a real local key (labeled MOCK-local).
   const mock = new MockLocalProvider(process.env.MOCK_TEE_PRIVATE_KEY);
   return { provider: mock, isMock: true, teeSigner: mock.signerAddress, providerMeta: MOCK_PROVIDER_META };
+}
+
+export interface ProviderCache {
+  /** The bundle to run the next match with — cached when still valid, freshly built otherwise. */
+  get(): Promise<ProviderBundle>;
+  /** Drop the cached bundle so the next get() rebuilds (call after a failed match: a settle that
+   *  died on "bad TEE signature" means the cached signer/meta went stale mid-round). */
+  invalidate(): void;
+}
+
+/**
+ * Reuse ONE provider bundle across rounds instead of rebuilding per match. The live build is
+ * expensive — broker setup, ledger/ack/metadata chain reads, plus a PAID probe inference with its
+ * full signature round-trip (~10-20s, measured in the client-connect → wagers-open path) — while
+ * the result (endpoint, teeSigner, envelope meta, throttle) is constant per provider. Each get()
+ * re-checks validity via the bundle's own `revalidate` (live: one chain read that the TEE signer
+ * hasn't rotated) and rebuilds only when it fails, so a provider restart can't wedge settle().
+ */
+export function createProviderCache(build: () => Promise<ProviderBundle> = buildProvider): ProviderCache {
+  let cached: ProviderBundle | null = null;
+  return {
+    async get() {
+      if (cached) {
+        if (!cached.revalidate) return cached; // mock path: a local key never rotates
+        try {
+          if (await cached.revalidate()) return cached;
+          console.warn("[provider] TEE signer rotated — rebuilding the provider bundle");
+        } catch (e) {
+          console.warn("[provider] revalidation failed — rebuilding the provider bundle:", (e as Error).message);
+        }
+        cached = null;
+      }
+      cached = await build();
+      return cached;
+    },
+    invalidate() {
+      cached = null;
+    },
+  };
 }
 
 /** Mock provider metadata (offline path). Live matches register the provider's probed meta. */

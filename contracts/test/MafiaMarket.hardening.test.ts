@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { mineUpTo } from "@nomicfoundation/hardhat-network-helpers";
-import { defaultSchedule, createParams, buildSettlement, deployMarket, fundBettors, openFaction, FACTION_OUT } from "./helpers/market";
+import { defaultSchedule, createParams, buildSettlement, deployMarket, fundBettors, factionIdx, FACTION_OUT } from "./helpers/market";
 
 const SEED = "0x" + "ab".repeat(32);
 const CID = "0x" + "cd".repeat(32);
@@ -33,7 +33,7 @@ describe("MafiaMarket — settle access control (reveal front-run fix)", () => {
     const fx = await buildSettlement(SEED, 5, "hard-acl", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "hard-acl", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     await market.connect(alice).betProp(0, faction, MAFIA, ethers.parseEther("1"));
     await market.connect(bob).betProp(0, faction, TOWN, ethers.parseEther("1"));
@@ -75,7 +75,7 @@ describe("MafiaMarket — role composition enforcement", () => {
     const fx = await buildSettlement(SEED, 5, "hard-comp-ok", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "hard-comp-ok", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     await market.connect(alice).betProp(0, faction, MAFIA, ethers.parseEther("1"));
     await market.connect(bob).betProp(0, faction, TOWN, ethers.parseEther("1"));
@@ -148,7 +148,7 @@ describe("MafiaMarket — conservation for Void (mistrial + empty-winner) with m
     const fx = await buildSettlement(SEED, 5, "cons-draw", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "cons-draw", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     const amts = ["1.3", "0.7", "2.1", "0.05"];
     for (let i = 0; i < bettors.length; i++) {
@@ -180,7 +180,7 @@ describe("MafiaMarket — conservation for Void (mistrial + empty-winner) with m
     const fx = await buildSettlement(SEED, 5, "cons-void", teeSigner);
     const sched = await defaultSchedule(ethers.provider);
     await market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce: "cons-void", playerCount: 5, schedule: sched }));
-    const faction = await openFaction(market, owner);
+    const faction = await factionIdx(market);
     await mineUpTo(sched.bettingOpenBlock);
     // Everyone bets the LOSING faction → winning pool empty → Void.
     const loseOut = fx.mafiaWins ? TOWN : MAFIA;

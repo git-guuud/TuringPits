@@ -26,11 +26,12 @@ async function opened(nonce: string, n = 5) {
   const sched = await defaultSchedule(ethers.provider);
   await ctx.market.createMatch(createParams({ roleCommit: fx.commit, teeSigner: teeSigner.address, nonce, playerCount: n, schedule: sched }));
   await mineUpTo(sched.bettingOpenBlock);
-  // createMatch lays out props[0] RoundVotedOut r1, props[1] NightKill r1 (the per-seat PlayerFate market
-  // is not floated for now). This suite only ever opens NightKill rounds (never VotedOut), so its markets
-  // append sequentially right after NK r1: round 1 at 1, then each later round at `round` (the first
-  // openNightKillRound lands at the propCount==2 tail). Outcomes: seat 0..n-1, then "no one" == n.
-  const nkIdx = (round: number) => (round === 1 ? 1 : round);
+  // createMatch lays out props[0] RoundVotedOut r1, props[1] NightKill r1, props[2] Faction, props[3]
+  // MafiaSeat (the per-seat PlayerFate market is not floated for now). This suite only ever opens
+  // NightKill rounds (never VotedOut), so its later rounds append past the four seeded markets: round 1
+  // at 1, then each later round at `round + 2` (the first openNightKillRound lands at the propCount==4
+  // tail). Outcomes: seat 0..n-1, then "no one" == n.
+  const nkIdx = (round: number) => (round === 1 ? 1 : round + 2);
   const noOne = n; // the last outcome index (playerCount): kill blocked / a quiet night
   return { ...ctx, fx, sched, teeSigner, matchId: 0, n, nkIdx, noOne };
 }
@@ -38,7 +39,7 @@ async function opened(nonce: string, n = 5) {
 describe("MafiaMarket — per-round 'night kill' side markets (props): creation", () => {
   it("creates the round-1 NightKill market after the RoundVotedOut market (index == 1, param == 1, n+1 outcomes)", async () => {
     const { market, n, nkIdx, noOne } = await opened("nk-create");
-    expect(await market.propCount(0)).to.equal(2); // VO r1 + NK r1 (no PlayerFate market)
+    expect(await market.propCount(0)).to.equal(4); // VO r1 + NK r1 + Faction + MafiaSeat
     expect(await market.nightKillRoundsOpened(0)).to.equal(1); // round 1 open up front
     // NK r1 sits right after the round-1 RoundVotedOut market.
     expect((await market.getProp(0, 0)).kind).to.equal(KIND.RoundVotedOut);
@@ -52,15 +53,16 @@ describe("MafiaMarket — per-round 'night kill' side markets (props): creation"
     expect(pr.state).to.equal(PS.Unset);
   });
 
-  it("PropsCreated counts exactly the two round-1 markets (RoundVotedOut + NightKill == 2), independent of playerCount", async () => {
+  it("PropsCreated counts the four seeded markets (VO r1 + NK r1 + Faction + MafiaSeat == 4), independent of playerCount", async () => {
     const { market } = await deploy();
     const teeSigner = ethers.Wallet.createRandom();
     const sched = await defaultSchedule(ethers.provider);
     const commit = "0x" + "aa".repeat(32);
-    // Any seat count → 1 RoundVotedOut + 1 NightKill = 2 side markets at creation (no per-seat fate market).
+    // Any seat count → 1 RoundVotedOut + 1 NightKill + Faction + MafiaSeat = 4 markets at creation
+    // (no per-seat fate market).
     await expect(market.createMatch(createParams({ roleCommit: commit, teeSigner: teeSigner.address, nonce: "nk-7", playerCount: 7, schedule: sched })))
-      .to.emit(market, "PropsCreated").withArgs(0, 2);
-    expect(await market.propCount(0)).to.equal(2);
+      .to.emit(market, "PropsCreated").withArgs(0, 4);
+    expect(await market.propCount(0)).to.equal(4);
     const nk = await market.getProp(0, 1); // second market == round-1 NightKill
     expect(nk.kind).to.equal(KIND.NightKill);
     expect(nk.param).to.equal(1);
@@ -71,10 +73,10 @@ describe("MafiaMarket — per-round 'night kill' side markets (props): creation"
 describe("MafiaMarket — per-round 'night kill' side markets (props): opening later rounds", () => {
   it("openNightKillRound appends the next round's market and bumps the counter", async () => {
     const { market, owner, n, nkIdx } = await opened("nk-open");
-    // Round 2: appended at the tail (propIdx 2), tagged param 2.
+    // Round 2: appended at the tail (propIdx 4, past the four seeded markets), tagged param 2.
     await expect(market.connect(owner).openNightKillRound(0)).to.emit(market, "NightKillRoundOpened").withArgs(0, 2, nkIdx(2));
     expect(await market.nightKillRoundsOpened(0)).to.equal(2);
-    expect(await market.propCount(0)).to.equal(3);
+    expect(await market.propCount(0)).to.equal(5);
     const r2 = await market.getProp(0, nkIdx(2));
     expect(r2.kind).to.equal(KIND.NightKill);
     expect(r2.param).to.equal(2);
@@ -96,11 +98,11 @@ describe("MafiaMarket — per-round 'night kill' side markets (props): opening l
     const { market, owner, n } = await opened("nk-interleave");
     // Open round 2 for BOTH kinds in either order; the tail grows and the two kinds interleave, so an
     // index formula would break — the layout is discoverable only by reading each prop's (kind, param).
-    await market.connect(owner).openVotedOutRound(0); // VO r2 at idx 2
-    await market.connect(owner).openNightKillRound(0); // NK r2 at idx 3
+    await market.connect(owner).openVotedOutRound(0); // VO r2 at idx 4
+    await market.connect(owner).openNightKillRound(0); // NK r2 at idx 5
     expect(await market.votedOutRoundsOpened(0)).to.equal(2);
     expect(await market.nightKillRoundsOpened(0)).to.equal(2);
-    expect(await market.propCount(0)).to.equal(4);
+    expect(await market.propCount(0)).to.equal(6);
     // Find each round-2 market by scanning — the robust addressing the server/UI use.
     const count = Number(await market.propCount(0));
     let voR2 = -1, nkR2 = -1;
@@ -109,8 +111,8 @@ describe("MafiaMarket — per-round 'night kill' side markets (props): opening l
       if (Number(pr.kind) === KIND.RoundVotedOut && Number(pr.param) === 2) voR2 = i;
       if (Number(pr.kind) === KIND.NightKill && Number(pr.param) === 2) nkR2 = i;
     }
-    expect(voR2).to.equal(2);
-    expect(nkR2).to.equal(3);
+    expect(voR2).to.equal(4);
+    expect(nkR2).to.equal(5);
   });
 });
 
